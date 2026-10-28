@@ -2091,6 +2091,17 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
         .then(|| app_state.store.restore_latest(&session_id))
         .flatten()
     {
+        // The held plan is the daemon's, on disk too: the plan file the CLI
+        // will build from goes back from the restore marker to the plan
+        // being re-presented, so an approval never builds from the marker.
+        if let (Some(plan_file), Some(body)) = (
+            payload.pointer("/tool_input/planFilePath").and_then(Value::as_str),
+            app_state.store.get(&session_id).and_then(|s| s.revisions.last().map(|r| r.raw_plan_markdown.clone())),
+        ) {
+            if unprime_plan_file(plan_file, &body) {
+                tracing::info!(session_id = %session_id, "restore: wrote the re-presented plan back over the marker");
+            }
+        }
         (upsert.version_number, upsert.is_new_session)
     } else {
         if restore_requested && !session_existed {
@@ -2340,6 +2351,7 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
                             .set_attach_state(&session_id, AttachState::Idle);
                         tracing::info!(session_id = %session_id, "Ambient: decision window elapsed — auto-approving");
                         app_state.store.set_status(&session_id, SessionStatus::Approved);
+                        asks::note_plan_approved(&session_id);
                         allow_response(
                             "Auto-approved (Ambient mode — the plan was not opened for review within the decision window).",
                         )
@@ -7457,6 +7469,9 @@ async fn approve_plan(
     // plan will arrive to consume the mode, so drop it here to avoid leaks.
     let _ = expected_modes.take(&session_id);
     store.set_status(&session_id, SessionStatus::Approved);
+    // The CLI asks its own "proceed?" after the hook's allow; Approve answers
+    // that too (asks.rs), so Approve & build never ends in the native prompt.
+    asks::note_plan_approved(&session_id);
     let _ = tx.send(allow_response("Reviewer approved via Redline."));
     store.set_attach_state(&session_id, AttachState::Idle);
     tracing::info!(session_id = %session_id, "approve_plan fired");
@@ -8511,6 +8526,18 @@ fn prime_plan_file(plan_file: &str, session_id: &str) -> bool {
         return false;
     }
     std::fs::write(path, format!("{REDLINE_RESTORE_PREFIX}:{session_id} -->\n")).is_ok()
+}
+
+/// Undo [`prime_plan_file`] once the restore has fired: the plan file goes
+/// back to the plan being re-presented. Only over a file that still holds a
+/// restore marker — never over a plan the agent wrote since.
+fn unprime_plan_file(plan_file: &str, body: &str) -> bool {
+    let path = std::path::Path::new(plan_file);
+    let Ok(current) = std::fs::read_to_string(path) else { return false };
+    if !current.trim_start().starts_with(REDLINE_RESTORE_PREFIX) || body.trim().is_empty() {
+        return false;
+    }
+    std::fs::write(path, body).is_ok()
 }
 
 /// Everything a "Restore plan session" needs to know, resolved against the
@@ -11702,6 +11729,7 @@ pub fn run() {
             convo::convo_prebind,
             convo::convo_set_mode,
             convo::convo_set_model,
+            convo::convo_titles,
             asks::convo_answer_ask,
             pty::pty_submit,
             pty::pty_interrupt,

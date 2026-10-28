@@ -246,13 +246,25 @@ export function useSessionTerminals(enabled: boolean): {
     };
     keep(listen<TermAttention>("term-attention", (e) => take([e.payload])));
     keep(listen<ConvoBoundNotice>(CONVO_BOUND_EVENT, (e) => bind([e.payload])));
-    keep(
-      listen<ConvoTitleNotice>(CONVO_TITLE_EVENT, (e) => {
-        const { terminalId, sessionId, title } = e.payload;
-        bind([{ sessionId, terminalId }]);
-        setTitles((prev) => (prev.get(terminalId) === title ? prev : new Map(prev).set(terminalId, title)));
-      }),
-    );
+    const name = (rows: readonly ConvoTitleNotice[]) => {
+      bind(rows.map(({ sessionId, terminalId }) => ({ sessionId, terminalId })));
+      setTitles((prev) => {
+        let next: Map<string, string> | null = null;
+        for (const { terminalId, title } of rows) {
+          if ((next ?? prev).get(terminalId) === title) continue;
+          next ??= new Map(prev);
+          next.set(terminalId, title);
+        }
+        return next ?? prev;
+      });
+    };
+    keep(listen<ConvoTitleNotice>(CONVO_TITLE_EVENT, (e) => name([e.payload])));
+    // The title event fires only on a change: a reload reads them back.
+    void invoke<ConvoTitleNotice[]>("convo_titles")
+      .then((rows) => {
+        if (!gone && Array.isArray(rows) && rows.length) name(rows);
+      })
+      .catch(() => {});
     void invoke<TermAttention[]>("term_attention_snapshot")
       .then((rows) => {
         if (!gone && Array.isArray(rows)) take(rows);

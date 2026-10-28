@@ -24,16 +24,28 @@
 //!   for an hour.
 //! - A card arms only while the terminal is bound to the asking session and
 //!   a conversation is subscribed (`convo::open_ask`); otherwise `{}`.
-//! - ExitPlanMode passes through: its PreToolUse hook (`/v1/plan`) owns the
-//!   plan, and the CLI's plan dialog that follows is Redline's existing
-//!   menu-skip keystroke's business. A PermissionRequest for AskUserQuestion
-//!   (it fires when the question was released to the TUI) passes through too.
+//! - ExitPlanMode's PreToolUse hook (`/v1/plan`) owns the plan. A PreToolUse
+//!   `allow` does NOT spare it the CLI's own "Ready to code? Would you like to
+//!   proceed?" dialog (every Approve in the walk's transcripts was followed
+//!   by a `user_temporary` accept typed in the TUI): the PermissionRequest
+//!   that comes with that dialog is answered here. Approved in Redline a
+//!   moment before ([`note_plan_approved`]), it is allowed at once, with the
+//!   payload's own mode switch (the dialog's first choice), so Approve ends
+//!   in a build and never in the native prompt. Otherwise it becomes a card
+//!   ("Ready to build this plan?"), so the stage is never left with a bare
+//!   "needs you". A PermissionRequest for AskUserQuestion (it fires when the
+//!   question was released to the TUI) passes through.
+//!   UNVERIFIED on the rig: that PermissionRequest fires for ExitPlanMode on
+//!   the current CLI and that `allow` + `setMode` dismisses this dialog (S4
+//!   measured it on Bash). `scripts/verify-convo-mirror.py` is the check.
 //!
 //! A hold that ends without a stage answer (the connection dropped, the
 //! hold ran out) closes its card through [`AskGuard`], modelled on the
 //! review hold's `ReviewDetachGuard`.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -91,7 +103,12 @@ impl Request {
 
     /// Asks the stage leaves to their own hooks and dialogs (module note).
     fn passes_through(&self) -> bool {
-        self.tool_name == "ExitPlanMode" || (self.kind == Kind::Permission && self.tool_name == "AskUserQuestion")
+        self.kind == Kind::Permission && self.tool_name == "AskUserQuestion"
+    }
+
+    /// The CLI asking leave to build a plan Redline just approved.
+    fn is_approved_plan_exit(&self) -> bool {
+        self.kind == Kind::Permission && self.tool_name == "ExitPlanMode" && take_plan_approved(&self.session_id)
     }
 
     fn hold(&self) -> Duration {
@@ -217,6 +234,47 @@ fn mode_name(mode: &str) -> &str {
     }
 }
 
+// ── Approve & build answers the CLI's own proceed dialog ─────────────────────
+
+/// How long an approval answers the PermissionRequest that follows it. The
+/// request lands within a second or two of the PreToolUse `allow` (the CLI
+/// asks right after the hook returns); a minute leaves room for a slow
+/// machine and none for a later, unrelated ExitPlanMode.
+const APPROVAL_WINDOW: Duration = Duration::from_secs(60);
+
+fn approvals() -> &'static Mutex<HashMap<String, Instant>> {
+    static APPROVALS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    APPROVALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Redline just let `session_id`'s ExitPlanMode through (Approve & build, an
+/// Ambient auto-approve): the CLI's proceed dialog that follows is answered
+/// for the reviewer, once.
+pub(crate) fn note_plan_approved(session_id: &str) {
+    let mut map = approvals().lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, at| at.elapsed() < APPROVAL_WINDOW);
+    map.insert(session_id.to_string(), Instant::now());
+}
+
+/// One-shot: true when `session_id` was approved within the window.
+fn take_plan_approved(session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let mut map = approvals().lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(session_id).is_some_and(|at| at.elapsed() < APPROVAL_WINDOW)
+}
+
+/// The reply that lets an approved plan's ExitPlanMode run: allow, switching
+/// to the mode the dialog's first choice would (the payload's own `setMode`
+/// suggestion), or accept-edits when the payload offers none.
+fn plan_approved_reply(suggestions: Option<&[Value]>) -> Value {
+    let set_mode = suggestions
+        .and_then(|all| all.iter().find(|s| s.get("type").and_then(Value::as_str) == Some("setMode")).cloned())
+        .unwrap_or_else(|| json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"}));
+    json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedPermissions": [set_mode]}}})
+}
+
 /// The hook's reply for a stage answer, and the outcome it records. The
 /// shapes are the CLI's (experiment (m), S4/S5):
 /// - permission: `hookSpecificOutput.decision` = `{behavior: allow}`, plus
@@ -299,6 +357,10 @@ pub(crate) async fn handle_ask(
     let Some(request) = Request::from_payload(&payload) else { return empty() };
     if request.passes_through() {
         return empty();
+    }
+    if request.is_approved_plan_exit() {
+        tracing::info!(session_id = %request.session_id, "answering the CLI's proceed dialog for a plan approved in Redline");
+        return Json(plan_approved_reply(request.suggestions.as_deref()));
     }
     let app = app_state.app_handle.clone();
     let ask_id = uuid::Uuid::new_v4().to_string();
@@ -404,9 +466,32 @@ mod tests {
     }
 
     #[test]
-    fn plan_and_released_question_asks_pass_through() {
+    fn an_approved_plan_exit_is_allowed_once_with_the_dialogs_mode_and_an_unapproved_one_is_a_card() {
         let parse = |v: Value| Request::from_payload(&v).unwrap();
-        assert!(parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode"})).passes_through());
+        let exit = |sid: &str| parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode", "session_id": sid}));
+        // Not approved: no longer passed through — it becomes a card.
+        assert!(!exit("asks-test-unapproved").passes_through());
+        assert!(!exit("asks-test-unapproved").is_approved_plan_exit());
+        note_plan_approved("asks-test-approved");
+        assert!(exit("asks-test-approved").is_approved_plan_exit());
+        assert!(!exit("asks-test-approved").is_approved_plan_exit(), "one approval answers one dialog");
+        // Another tool of the same session is untouched by the approval.
+        note_plan_approved("asks-test-bash");
+        let bash = parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "session_id": "asks-test-bash"}));
+        assert!(!bash.is_approved_plan_exit());
+        assert!(!exit("").is_approved_plan_exit());
+        // The payload's own mode switch, else accept-edits.
+        let offered = [json!({"type": "addDirectories", "directories": ["/x"]}), json!({"type": "setMode", "mode": "auto", "destination": "session"})];
+        assert_eq!(
+            plan_approved_reply(Some(&offered)),
+            json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedPermissions": [{"type": "setMode", "mode": "auto", "destination": "session"}]}}})
+        );
+        assert_eq!(plan_approved_reply(None)["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["mode"], "acceptEdits");
+    }
+
+    #[test]
+    fn released_question_asks_pass_through() {
+        let parse = |v: Value| Request::from_payload(&v).unwrap();
         assert!(parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion"})).passes_through());
         assert!(!parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash"})).passes_through());
         assert!(!parse(json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion"})).passes_through());

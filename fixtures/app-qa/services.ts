@@ -713,6 +713,8 @@ const handlers: Record<string, Handler> = {
       ports: [],
     })),
   term_attention_snapshot: () => [...state.attention.values()],
+  // No CLI has named its session in the fixture.
+  convo_titles: () => [],
 
   // The conversation mirror (src/components/agent/convo/api.ts).
   convo_subscribe: (a) => {

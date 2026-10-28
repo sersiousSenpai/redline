@@ -1294,6 +1294,26 @@ pub fn convo_unsubscribe(state: tauri::State<'_, ConvoState>, terminal_id: Strin
     }
 }
 
+/// Every bound terminal's session title, as `TITLE_EVENT` last announced it.
+/// The event only fires on a change, so a reloaded webview reads them back
+/// here at boot (`useSessionTerminals`) instead of losing each terminal's
+/// name until its session renames itself again.
+#[tauri::command]
+pub fn convo_titles(state: tauri::State<'_, ConvoState>) -> Vec<TitleNotice> {
+    titles_of(&state)
+}
+
+fn titles_of(state: &ConvoState) -> Vec<TitleNotice> {
+    state
+        .terms()
+        .into_iter()
+        .filter_map(|(terminal_id, term)| {
+            let t = lock(&term);
+            Some(TitleNotice { terminal_id, session_id: t.binding.as_ref()?.session_id.clone(), title: t.title.clone()? })
+        })
+        .collect()
+}
+
 /// Older events, before `(epoch, before_offset)`: one 1 MB window of that
 /// epoch's transcript (widened to whole lines), or the end of the previous
 /// epoch's when `before_offset` is its start. Off the main thread

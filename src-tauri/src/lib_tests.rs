@@ -492,6 +492,14 @@ fn plan_file_is_the_last_one_the_transcript_names() {
     let written = std::fs::read_to_string(&plan).unwrap();
     assert_eq!(restore_handshake(&written), Some(Some("abc-123".into())));
 
+    // Once the restore fires, the re-presented plan goes back over the
+    // marker — and never over a plan the agent wrote since.
+    assert!(unprime_plan_file(plan.to_str().unwrap(), "# The held plan\n"));
+    assert_eq!(std::fs::read_to_string(&plan).unwrap(), "# The held plan\n");
+    assert!(!unprime_plan_file(plan.to_str().unwrap(), "# Something else\n"), "no marker, no write");
+    assert_eq!(std::fs::read_to_string(&plan).unwrap(), "# The held plan\n");
+    assert!(!unprime_plan_file(dir.join("absent.md").to_str().unwrap(), "# x\n"));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

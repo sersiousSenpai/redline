@@ -716,3 +716,22 @@ fn steer_types_it_now_or_heads_the_queue() {
     codex.working = false;
     assert_eq!(codex.take_due(ready(), now).map(|i| i.id), Some("y".into()), "the interrupted turn's end delivers it");
 }
+
+/// A reloaded webview reads every bound terminal's session title back
+/// (`convo_titles`): the title event fires only on a change.
+#[test]
+fn titles_of_lists_bound_terminals_with_a_title() {
+    let state = ConvoState::default();
+    let named = state.term_or_new("t-named");
+    {
+        let mut t = lock(&named);
+        t.binding = Some(bind::Binding { session_id: "s1".into(), transcript: PathBuf::from("/tmp/s1.jsonl"), epoch: 0, harness: bind::Harness::Claude });
+        t.title = Some("Fix the login flow".into());
+    }
+    let untitled = state.term_or_new("t-untitled");
+    lock(&untitled).binding = Some(bind::Binding { session_id: "s2".into(), transcript: PathBuf::from("/tmp/s2.jsonl"), epoch: 0, harness: bind::Harness::Claude });
+    lock(&state.term_or_new("t-unbound")).title = Some("orphan".into());
+    let titles = titles_of(&state);
+    assert_eq!(titles.len(), 1);
+    assert_eq!((titles[0].terminal_id.as_str(), titles[0].session_id.as_str(), titles[0].title.as_str()), ("t-named", "s1", "Fix the login flow"));
+}
