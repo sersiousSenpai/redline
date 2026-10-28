@@ -163,12 +163,14 @@ pub fn activity_from(
 /// An OUTSTANDING rate limit — the dead air the activity line exists to fill.
 ///
 /// Deliberately not "a `rate_limit_event` arrived": every captured turn emits
-/// one, including a 1.4-second one, with `status: "allowed"`. Only a status
-/// that is *not* `allowed` means the turn is actually waiting.
+/// one, including a 1.4-second one, with `status: "allowed"`. Nor is the
+/// CLI's `allowed_warning` — a window nearly used, the request still going
+/// through (D28: it read as "Rate limited" over a reply that was streaming).
+/// Only a status that refuses the request means the turn is actually waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimit {
-    /// The CLI's own word — `rejected`, `warning`, … Never `allowed`.
+    /// The CLI's own word — `rejected`, … Never `allowed` or `allowed_warning`.
     pub status: String,
     /// Unix **seconds** (the CLI's unit, not millis) when the window resets.
     pub resets_at: Option<i64>,
@@ -463,7 +465,8 @@ impl TurnMeter {
     fn observe_rate_limit(&mut self, v: &Value) -> bool {
         let info = v.get("rate_limit_info").unwrap_or(&Value::Null);
         let status = info.get("status").and_then(Value::as_str).unwrap_or("");
-        if status.is_empty() || status == "allowed" {
+        // A warning is the request going through all the same.
+        if status.is_empty() || status == "allowed" || status == "allowed_warning" {
             return self.clear_rate_limit();
         }
         let next = RateLimit {
@@ -922,6 +925,15 @@ mod tests {
             "rate_limit_info": {"status": "allowed", "resetsAt": 1788574800_i64}
         });
         assert!(!m.observe(&allowed), "the routine heartbeat is not a change");
+        assert_eq!(m.rate_limited, None);
+
+        // A window nearly used: the request still goes through, so nothing
+        // is outstanding (D28 — it is not "Rate limited" over a live reply).
+        let warning = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1788574800_i64, "rateLimitType": "five_hour"}
+        });
+        assert!(!m.observe(&warning));
         assert_eq!(m.rate_limited, None);
 
         let rejected = serde_json::json!({

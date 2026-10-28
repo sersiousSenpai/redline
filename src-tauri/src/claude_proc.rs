@@ -556,6 +556,37 @@ pub fn is_transient(error: &str) -> bool {
         || e.contains("session limit")
 }
 
+/// A turn the provider's rate, usage or session limit refused. A subset of
+/// `is_transient`, so `fork.rs` still retries it once before it is said.
+pub fn is_rate_limited(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("rate limit") || e.contains("rate_limit") || e.contains("usage limit") || e.contains("session limit")
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// The one line a limit that failed a turn reads as: when to send again, in
+/// the CLI's own words when it gave them ("resets 12:30pm"), else from the
+/// reset it reported (`…usage limit reached|<unix seconds>`), else plainly.
+pub fn rate_limit_line(error: &str, now: i64) -> String {
+    let lower = error.to_lowercase();
+    if let Some(at) = lower.find("resets") {
+        let when: String = error[at..].lines().next().unwrap_or("").trim().trim_end_matches(['.', ')']).to_string();
+        if when.len() > "resets".len() {
+            return format!("Rate limited by the provider — send again once it {when}.");
+        }
+    }
+    let reset = error.rsplit('|').next().and_then(|tail| tail.trim().parse::<i64>().ok()).filter(|at| *at > now);
+    if let Some(at) = reset {
+        let minutes = ((at - now) + 59) / 60;
+        let wait = if minutes >= 60 { format!("{}h {}m", minutes / 60, minutes % 60) } else { format!("{minutes}m") };
+        return format!("Rate limited by the provider — send again in {wait}.");
+    }
+    "Rate limited by the provider — send again once the limit resets.".to_string()
+}
+
 /// The only two things that genuinely differ between surfaces when a turn
 /// fails: how the surface names itself in the friction table, and how the
 /// overflow sentence refers to the conversation it just reset. The branch
@@ -581,6 +612,9 @@ pub struct TurnErrorCopy<'a> {
 /// - EXPLICIT context overflow -> run `reset` (the surface's own "forget the
 ///   stored session id"), so the next turn starts fresh instead of
 ///   re-`--resume`-ing an over-limit context forever, and say so.
+/// - RATE or USAGE LIMIT that failed the turn (the CLI's own retries, and
+///   `fork.rs`'s, spent) -> one line that says so and when to send again
+///   (D28: a limit is said once, here, never as live-row words mid-turn).
 /// - TRANSIENT model/API error -> keep the session (it is fine) and tell the
 ///   user plainly to retry. `fork.rs` additionally retries this one itself.
 /// - Anything else -> pass through unchanged. Callers depend on that: it is
@@ -616,6 +650,10 @@ pub fn describe_turn_error(
         reset();
         let _ = db.record_friction("missing_conversation", Some(copy.surface), copy.subject, Some(error));
         return format!("The earlier conversation couldn't be found on disk, so I've reset it — send again and {}.", copy.next);
+    }
+    if is_rate_limited(error) {
+        let _ = db.record_friction("rate_limited", Some(copy.surface), copy.subject, Some(error));
+        return rate_limit_line(error, now_secs());
     }
     if is_transient(error) {
         let _ = db.record_friction(
@@ -1138,6 +1176,30 @@ mod tests {
     /// The bug this whole path exists to prevent: a raw machine token reaching
     /// a reader as if it were the model's reply. Whatever else changes, the
     /// humanised string must never contain one.
+    /// D28: a limit that failed the turn is said once, as one line, with when
+    /// to send again; never as words on the live row.
+    #[test]
+    fn a_rate_limit_that_failed_the_turn_is_one_line_with_when_to_send_again() {
+        assert!(is_rate_limited("Claude AI usage limit reached|1788574800"));
+        assert!(is_rate_limited("You've hit your session limit \u{b7} resets 12:30pm"));
+        assert!(is_rate_limited("API Error: 429 {\"type\":\"rate_limit_error\"}"));
+        assert!(!is_rate_limited("model overloaded, please retry"));
+        // Still transient: `fork.rs` retries it once before it is said.
+        assert!(is_transient("Claude AI usage limit reached|1788574800"));
+        let now = 1_788_574_800 - (2 * 3600 + 14 * 60);
+        assert_eq!(rate_limit_line("Claude AI usage limit reached|1788574800", now), "Rate limited by the provider — send again in 2h 14m.");
+        assert_eq!(rate_limit_line("Claude AI usage limit reached|1788574800", 1_788_574_800 - 90), "Rate limited by the provider — send again in 2m.");
+        assert_eq!(rate_limit_line("You've hit your session limit \u{b7} resets 12:30pm", now), "Rate limited by the provider — send again once it resets 12:30pm.");
+        assert_eq!(rate_limit_line("rate_limit_error", now), "Rate limited by the provider — send again once the limit resets.");
+        for line in [rate_limit_line("Claude AI usage limit reached|1788574800", now), rate_limit_line("x", now)] {
+            assert!(!line.contains('\n') && !line.contains('|'), "one line, no machine token: {line}");
+        }
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let copy = TurnErrorCopy { surface: "companion", subject: Some("c-1"), noun: "conversation", next: "I'll start fresh" };
+        let said = describe_turn_error(&db, copy, "Claude AI usage limit reached|1", || panic!("a limit never resets the session"));
+        assert_eq!(said, "Rate limited by the provider — send again once the limit resets.");
+    }
+
     #[test]
     fn describe_turn_error_never_leaks_the_machine_token() {
         let db = crate::db::Database::open_in_memory().unwrap();
