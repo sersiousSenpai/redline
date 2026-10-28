@@ -77,12 +77,20 @@ export interface TermSignals {
  *  its prompt with no hook state is idle, not "running". */
 const AGENT_COMMS = new Set(["claude", "codex"]);
 
+/** The kernel's name for Claude Code's native build: the installer links
+ *  `claude` to `…/claude/versions/2.1.312`, and exec names the process after
+ *  the file it resolved to, so `pty_procs` reads its version number (`ps -o
+ *  ucomm` agrees). Without this an agent idle at its prompt read as a running
+ *  job — "working" in every sidebar row and tab dot. */
+const VERSION_COMM = /^\d+\.\d+\.\d+/;
+
 /** Whether the foreground program is an agent. A `node` that has spoken
- *  through the hooks is one too — an npm-installed CLI runs as `node`. */
+ *  through the hooks is one too — an npm-installed CLI runs as `node` — and
+ *  so is a native build named for its version. */
 export function isAgentComm(comm: string | null, hasAttention: boolean): boolean {
   if (!comm) return false;
   const name = comm.toLowerCase();
-  return AGENT_COMMS.has(name) || (hasAttention && name === "node");
+  return AGENT_COMMS.has(name) || VERSION_COMM.test(name) || (hasAttention && name === "node");
 }
 
 /** The first state that applies, in priority order. `exited` comes FIRST,

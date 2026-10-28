@@ -523,7 +523,7 @@ describe("terminals", () => {
     s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY } };
     const kept = reduce(s, { type: "closeWall", paneId: "p2", keep: true });
     expect(tabKinds(kept)).toEqual(["door"]);
-    expect(set(kept).closed).toHaveLength(0);
+    expect(set(kept).closed).toHaveLength(1);
     expect(kept.stowed).toEqual(["a", "b"]);
     expect(kept.owners).toEqual({ a: HOME_KEY, b: HOME_KEY });
     // A kept terminal comes back onto a wall on a click.
@@ -534,6 +534,39 @@ describe("terminals", () => {
     expect(gone.owners).toEqual({});
     expect(gone.stowed).toEqual([]);
     expect(reduce(s, { type: "closeWall", paneId: "p1", keep: true })).toBe(s);
+  });
+
+  it("⌘⇧T reopens a wall closed with Keep running, with the terminals it kept that still are", () => {
+    let s = home(door(1), wall(["a", "b", "c"]));
+    s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY, c: HOME_KEY } };
+    s = reduce(s, { type: "closeWall", paneId: "p2", keep: true });
+    // Since: b went back onto a wall of its own; c exited (prune drops it).
+    s = reduce(s, { type: "revealTerminal", ptyId: "b" });
+    s = reduce(s, { type: "prune", liveSessions: [], livePtys: ["a", "b"] });
+    s = reduce(s, { type: "reopenClosed" });
+    const reopened = set(s).panes[set(s).tabs[set(s).activeTabId!].focusedPaneId];
+    expect(reopened).toMatchObject({ kind: "terminals", data: { tiles: ["a"] } });
+    expect(s.stowed).toEqual([]);
+    expect(s.owners.a).toBe(HOME_KEY);
+    // b stays where it was put back: one tile per terminal.
+    expect(Object.values(set(s).panes).filter((p) => p.kind === "terminals" && p.data.tiles.includes("b"))).toHaveLength(1);
+  });
+
+  it("a kept wall whose terminals all went is skipped for the tab closed before it", () => {
+    let s = home(door(1), file("/a.ts"), wall(["a"]));
+    s = { ...s, owners: { a: HOME_KEY } };
+    s = reduce(s, { type: "closeTab", tabId: "t2" });
+    s = reduce(s, { type: "closeWall", paneId: "p3", keep: true });
+    s = reduce(s, { type: "prune", liveSessions: [], livePtys: [] });
+    s = reduce(s, { type: "reopenClosed" });
+    expect(kinds(s)).toEqual(["file"]);
+    expect(set(s).closed).toHaveLength(0);
+  });
+
+  it("a wall terminated is never remembered", () => {
+    let s = home(door(1), wall(["a"]));
+    s = reduce(s, { type: "closeWall", paneId: "p2", keep: false });
+    expect(set(s).closed).toHaveLength(0);
   });
 
   it("a wall the component empties closes without a closed entry", () => {

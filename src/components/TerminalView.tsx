@@ -14,7 +14,7 @@ import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
 import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
-import { isInterruptInput, terminalInputOrigin } from "../lib/terminalInput";
+import { isInterruptInput, resumeRendering, terminalInputOrigin } from "../lib/terminalInput";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import { revealMayFocus, spawnDeferred, tapPtyOutput } from "../lib/terminalSeams";
 import { fileExists, findFileLinks, homeFolder, openFileLink } from "../lib/fileLinks";
@@ -61,6 +61,10 @@ interface TerminalViewProps {
   /** The user pressed Esc or Ctrl-C in this terminal. An agent interrupted
    *  that way fires no hook at all, so the host clears its "working" here. */
   onInterrupt?: (id: string) => void;
+  /** What the user typed or pasted into this terminal (never xterm's own
+   *  replies to the program's queries): the host reads an answer to an
+   *  agent's question from it (`isAnswerInput`). */
+  onUserData?: (id: string, data: string) => void;
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
@@ -255,6 +259,7 @@ export const TerminalView = memo(function TerminalView({
   onPaneFocus,
   onUserInput,
   onInterrupt,
+  onUserData,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -354,12 +359,14 @@ export const TerminalView = memo(function TerminalView({
   const onTitleRef = useRef(onTitle);
   const onUserInputRef = useRef(onUserInput);
   const onInterruptRef = useRef(onInterrupt);
+  const onUserDataRef = useRef(onUserData);
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
   onExitRef.current = onExit;
   onTitleRef.current = onTitle;
   onUserInputRef.current = onUserInput;
   onInterruptRef.current = onInterrupt;
+  onUserDataRef.current = onUserData;
 
   // Raw PTY bytes that arrived while this tab was hidden. We skip xterm's ANSI
   // parse for off-screen terminals (the dominant background cost with a fleet
@@ -557,6 +564,7 @@ export const TerminalView = memo(function TerminalView({
       const userInput = inputOrigin.takeUserInput();
       if (replaying && !userInput) return;
       if (userInput && isInterruptInput(d)) onInterruptRef.current?.(id);
+      else if (userInput) onUserDataRef.current?.(id, d);
       void invoke("pty_write", { id, data: d }).catch(() => {});
     });
     const focusThis = () => term.focus();
@@ -679,9 +687,17 @@ export const TerminalView = memo(function TerminalView({
       unregisterDrop();
       void focusPromise.then((un) => un());
       void enqueuePtyOp(id, () => invoke("pty_detach", { id, attachmentId }));
-      term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      // Disposed a task later, out of sight: xterm's Viewport schedules a
+      // scroll-area sync on a timer as it opens, and a terminal disposed
+      // before that timer fires (StrictMode's double mount, a placeholder
+      // swapped for the real tab, a tile closed as it opened) threw from
+      // `RenderService.dimensions` reading a renderer already torn down. Its
+      // GPU renderer goes first, while the terminal still stands.
+      term.element?.style.setProperty("display", "none");
+      giveGraphicsRef.current?.();
+      window.setTimeout(() => term.dispose(), 0);
     };
     // Connect once for this view's lifetime; cwd/theme/visibility are applied via
     // the effects below (and refs) without re-forking the shell. `xt` changes
@@ -843,8 +859,26 @@ export const TerminalView = memo(function TerminalView({
       // and nothing takes the caret from where the user is writing.
       const host = hostRef.current;
       if (host && focusOnShowRef.current && revealMayFocus(host)) term?.focus();
+      // And once every tile's show work has drained (queued now, it runs
+      // after the rest of the queue), one full repaint per tile, behind the
+      // drained bytes' parse (`write("", cb)` keeps xterm's order). A shown
+      // tile must never sit stale until something scrolls it.
+      deferTerminalWork(`repaint:${id}`, () => {
+        const shown = termRef.current;
+        const box = hostRef.current;
+        // Hidden again, gone, or not laid out yet: the next show repaints.
+        if (!shown || !visibleRef.current || !box || box.clientWidth === 0 || box.clientHeight === 0) return;
+        shown.write("", () => {
+          if (termRef.current !== shown || !visibleRef.current || shown.rows <= 0) return;
+          resumeRendering(shown);
+          shown.refresh(0, shown.rows - 1);
+        });
+      });
     });
-    return () => cancelTerminalWork(key);
+    return () => {
+      cancelTerminalWork(key);
+      cancelTerminalWork(`repaint:${id}`);
+    };
   }, [visible, id, drainPending, applyFit]);
 
   return (

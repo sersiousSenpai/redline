@@ -114,8 +114,16 @@ export function TileGutter({
     apply(pendingRef.current);
   };
 
-  const end = () => {
+  const end = (e?: React.PointerEvent) => {
     if (!draggingRef.current) return;
+    // The release's own position counts: a drag whose moves were never
+    // reported (a fast flick, a synthetic drag) still lands where it let go.
+    const b = boundsRef.current;
+    if (e && e.type === "pointerup" && b) {
+      const raw = ((horizontalDrag ? e.clientX : e.clientY) - b.start) / b.length;
+      // A click on the 7px band is no drag.
+      if (Math.abs(raw - gutterRef.current.pos) * b.length > 3) pendingRef.current = clamp(raw);
+    }
     draggingRef.current = false;
     boundsRef.current = null;
     setDragging(false);

@@ -106,6 +106,10 @@ export interface SidebarInput {
   activeKey?: string | null;
   /** Section ids the user opened past their "Show N more". */
   expanded?: ReadonlySet<string>;
+  /** Row keys that never fold away: the rows with terminals nested under
+   *  them, so a terminal (one kept running after its wall closed above
+   *  all) is always one click from its wall. */
+  pinned?: ReadonlySet<string>;
 }
 
 /** Rows a section shows before "Show N more". Needs you never folds: each
@@ -223,7 +227,7 @@ function fold(
   input: SidebarInput,
 ): SidebarSection {
   const limit = input.expanded?.has(id) ? Infinity : SECTION_LIMIT[kind];
-  const visible = rows.filter((row, index) => index < limit || row.key === input.activeKey);
+  const visible = rows.filter((row, index) => index < limit || row.key === input.activeKey || !!input.pinned?.has(row.key));
   return { id, kind, label, projectPath, rows: visible, hidden: rows.length - visible.length, foldable: rows.length > SECTION_LIMIT[kind] };
 }
 

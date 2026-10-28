@@ -27,6 +27,7 @@ import {
   paneIdsOf,
   sessionIdOf,
   type AnyPane,
+  type ClosedTab,
   type LayoutNode,
   type PaneDataByKind,
   type PaneInit,
@@ -127,8 +128,9 @@ export type WorkbenchAction =
   | { type: "setWall"; paneId: string; data: PaneDataByKind["terminals"] }
   /** Close a terminals pane. Its terminals are either kept running
    *  (`keep`: stowed, listed under their session until a click puts them
-   *  back on a wall) or terminated (the host kills them; they leave
-   *  `owners`). Never remembered for ⌘⇧T: a wall is its terminals. */
+   *  back on a wall, and the wall remembered for ⌘⇧T, which puts back the
+   *  ones still kept) or terminated (the host kills them; they leave
+   *  `owners`, and nothing is remembered: a wall is its terminals). */
   | { type: "closeWall"; key?: SessionKey; paneId: string; keep: boolean }
   | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[] };
 
@@ -691,7 +693,35 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const key = keyOf(state, action.key);
       const set = setOf(state, key);
       if (!set || set.closed.length === 0) return state;
-      const entry = set.closed[set.closed.length - 1];
+      const raw = set.closed[set.closed.length - 1];
+      // A wall closed with "Keep running" comes back with the terminals it
+      // kept that still are: alive and on no other wall since (`stowed`).
+      // One that was put back elsewhere stays there (one tile per PTY); a
+      // wall left with none closes again, and a tab left with nothing is
+      // skipped for the one before it.
+      const back = new Set<string>();
+      const entryPanes: AnyPane[] = [];
+      let root: LayoutNode | null = raw.tab.root;
+      for (const pane of raw.panes) {
+        if (pane.kind !== "terminals") {
+          entryPanes.push(pane);
+          continue;
+        }
+        const data = stripTiles(pane.data, (id) => !state.stowed.includes(id)) ?? pane.data;
+        if (data.tiles.length === 0) {
+          root = root && removePane(root, pane.id);
+          continue;
+        }
+        data.tiles.forEach((id) => back.add(id));
+        entryPanes.push({ ...pane, data });
+      }
+      if (!root) return reduce(putSet(state, key, { ...set, closed: set.closed.slice(0, -1) }), action);
+      const kept = paneIdsOf(root);
+      const entry: ClosedTab = {
+        ...raw,
+        panes: entryPanes,
+        tab: { ...raw.tab, root, focusedPaneId: kept.includes(raw.tab.focusedPaneId) ? raw.tab.focusedPaneId : kept[0] },
+      };
       // The ids may be live again (a tab reopened twice): mint fresh ones then.
       const taken = (id: string) => Boolean(set.tabs[id] || set.panes[id]);
       const paneMap = new Map<string, string>();
@@ -711,7 +741,7 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       };
       const order = set.order.slice();
       order.splice(clamp(entry.index, 0, order.length), 0, tabId);
-      return putSet(state, key, {
+      const reopened = putSet(state, key, {
         ...set,
         order,
         activeTabId: tabId,
@@ -719,6 +749,10 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
         panes,
         closed: set.closed.slice(0, -1),
       });
+      if (back.size === 0) return reopened;
+      const owners = { ...reopened.owners };
+      back.forEach((id) => (owners[id] = key));
+      return { ...reopened, owners, stowed: reopened.stowed.filter((id) => !back.has(id)) };
     }
 
     case "selectTab": {
@@ -1001,6 +1035,9 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const pane = set?.panes[action.paneId];
       if (!set || !pane || pane.kind !== "terminals") return state;
       const tiles = pane.data.tiles;
+      // Kept running, the wall is remembered for ⌘⇧T like any closed tab:
+      // reopening it puts back the terminals still kept (`reopenClosed`).
+      // Terminated, it is not: a wall is its terminals.
       const next: WorkbenchState = action.keep
         ? { ...state, stowed: [...state.stowed, ...tiles.filter((id) => !state.stowed.includes(id))] }
         : {
@@ -1008,7 +1045,7 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
             owners: Object.fromEntries(Object.entries(state.owners).filter(([id]) => !tiles.includes(id))),
             stowed: state.stowed.filter((id) => !tiles.includes(id)),
           };
-      return refillEmpty(putSet(next, key, dropPane(set, pane.id, false)));
+      return refillEmpty(putSet(next, key, dropPane(set, pane.id, action.keep)));
     }
 
     case "adoptTerminal":

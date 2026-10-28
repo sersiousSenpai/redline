@@ -366,7 +366,7 @@ const CommandPalette = lazy(() => import("./components/CommandPalette").then((m)
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
+import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, isZoomPaneKey, splitKeyOf, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -447,7 +447,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
-import { paneStatusOf, wallStatus } from "./workbench/status";
+import { terminalStatus, wallStatus } from "./workbench/status";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
@@ -2732,12 +2732,45 @@ function App() {
         }
       }
     };
+    // ⌘⇧↩ zooms the focused tile of the wall on screen (and puts it back),
+    // as the tile header's double-click does. Capture phase: in a terminal
+    // xterm would take the Return. Anywhere else it is left alone (a pane
+    // zoom is W5's).
+    const onZoomKey = (e: KeyboardEvent) => {
+      if (!isZoomPaneKey(e)) return;
+      const { set, tab } = activePanes(wb.getState());
+      if (set?.panes[tab?.focusedPaneId ?? ""]?.kind !== "terminals") return;
+      e.preventDefault();
+      e.stopPropagation();
+      terminalsRef.current?.toggleZoomFocused();
+    };
+    // ⌘D / ⌘⇧D: inside a wall ⌘D adds a tile; anywhere else they split the
+    // focused pane right / down with a door. Bubble phase, and only for an
+    // event nobody took: CodeMirror's ⌘D (next occurrence) prevents the
+    // default first and keeps it.
+    const onSplitKey = (e: KeyboardEvent) => {
+      const dir = splitKeyOf(e);
+      if (!dir || e.defaultPrevented || !classicWb) return;
+      const { set, tab } = activePanes(wb.getState());
+      if (!set || !tab) return;
+      e.preventDefault();
+      if (dir === "row" && set.panes[tab.focusedPaneId]?.kind === "terminals") {
+        terminalsRef.current?.addTileHere();
+        return;
+      }
+      const paneId = newDoorPaneId();
+      wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction: dir, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId });
+    };
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onZoomKey, true);
+    window.addEventListener("keydown", onSplitKey);
     if (classicWb) void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
       for (const p of subs) void p.then((un) => un());
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keydown", onZoomKey, true);
+      window.removeEventListener("keydown", onSplitKey);
     };
   }, [closeFromInside]);
 
@@ -2830,6 +2863,13 @@ function App() {
   } = useSessionTerminals(true);
   sessionTerminalsRef.current = sessionTerminals;
   const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
+  // Every dock terminal currently holding a plan: the backend pins each held
+  // POST to the terminal whose claude sent it, so the "plan intercepted" strip
+  // renders inside exactly those tabs — never in a sibling tab, and never for
+  // plans intercepted from external terminals. A *set*, not a boolean about the
+  // focused tab: in a split dock each pane answers for itself, and approving
+  // one pane's plan must leave the other pane's strip standing.
+  const heldTermIds = useStableValue(useMemo(() => heldTerminalIds(summaries), [summaries]));
   // A held plan names the terminal its CLI is waiting in.
   useEffect(() => {
     bindSessionTerminals(
@@ -2857,15 +2897,31 @@ function App() {
     };
   }, [bindSessionTerminals, noteFlowLaunch]);
   // The sidebar's launch rows: `launches`, with `activeLaunchId`.
+  // A launch row spins on what its terminal reads, the way its Agent tab's
+  // dot does (`terminalStatus`); nothing heard yet is still starting.
   const flowSidebarLaunches = useMemo(
-    () => sidebarLaunches(flowLaunches, terminalKinds, terminalTitles),
-    [flowLaunches, terminalKinds, terminalTitles],
+    () => sidebarLaunches(flowLaunches, terminalKinds, terminalTitles).map((l) =>
+      l.working && terminalKinds.has(l.terminalId) && termStatuses.has(l.terminalId) && terminalStatus(l.terminalId, { states: termStatuses }) !== "working" ? { ...l, working: false } : l),
+    [flowLaunches, terminalKinds, terminalTitles, termStatuses],
   );
   // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
-  const { working: flowWorking, needs: flowNeeds } = useMemo(
+  const { working: hookWorking, needs: flowNeeds } = useMemo(
     () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
     [sessionTerminals, terminalAttention, flowLaunches],
   );
+  // A row spins only while its terminal reads "working" the way its tab dot
+  // and its nested row do (`terminalStatus`): the hooks' `working` outlives a
+  // turn held on your review (the CLI is blocked in the hook, no Stop comes)
+  // and an agent the wall has seen back at its prompt. A launch nothing has
+  // been heard from yet is still starting, which is work.
+  const flowWorking = useMemo(() => {
+    const out = new Set<string>();
+    for (const key of hookWorking) {
+      const term = key.startsWith("plan:") ? sessionTerminals.get(key.slice(5)) : key.startsWith("launch:") ? key.slice(7) : undefined;
+      if (!term || !terminalKinds.has(term) || terminalStatus(term, { states: termStatuses, attention: terminalKinds, held: heldTermIds }) === "working") out.add(key);
+    }
+    return out.size === hookWorking.size ? hookWorking : out;
+  }, [hookWorking, sessionTerminals, terminalKinds, termStatuses, heldTermIds]);
   // The launch on screen: the active `launch:` set's terminal (its Agent tab).
   const wbLaunchId = launchIdOf(wbActiveKey);
   const activeLaunchId = wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null;
@@ -2878,11 +2934,11 @@ function App() {
     if (pane.kind === "terminals") return { status: wallStatus(pane.data.tiles, termStatuses) };
     // An Agent tab wears its terminal's state: the fleet's derivation once
     // the layer has reported it, the CLI's own hooks until then.
+    // (`terminalStatus`, the same read the sidebar's rows make: a held plan
+    // is the agent waiting on you, never its stale `working`).
     if (pane.kind === "chat" && pane.data.source === "agent") {
-      const known = wallStatus([pane.data.terminalId], termStatuses);
-      if (known || termStatuses.has(pane.data.terminalId)) return { status: known };
-      const kind = terminalKinds.get(pane.data.terminalId);
-      return { status: kind === "needs-you" || kind === "your-turn" ? ("needs" as const) : kind === "working" ? ("working" as const) : undefined };
+      const status = terminalStatus(pane.data.terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds });
+      return { status: status === "idle" ? undefined : status };
     }
     if (pane.kind !== "plan") return {};
     const summary = summaries.find((x) => x.sessionId === pane.data.sessionId);
@@ -2893,7 +2949,7 @@ function App() {
       title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
       status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
-  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses]);
+  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds]);
   // The strip's right-hand cluster: the doc pin as a contextual entry —
   // tile the session's plan beside the surface in this tab, or untile it.
   const stageTile = (() => {
@@ -3289,7 +3345,23 @@ function App() {
   liveTermIdsRef.current = liveTermIds;
   // How many dock terminals need you (TerminalTabs owns which): the footer
   // chip, and whether ⌘⇧J has anywhere to go.
-  const [termNeedYou, setTermNeedYou] = useState(0);
+  const [wallNeedYou, setTermNeedYou] = useState(0);
+  // Until the wall has reported (it mounts on an idle beat after a reload),
+  // the count — and ⌘⇧J's list — come from the hooks App re-read from the
+  // daemon's snapshot itself (`useSessionTerminals`), never from nothing:
+  // a reload must not make an agent that needs you unreachable.
+  const hookLoud = useMemo(() => {
+    const out: string[] = [];
+    for (const [id, kind] of terminalKinds) {
+      if (liveTermIds && !liveTermIds.includes(id)) continue;
+      const known = termStatuses.get(id);
+      if (known ? known.state === "needs-you" || known.state === "your-turn" : kind === "needs-you" || kind === "your-turn") out.push(id);
+    }
+    return out;
+  }, [terminalKinds, termStatuses, liveTermIds]);
+  const hookLoudRef = useRef(hookLoud);
+  hookLoudRef.current = hookLoud;
+  const termNeedYou = termStatuses.size > 0 ? wallNeedYou : hookLoud.length;
   const termNeedYouRef = useRef(termNeedYou);
   termNeedYouRef.current = termNeedYou;
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
@@ -3531,7 +3603,7 @@ function App() {
     // Across sessions: the one that needs you comes forward, its wall and
     // its tile with it, then the tile is hailed and takes the caret.
     void ensureTerminalReady().then((dock) => {
-      const target = dock?.nextNeedsYou();
+      const target = dock?.nextNeedsYou() ?? hookLoudRef.current[0] ?? null;
       if (target) showTerminal(target, true);
     });
   }, [ensureTerminalReady, showTerminal]);
@@ -5828,13 +5900,8 @@ function App() {
   // and release without its own wiring.
   const activeHeld =
     summaries.find((s) => s.sessionId === activeId)?.held ?? false;
-  // Every dock terminal currently holding a plan: the backend pins each held
-  // POST to the terminal whose claude sent it, so the "plan intercepted" strip
-  // renders inside exactly those tabs — never in a sibling tab, and never for
-  // plans intercepted from external terminals. A *set*, not a boolean about the
-  // focused tab: in a split dock each pane answers for itself, and approving
-  // one pane's plan must leave the other pane's strip standing.
-  const heldTermIds = useStableValue(useMemo(() => heldTerminalIds(summaries), [summaries]));
+  // (`heldTermIds`, every dock terminal holding a plan, is declared with the
+  // terminal map above: the tab dots and the sidebar's rows read it too.)
   // The same linkage carrying the plan's *name*, so the tab bar's repo popover
   // can say which piece of work each held terminal is sitting on rather than
   // only that it is held. Both are kept by value, so a summaries read that
@@ -9024,29 +9091,39 @@ function App() {
   const sidebarTerminals = useMemo(() => {
     const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean }[]> = {};
     const listed = new Set<string>();
+    // The rows a terminal can nest under: a current plan's (an archived or
+    // deleted one has no row on screen) and a pending launch's own row,
+    // which IS its agent terminal. Anything else — a launch's terminal whose
+    // row went, a shell a launch set opened, a session with no row — sits
+    // under Home, so no terminal, kept or not, is ever only in the ▾ menu.
+    const rows = new Set(summaries.filter((x) => !x.archivedAt).map((x) => x.sessionId));
+    const launchRows = new Set(flowSidebarLaunches.map((l) => l.terminalId));
     const push = (row: string, terminalId: string, fallback: string) => {
       if (listed.has(terminalId)) return;
       listed.add(terminalId);
       const known = termStatuses.get(terminalId);
-      const attention = terminalAttention.get(terminalId);
-      const status = liveTermIds && !liveTermIds.includes(terminalId)
-        ? "exited" as const
-        : known ? paneStatusOf(known.state)
-        : attention?.kind === "needs-you" || attention?.kind === "your-turn" ? "needs" as const
-        : attention?.kind === "working" ? "working" as const
-        : "idle" as const;
+      const status = terminalStatus(terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds });
       const kept = wbStowed.includes(terminalId);
       (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}) });
     };
-    for (const [sessionId, terminalId] of sessionTerminals) push(sessionId, terminalId, "claude");
+    for (const [sessionId, terminalId] of sessionTerminals) {
+      if (rows.has(sessionId)) push(sessionId, terminalId, "claude");
+      else if (!liveTermIds || liveTermIds.includes(terminalId)) push("", terminalId, "claude");
+    }
     for (const [terminalId, owner] of Object.entries(wbOwners)) {
       if (liveTermIds && !liveTermIds.includes(terminalId)) continue;
       const sessionId = sessionIdOf(owner);
-      if (sessionId) push(sessionId, terminalId, "terminal");
-      else if (owner === HOME_KEY) push("", terminalId, "terminal");
+      if (sessionId && rows.has(sessionId)) push(sessionId, terminalId, "terminal");
+      // A launch's own agent is its row; a kept one shows nested all the same.
+      else if (launchIdOf(owner) && launchRows.has(terminalId) && !wbStowed.includes(terminalId)) continue;
+      else push("", terminalId, sessionId || launchIdOf(owner) ? "claude" : "terminal");
+    }
+    // Kept with no owner on record (a reload that lost it): Home's.
+    for (const terminalId of wbStowed) {
+      if (!listed.has(terminalId) && (!liveTermIds || liveTermIds.includes(terminalId))) push("", terminalId, "terminal");
     }
     return out;
-  }, [sessionTerminals, terminalAttention, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed]);
+  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on

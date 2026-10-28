@@ -94,6 +94,10 @@ describe("deriveTermState", () => {
     expect(isAgentComm(null, true)).toBe(false);
     expect(isAgentComm("node", true)).toBe(true);
     expect(isAgentComm("node", false)).toBe(false);
+    // Claude Code's native build runs as the file its `claude` link resolves
+    // to, named for its version: an agent, at its prompt idle, not a job.
+    expect(isAgentComm("2.1.312", false)).toBe(true);
+    expect(deriveTermState({ attention: null, seen: false, held: false, exited: false, fgComm: "2.1.312", fgIsShell: false, ports: [], placeholder: false })).toBe("idle");
   });
 });
 

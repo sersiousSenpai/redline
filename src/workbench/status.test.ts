@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { paneStatusOf, wallStatus, worstStatus } from "./status";
+import { paneStatusOf, terminalStatus, wallStatus, worstStatus } from "./status";
 
 describe("paneStatusOf", () => {
   it("folds the terminal's eight states into four", () => {
@@ -37,5 +37,24 @@ describe("worstStatus", () => {
     expect(wallStatus(["d"], states)).toBe("exited");
     expect(wallStatus(["a"], states)).toBeUndefined();
     expect(wallStatus(["nope"], states)).toBeUndefined();
+  });
+});
+
+describe("terminalStatus", () => {
+  const states = new Map([["walled", { state: "idle" as const }]]);
+  it("reads the wall's derivation first, so a row and a tab dot never disagree", () => {
+    expect(terminalStatus("walled", { states, attention: new Map([["walled", "working"]]) })).toBe("idle");
+  });
+  it("reads a held plan as needing you, never as the hook's stale working", () => {
+    expect(terminalStatus("t", { states, attention: new Map([["t", "working"]]), held: new Set(["t"]) })).toBe("needs");
+  });
+  it("falls back to the hooks the daemon re-read on boot", () => {
+    expect(terminalStatus("a", { states, attention: new Map([["a", "needs-you"]]) })).toBe("needs");
+    expect(terminalStatus("b", { states, attention: new Map([["b", "working"]]) })).toBe("working");
+    expect(terminalStatus("c", { states, attention: new Map([["c", "idle"]]) })).toBe("idle");
+    expect(terminalStatus("d", { states })).toBe("idle");
+  });
+  it("calls a terminal missing from the live list exited", () => {
+    expect(terminalStatus("walled", { states, live: ["other"] })).toBe("exited");
   });
 });

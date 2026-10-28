@@ -269,9 +269,14 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     return next;
   }), []);
 
+  // Rows with terminals under them never fold behind "Show N more".
+  const pinned = useMemo(() => {
+    const keys = Object.keys(terminals ?? {}).filter((id) => id && (terminals?.[id]?.length ?? 0) > 0);
+    return keys.length ? new Set(keys.map((id) => itemKey("plan", id))) : undefined;
+  }, [terminals]);
   const model = useMemo(
-    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections }),
-    [sessions, chats, launches, needs, working, activeKey, openSections],
+    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections, pinned }),
+    [sessions, chats, launches, needs, working, activeKey, openSections, pinned],
   );
 
   // Combine selection. Local because nothing outside the sidebar watches it —

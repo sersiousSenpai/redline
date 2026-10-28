@@ -22,7 +22,9 @@ import {
   isReopenTabKey,
   isSidebarToggleKey,
   isSnapBackKey,
+  isZoomPaneKey,
   shellKeymap,
+  splitKeyOf,
   shownKeymap,
   tabCycleKeyOf,
   tabIndexKeyOf,
@@ -326,7 +328,7 @@ describe("the workbench's keys (W1)", () => {
   });
 
   it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
-    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail", "quick-open"]);
+    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail", "quick-open", "split", "split-down", "zoom-pane"]);
     expect(WORKBENCH_KEYMAP.every((b) => b.keys[0] === "⌘")).toBe(true);
     const ids = CLASSIC_KEYMAP.map((b) => b.id);
     // The workbench globals follow the palette; its layout rows lead Layout.
@@ -366,5 +368,27 @@ describe("quick open (W4)", () => {
     expect(isQuickOpenKey(combo({ metaKey: true, shiftKey: true, key: "P", code: "KeyP" }))).toBe(false);
     expect(isQuickOpenKey(combo({ ctrlKey: true, key: "p", code: "KeyP" }))).toBe(false);
     expect(bindingKeys("quick-open")).toEqual(["⌘", "P"]);
+  });
+});
+
+describe("splits and the zoom (W3 walk fixes)", () => {
+  const cmd = (over: Parameters<typeof combo>[0]) => combo({ metaKey: true, ...over });
+  it("⌘D splits right (in a wall: a new tile), ⌘⇧D splits down, on the physical key", () => {
+    expect(splitKeyOf(cmd({ key: "d", code: "KeyD" }))).toBe("row");
+    expect(splitKeyOf(cmd({ key: "D", code: "KeyD", shiftKey: true }))).toBe("column");
+    // Ctrl+D is the shell's end of input; ⌘⌥D and a bare D are no split.
+    expect(splitKeyOf(combo({ key: "d", code: "KeyD", ctrlKey: true }))).toBeNull();
+    expect(splitKeyOf(cmd({ key: "∂", code: "KeyD", altKey: true }))).toBeNull();
+    expect(splitKeyOf(combo({ key: "d", code: "KeyD" }))).toBeNull();
+    expect(bindingKeys("split")).toEqual(["⌘", "D"]);
+    expect(bindingKeys("split-down")).toEqual(["⌘", "⇧", "D"]);
+  });
+  it("⌘⇧↩ zooms; ⇧↩ (the door) and ⌘↩ (a composer's send) do not", () => {
+    expect(isZoomPaneKey(cmd({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(true);
+    expect(isZoomPaneKey(cmd({ key: "Enter", code: "NumpadEnter", shiftKey: true }))).toBe(true);
+    expect(isZoomPaneKey(cmd({ key: "Enter", code: "Enter" }))).toBe(false);
+    expect(isZoomPaneKey(combo({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
+    expect(isFrontDoorKey(cmd({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
+    expect(bindingKeys("zoom-pane")).toEqual(["⌘", "⇧", "↩"]);
   });
 });

@@ -180,6 +180,10 @@ describe("Show N more", () => {
     expect(shape({ sessions, activeKey: "plan:p7" })).toEqual([["din", [...first, "plan:p7"], 2]]);
   });
 
+  it("never folds away a row with terminals under it", () => {
+    expect(shape({ sessions, pinned: new Set(["plan:p8"]) })).toEqual([["din", [...first, "plan:p8"], 2]]);
+  });
+
   it("an expanded section shows everything, and can fold back only while it has more than its limit", () => {
     const [open] = buildSidebar({ sessions, expanded: new Set(["project:/code/din"]) }).sections;
     expect([open.rows.length, open.hidden, open.foldable]).toEqual([9, 0, true]);

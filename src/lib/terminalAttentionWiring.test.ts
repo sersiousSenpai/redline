@@ -64,7 +64,10 @@ describe("terminal attention wiring", () => {
     const describe = app.slice(app.indexOf("const describePane = useCallback("), app.indexOf("// The strip's right-hand cluster"));
     expect(describe).toContain('if (pane.kind === "terminals") return { status: wallStatus(pane.data.tiles, termStatuses) };');
     const rows = app.slice(app.indexOf("const sidebarTerminals = useMemo("), app.indexOf("// The memoized sidebar and browser pane"));
-    expect(rows).toContain("paneStatusOf(known.state)");
+    // Rows, the Agent tab's dot and the row spinners all read one helper,
+    // the fleet's derivation first, a held plan as needing you.
+    expect(rows).toContain("terminalStatus(terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds })");
+    expect(describe).toContain("terminalStatus(pane.data.terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds })");
   });
 
   it("no toast points at a dock that is gone: a build's or a launch's toast shows its terminal", () => {

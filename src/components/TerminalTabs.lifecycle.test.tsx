@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
 vi.mock("../hooks/useRepoIcons", () => ({ useRepoIcons: () => new Map() }));
 vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
-  return { enqueuePtyOp, focusTerminalView: () => {}, TerminalView: ({ id, visible, onUserInput, onInterrupt }: { id: string; visible: boolean; onUserInput: (id: string) => void; onInterrupt: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button><button data-esc={id} onClick={() => { onUserInput(id); onInterrupt(id); }}>Esc</button></div> };
+  return { enqueuePtyOp, focusTerminalView: () => {}, TerminalView: ({ id, visible, onUserInput, onInterrupt, onUserData }: { id: string; visible: boolean; onUserInput: (id: string) => void; onInterrupt: (id: string) => void; onUserData: (id: string, data: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => { onUserInput(id); onUserData(id, "y"); }}>Type</button><button data-nav={id} onClick={() => { onUserInput(id); onUserData(id, "\x1b[B"); }}>Down</button><button data-esc={id} onClick={() => { onUserInput(id); onInterrupt(id); }}>Esc</button></div> };
 });
 vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, pinned, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; pinned: boolean; actions: { onPick: (tile: number, id: string) => void; onRename?: (id: string, name: string) => void; onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void; onTogglePin: (id: string) => void; onDragStart: (id: string, e: unknown) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""} data-pinned={pinned}><button data-pin={identity.id} onClick={() => actions.onTogglePin(identity.id)}>Pin</button><button data-pick={identity.id} onClick={() => actions.onPick(tile, (globalThis as { __pick?: string }).__pick!)}>Pick</button><button data-rename={identity.id} onClick={() => actions.onRename?.(identity.id, "api server")}>Rename</button><span data-label={identity.id}>{(identity as { label?: string }).label}</span><span data-drag={identity.id} onPointerDown={(e) => actions.onDragStart(identity.id, e)}>Drag</span><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
@@ -426,6 +426,9 @@ describe("terminal state", () => {
     expect(stateOf(id)).toBe("needs-you");
     expect(host.querySelector<HTMLElement>(`[data-header-id="${id}"]`)?.dataset.work).toBe("Claude needs your permission");
     expect(host.querySelector<HTMLElement>(".rl-tile-wrap")?.dataset.termState).toBe("needs-you");
+    // Moving through the question's options is not an answer.
+    await click(`[data-nav="${id}"]`);
+    expect(stateOf(id)).toBe("needs-you");
     await click(`[data-type="${id}"]`);
     expect(stateOf(id)).toBe("working");
     // A NEW card (new `at`) lights it again: the old answer can't swallow it.

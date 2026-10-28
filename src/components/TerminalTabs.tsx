@@ -46,6 +46,7 @@ import {
 import { setTile as setTileSlot } from "../lib/tileSlots";
 import { tileAtPoint, type TileBox } from "../lib/tilePolicy";
 import { beginTerminalSwap } from "../lib/terminalSwap";
+import { isAnswerInput } from "../lib/terminalInput";
 import { beginMeasure, endMeasure } from "../workbench/perf";
 import type { WallData } from "../workbench/model";
 import { EMPTY_WALL, sameWall } from "../workbench/wall";
@@ -283,6 +284,11 @@ export interface TerminalTabsHandle {
    *  end a process it merely had not looked at. A terminal with no sample
    *  counts as running; only an idle shell or an exited process does not. */
   runningNow: (ids: readonly string[]) => Promise<string[]>;
+  /** ⌘D in a wall: a new tile, in the focused tile's directory, placed by
+   *  the host's rule (this wall while it has room, a new tab once full). */
+  addTileHere: () => void;
+  /** ⌘⇧↩ in a wall: zoom the focused tile, or put a zoomed one back. */
+  toggleZoomFocused: () => void;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -790,11 +796,16 @@ export const TerminalTabs = memo(
     [setAcks],
   );
 
+  // Keystrokes claim a placeholder shell; only an answer acknowledges what
+  // an agent asked (`isAnswerInput`: navigation and mouse reports don't).
   const handleUserInput = useCallback((id: string) => {
-    ackInput(id, false);
     if (!tabsRef.current.some((tab) => tab.id === id && tab.placeholder)) return;
     setTabs((prev) => prev.map((tab) => tab.id === id ? { ...tab, placeholder: false } : tab));
-  }, [setTabs, ackInput]);
+  }, [setTabs]);
+
+  const handleUserData = useCallback((id: string, data: string) => {
+    if (isAnswerInput(data)) ackInput(id, false);
+  }, [ackInput]);
 
   const handleInterrupt = useCallback(
     (id: string) => {
@@ -1050,7 +1061,11 @@ export const TerminalTabs = memo(
   // no state and no label never reaches it.
   const statusKey = tabs.map((t) => `${t.id}\u0001${termStates.get(t.id) ?? "idle"}\u0001${identity.byId.get(t.id)?.label ?? ""}`).join("\u0002");
   useEffect(() => {
-    if (!onStatesChange) return;
+    // Not before the daemon's snapshot has landed: until then a terminal's
+    // state is its process sample alone, and a reload would paint every
+    // agent that needs you as idle or running (the host reads the hooks it
+    // re-read itself meanwhile).
+    if (!onStatesChange || !attentionReady) return;
     const out = new Map<string, TerminalStatus>();
     for (const t of tabsRef.current) {
       out.set(t.id, { state: statesRef.current.get(t.id) ?? "idle", label: identity.byId.get(t.id)?.label ?? "terminal" });
@@ -1058,7 +1073,7 @@ export const TerminalTabs = memo(
     onStatesChange(out);
     // `statusKey` is the change; the rest is read fresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusKey, onStatesChange]);
+  }, [statusKey, onStatesChange, attentionReady]);
 
   // A terminal's work line: a loud state carries the agent's own words (the
   // needs-you message, the your-turn excerpt); anything else keeps what it
@@ -1434,7 +1449,11 @@ export const TerminalTabs = memo(
     if (!tabsRef.current.some((t) => t.id === id)) return;
     if (tilesRef.current[target] === undefined) return;
     if (zoomed !== null) setZoomedId(null);
+    const moved = tilesRef.current[target] !== id;
     showInTile(target, id);
+    // Say where it landed: the tile it now holds blooms once, after the
+    // swap has painted (a drop onto its own tile changes nothing).
+    if (moved) requestAnimationFrame(() => requestAnimationFrame(() => hailTileRef.current(id)));
   };
   const dropRef = useRef(dropTerminal);
   dropRef.current = dropTerminal;
@@ -1496,6 +1515,7 @@ export const TerminalTabs = memo(
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("dragstart", noNativeDrag, true);
       follow.cancel();
       dragCleanupRef.current = null;
       if (!active) return;
@@ -1517,11 +1537,18 @@ export const TerminalTabs = memo(
     };
     const onUp = (ev: PointerEvent) => {
       if (ev.pointerId !== pointerId) return;
+      // A release that travelled is a drop even when no move was reported
+      // on the way (a fast flick, a synthetic drag): measure there and then.
+      if (!active && Math.hypot(ev.clientX - startX, ev.clientY - startY) >= DRAG_THRESHOLD_PX) start();
       finish(active ? tileAtPoint(boxes, ev.clientX, ev.clientY) : null);
     };
     const onCancel = (ev: PointerEvent) => {
       if (ev.pointerId === pointerId) finish(null);
     };
+    // A press on the chip must never become the webview's own drag: WebKit
+    // cancels the pointer when one starts, and the drop is lost.
+    const noNativeDrag = (ev: DragEvent) => ev.preventDefault();
+    window.addEventListener("dragstart", noNativeDrag, true);
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key !== "Escape" || !active) return;
       ev.preventDefault();
@@ -1623,6 +1650,8 @@ export const TerminalTabs = memo(
         for (const id of ids) closeRef.current(id);
       },
       runningNow: (ids: readonly string[]) => runningNowRef.current(ids),
+      addTileHere: () => handlersRef.current.newHere(focusIdxRef.current),
+      toggleZoomFocused: () => handlersRef.current.zoomTile(focusIdxRef.current),
     }),
     [setTabs],
   );
@@ -1881,6 +1910,7 @@ export const TerminalTabs = memo(
                   onPaneFocus={handlePaneFocus}
                   onUserInput={handleUserInput}
                   onInterrupt={handleInterrupt}
+                  onUserData={handleUserData}
                 />
               </div>
               {visible && heldTerminalIds?.has(t.id) && <InterceptStrip />}

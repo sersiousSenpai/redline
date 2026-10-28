@@ -95,6 +95,12 @@ export const WORKBENCH_KEYMAP: KeyBinding[] = [
   { id: "rail", keys: ["⌘", "⌥", "B"], label: "Show / hide the rail", group: "Layout", wired: true },
   // ⌘P is Go to File (a native menu item); Print moved to ⌘⌥P.
   { id: "quick-open", keys: ["⌘", "P"], label: "Go to a file", group: "Global", wired: true },
+  // Inside a wall ⌘D is a new tile; elsewhere ⌘D / ⌘⇧D split the focused
+  // pane right / down with a door. Never over an editor's own ⌘D
+  // (CodeMirror's next occurrence prevents the default first).
+  { id: "split", keys: ["⌘", "D"], label: "Split right with a new tab's door (in a wall: a new tile)", group: "Layout", wired: true },
+  { id: "split-down", keys: ["⌘", "⇧", "D"], label: "Split down with a new tab's door", group: "Layout", wired: true },
+  { id: "zoom-pane", keys: ["⌘", "⇧", "↩"], label: "Zoom the focused tile, or put it back", group: "Layout", wired: true },
 ];
 
 /** The classic shell's registry with the workbench's chords folded in: the
@@ -236,6 +242,21 @@ export function isSidebarToggleKey(e: KeyComboInfo): boolean {
 /** ⌘⌥B — the right rail. On e.code because ⌥ rewrites e.key ("b" → "∫"). */
 export function isRailToggleKey(e: KeyComboInfo): boolean {
   return commandOnly(e) && !e.shiftKey && e.altKey && e.code === "KeyB";
+}
+
+/** ⌘D → "row" (split right; in a wall, a new tile) and ⌘⇧D → "column"
+ *  (split down); null otherwise. ⌘ only, on the physical key. The caller
+ *  listens in the bubble phase and skips an event already `defaultPrevented`,
+ *  so an editor keeps its own ⌘D. */
+export function splitKeyOf(e: KeyComboInfo): "row" | "column" | null {
+  if (!commandOnly(e) || e.altKey || e.code !== "KeyD") return null;
+  return e.shiftKey ? "column" : "row";
+}
+
+/** ⌘⇧↩ — zoom the focused tile (or pane), or put it back. Matched in the
+ *  capture phase: a terminal would otherwise take the Return. */
+export function isZoomPaneKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && e.shiftKey && !e.altKey && (e.code === "Enter" || e.code === "NumpadEnter");
 }
 
 /** ⌘P — go to a file (quick open). ⌘⌥P is Print now. */

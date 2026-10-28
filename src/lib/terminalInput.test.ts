@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { isInterruptInput, terminalInputOrigin } from "./terminalInput";
+import { isAnswerInput, isInterruptInput, terminalInputOrigin } from "./terminalInput";
 import { loadXterm } from "./xtermLoader";
 
 // This exercises the real terminal parser without opening a DOM renderer.
@@ -68,5 +68,21 @@ describe("interrupt keystrokes", () => {
     expect(isInterruptInput("\x1bb")).toBe(false);
     expect(isInterruptInput("q")).toBe(false);
     expect(isInterruptInput("")).toBe(false);
+  });
+});
+
+describe("isAnswerInput", () => {
+  it("counts text, Enter and a picked number as an answer", () => {
+    expect(isAnswerInput("y")).toBe(true);
+    expect(isAnswerInput("\r")).toBe(true);
+    expect(isAnswerInput("1")).toBe(true);
+    expect(isAnswerInput("pasted words")).toBe(true);
+  });
+  it("leaves the question asked on navigation, mouse and focus reports", () => {
+    expect(isAnswerInput("\x1b[A")).toBe(false);
+    expect(isAnswerInput("\x1b[B")).toBe(false);
+    expect(isAnswerInput("\x1b[<0;12;5M")).toBe(false);
+    expect(isAnswerInput("\x1b[I")).toBe(false);
+    expect(isAnswerInput("")).toBe(false);
   });
 });
