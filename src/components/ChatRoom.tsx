@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { CHATS_CHANGED_EVENT } from "../hooks/useFrontDoorConversation";
 import { dropListener } from "../lib/dropListener";
 import { ConversationSourceContext } from "./ContinueAs";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
@@ -195,13 +196,15 @@ export function ChatRoom({
   const changeHarness = (next: BackendChoice) => { setLocalHarness(next); onHarnessChange?.(next); };
   const [project, setBoundProject] = useState<ProjectChoice>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
-  const setProject = (next: ProjectChoice) => { void invoke<string | null>("companion_set_project", { companionId, projectPath: next?.path ?? null }).then(path => { setBoundProject(typeof path === "string" && path ? { path } : null); }).catch(error => setNotice(String(error))); };
+  // The sidebar groups a chat under its project: tell App's list it moved.
+  const chatsChanged = () => window.dispatchEvent(new Event(CHATS_CHANGED_EVENT));
+  const setProject = (next: ProjectChoice) => { void invoke<string | null>("companion_set_project", { companionId, projectPath: next?.path ?? null }).then(path => { setBoundProject(typeof path === "string" && path ? { path } : null); chatsChanged(); }).catch(error => setNotice(String(error))); };
   useEffect(() => {
     let alive = true;
     void invoke<string | null>("companion_get_project", { companionId }).then(async path => {
       // Migrate a previously explicit per-chat choice once; never infer write
       // authorization from whichever repository happens to be on screen.
-      if (!path) { try { const prior = JSON.parse(localStorage.getItem(`rl.chatProject.${companionId}`) ?? "null") as ProjectChoice; if (prior?.path) path = await invoke<string | null>("companion_set_project", { companionId, projectPath: prior.path }); } catch { /* Keep a missing project unbound. */ } }
+      if (!path) { try { const prior = JSON.parse(localStorage.getItem(`rl.chatProject.${companionId}`) ?? "null") as ProjectChoice; if (prior?.path) { path = await invoke<string | null>("companion_set_project", { companionId, projectPath: prior.path }); chatsChanged(); } } catch { /* Keep a missing project unbound. */ } }
       if (alive) { setBoundProject(typeof path === "string" && path ? { path } : null); setProjectLoaded(true); }
     }).catch(() => { if (alive) setProjectLoaded(true); });
     return () => { alive = false; };

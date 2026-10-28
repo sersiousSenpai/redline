@@ -15,7 +15,8 @@
 //! in each project two groups (D31): **Plans** (plans, and the launches
 //! whose plan has not arrived) and **Chats** (companion chats), each with
 //! its own count and working state, each collapsible, each folding at its
-//! own "Show N more".
+//! own "Show N more". Chats with no folder lead the projects as one Chats
+//! group of their own; plans and launches with none close the list.
 //!
 //! Where a row is in its life (planning, in review, approved, building,
 //! built) is the row's own status line (`rowStatus`), in its colour, on every
@@ -327,7 +328,14 @@ export function buildSidebar(input: SidebarInput): SidebarModel {
   const live = needs.length > 0;
   const sections: SidebarSection[] = [];
   if (live) sections.push(fold("needs", "needs", "Needs you", null, needs.sort(byRecency), input));
-  sections.push(...projectSections(current.filter((item) => item.need === null), input));
+  const rest = current.filter((item) => item.need === null);
+  // A chat with no folder (most chats from before chats bound one; the
+  // daemon omits `projectPath` for them) is not "No project"'s, which closes
+  // a list as long as every project's plans: there, the Chats group was
+  // never seen (the last walk). They lead the projects as one Chats group.
+  const loose = rest.filter((item) => item.kind === "chat" && item.projectPath === null);
+  if (loose.length) sections.push(projectSection("chats", "Chats", null, loose.sort(byRecency), input));
+  sections.push(...projectSections(rest.filter((item) => !(item.kind === "chat" && item.projectPath === null)), input));
   return { live, sections, archived };
 }
 

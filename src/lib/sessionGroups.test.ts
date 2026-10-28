@@ -218,11 +218,11 @@ describe("project groups", () => {
     expect(model.sections[0].label).toBe("research");
   });
 
-  it("rows without a folder close the list, as No project, in the same two groups", () => {
+  it("plans and launches without a folder close the list as No project; chats without one lead the projects as their own Chats group", () => {
     const chatsOnly = buildSidebar({ sessions: [plan("a", { updatedAt: 1 })], chats: [chat("c", { projectPath: null, updatedAt: 99 })] });
-    expect(chatsOnly.sections.map((s) => [s.label, s.projectPath, s.groups.map((g) => g.label)])).toEqual([["din", "/code/din", ["Plans"]], ["No project", null, ["Chats"]]]);
+    expect(chatsOnly.sections.map((s) => [s.label, s.projectPath, s.groups.map((g) => g.label)])).toEqual([["Chats", null, ["Chats"]], ["din", "/code/din", ["Plans"]]]);
     const mixed = buildSidebar({ sessions: [], chats: [chat("c", { projectPath: null })], launches: [launch("t", { projectPath: null })] });
-    expect(mixed.sections.map((s) => [s.label, s.groups.map((g) => g.label)])).toEqual([["No project", ["Plans", "Chats"]]]);
+    expect(mixed.sections.map((s) => [s.label, s.groups.map((g) => g.label)])).toEqual([["Chats", ["Chats"]], ["No project", ["Plans"]]]);
   });
 });
 
@@ -339,5 +339,42 @@ describe("versionRows", () => {
   it("today's revision reads as its time", () => {
     const [row] = versionRows({ revisions: [{ versionNumber: 1, receivedAt: day(18, 14), threadStart: true, restored: false }] }, null, now);
     expect(row.date).toBe(new Date(day(18, 14)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  });
+});
+
+// The last walk never saw a Chats group. The shapes below are what the
+// daemon returns: `companion_list` rows (state.rs `Companion`, camelCase,
+// `projectPath` canonical and OMITTED when the chat has none — 26 of the
+// user's 37), and `/v1/sessions` summaries whose `projectPath` is the
+// agent's cwd.
+describe("Chats from the daemon's own payloads", () => {
+  const companion = (id: string, title: string, updatedAt: number, projectPath?: string) =>
+    ({ companionId: id, title, status: "active", createdAt: updatedAt - 5, updatedAt, titleIsUserSet: false, ...(projectPath ? { projectPath } : {}) }) as FlowChat;
+  const qwallah = "/Users/me/qwallah";
+  const scratch = "/private/tmp/claude-501/x/scratchpad/wb-final-repo";
+  const sessions = [
+    ...Array.from({ length: 64 }, (_, i) => plan(`q${i}`, { projectName: "qwallah", projectPath: qwallah, updatedAt: 500 - i })),
+    plan("w1", { projectName: "wb-final-repo", projectPath: scratch, updatedAt: 900 }),
+  ];
+  const chats = [
+    companion("joey", "Joey Multi-Tenant Status", 800, qwallah),
+    companion("greet", "Greeting Exchange Check", 950, scratch),
+    companion("ts", "Why is there a bunch of typescript in the app?", 300),
+  ];
+
+  it("a chat with a folder is in its project's Chats group, after a folded Plans group", () => {
+    const model = buildSidebar({ sessions, chats });
+    const q = model.sections.find((s) => s.projectPath === qwallah)!;
+    expect(q.groups.map((g) => [g.label, g.count, g.rows.length])).toEqual([["Plans", 64, 6], ["Chats", 1, 1]]);
+    expect(q.groups[1].rows[0].title).toBe("Joey Multi-Tenant Status");
+    const w = model.sections.find((s) => s.projectPath === scratch)!;
+    expect(w.groups.map((g) => g.label)).toEqual(["Plans", "Chats"]);
+  });
+
+  it("a chat the daemon gives no folder leads the projects, never below them all", () => {
+    const model = buildSidebar({ sessions, chats });
+    expect(model.sections[0].label).toBe("Chats");
+    expect(model.sections[0].groups.map((g) => [g.label, g.rows.map((r) => r.title)])).toEqual([["Chats", ["Why is there a bunch of typescript in the app?"]]]);
+    expect(model.sections.some((s) => s.label === "No project")).toBe(false);
   });
 });
