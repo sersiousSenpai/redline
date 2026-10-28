@@ -2454,7 +2454,7 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
-      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} failed={pageErrors} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
@@ -2492,7 +2492,8 @@ function BrowserPaneBase({
           renderHome={page => <Suspense fallback={<div className="rb-page-cover">Opening new tab…</div>}><BrowserHomePage page={page} tabs={tabs} acting={actingTabs} closed={closedPages}
             onBrowse={text => navigate(text, page.id)} onAgentSearch={text => agentSearch(text, page.id)}
             onOpen={url => { const open = tabs.find(tab => sameTabUrl(tab.url, url) && tab.id !== page.id); if (open) selectTab(open.id); else navigate(url, page.id); }}
-            onSelectTab={selectTab} onMission={id => void switchToMission(id)} onOpenMemory={onOpenMemory}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
+            onSelectTab={selectTab} onMission={id => void switchToMission(id)} onOpenMemory={onOpenMemory}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))}
+          waking={new Set(tilePages.filter((page) => page.url !== NEWTAB && !wvMapRef.current.has(page.id) && !reloading.has(page.id) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
           onAssign={(index, browseId) => { const next = assignVisibleTile(tileLayout, visibleBrowseIds, index, browseId); updateTileLayout(next); const tab = tabs.find((t) => t.browseId === browseId); if (tab) selectTab(tab.id); }}
           onAddPage={(index) => { const browseId = openTab(); if (browseId) updateTileLayout(assignTile(tileLayout, index, browseId)); }}
           onSwap={(from, to) => updateTileLayout(swapVisibleTiles(tileLayout, visibleBrowseIds, from, to))}
@@ -2604,8 +2605,8 @@ function BrowserPaneBase({
       </div>}
       </div>
       {picker.picking && <div role="status" className="shrink-0 px-3 py-1 text-xs">Click an element · Esc to cancel <button type="button" onClick={picker.cancel}>Cancel</button></div>}
-      {workspaceError && <div role="alert" className="flex items-center justify-between px-3 py-2 text-xs" style={{ color: "var(--color-danger)", background: "var(--color-paper)" }}>{workspaceError}<button type="button" onClick={() => setWorkspaceError(null)}>Dismiss</button></div>}
-      {mission.error && <div role="alert" className="px-3 py-2 text-xs">{mission.error}<button type="button" onClick={() => void mission.refreshMissions()}>Retry</button></div>}
+      {workspaceError && <div role="alert" className="rb-pane-alert"><i className="rb-needs-dot" aria-hidden/><span>{workspaceError}</span><button type="button" onClick={() => setWorkspaceError(null)}>Dismiss</button></div>}
+      {mission.error && <div role="alert" className="rb-pane-alert"><i className="rb-needs-dot" aria-hidden/><span>{mission.error}</span><button type="button" onClick={() => void mission.refreshMissions()}>Retry</button></div>}
       {appearanceOpen && <BrowserAppearanceMenu site={siteKey(activeUrl)} value={normalizeAppearance(siteAppearances[siteKey(activeUrl)])} onChange={(profile) => setSiteAppearances((prev) => ({ ...prev, [siteKey(activeUrl)]: profile }))} onClose={() => setAppearanceOpen(false)}/>}
       {layoutMenuOpen && <BrowserLayoutDialog layout={tileLayout} available={tabs.length} tabs={tabs} activeBrowseId={activeBrowseId ?? ""} onClose={() => setLayoutMenuOpen(false)}
         onChoose={(preset, count) => updateTileLayout({ ...tileLayout, grid: undefined, preset, maximized: null, tiles: arrangementTiles(tileLayout, tabs.map(tab => tab.browseId), activeBrowseId!, count) })}
@@ -2680,7 +2681,7 @@ function MissionMenu({ missions, activeId, onStartNew, onResume, onExit, onDelet
     {deleting ? <div>
       <h3 className="text-base font-medium">Delete “{deleting.title}”?</h3>
       <p className="rb-help">This removes its saved findings, conversation and pages. This cannot be undone.</p>
-      <div className="flex gap-2 mt-4"><button type="button" className="rb-button" onClick={() => setDeleting(null)}>Keep research</button><button type="button" className="rb-button" style={{ color: "var(--color-danger)" }} onClick={() => { onDelete(deleting.missionId); setDeleting(null); }}>Delete research</button></div>
+      <div className="flex gap-2 mt-4"><button type="button" className="rb-button" onClick={() => setDeleting(null)}>Keep research</button><button type="button" className="rb-button" onClick={() => { onDelete(deleting.missionId); setDeleting(null); }}>Delete research</button></div>
     </div> : <>
       <div className="flex flex-wrap gap-2 mb-3"><button type="button" className="rb-button rb-button-primary" onClick={onStartNew}>Start a research mission</button>
         {activeId && <><button type="button" className="rb-button" onClick={onOpenWorkspace}>Open research workspace</button><button type="button" className="rb-button" onClick={onExit}>Return to regular browsing</button></>}

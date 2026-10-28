@@ -164,11 +164,20 @@
 .rb-group-title[aria-expanded=false] svg { transform:rotate(-90deg); }
 .rb-rail-resize { position:absolute; z-index:5; top:0; bottom:0; right:-3px; width:6px; cursor:col-resize; touch-action:none; }
 .rb-rail-resize:hover,.rb-rail-resize:focus-visible { background:var(--color-info); opacity:.35; }
+/* Loading and waking: the page's snapshot shows through, with the shared
+   Spinner in a pill over it. */
 .rb-page-cover:has(.rb-waking-label) { background:transparent; z-index:1; pointer-events:none; }
-.rb-waking-label { padding:7px 12px; border:1px solid var(--color-rule); border-radius:20px; background:var(--color-paper); box-shadow:0 2px 9px #0002; }
-.rb-waking-label::before { content:""; display:inline-block; width:10px; height:10px; margin-right:7px; border:1px solid var(--color-rule); border-top-color:var(--color-ink-muted); border-radius:50%; animation:rb-wake 800ms linear infinite; }
-@keyframes rb-wake { to { transform:rotate(360deg); } }
-@media(prefers-reduced-motion:reduce) { .rb-waking-label::before { animation:none; } }
+.rb-waking-label { display:inline-flex; align-items:center; gap:7px; height:26px; box-sizing:border-box; padding:0 12px; border:1px solid var(--color-rule-strong); border-radius:13px; background:var(--color-paper); color:var(--color-ink-muted); font-size:12px; box-shadow:0 2px 9px #0002; }
+.rb-waking-label .rl-spinner { color:var(--color-info); }
+/* A page that could not load needs you: the amber dot, never red. */
+.rb-cover-head { display:inline-flex; align-items:center; gap:8px; color:var(--color-ink); }
+.rb-needs-dot { flex:none; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--color-warning); animation:rb-needs 2s ease-in-out infinite; }
+@keyframes rb-needs { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+@media(prefers-reduced-motion:reduce) { .rb-needs-dot { animation:none; } }
+.rb-tab-status.rb-needs-dot { top:3px; right:3px; box-shadow:0 0 0 2px var(--color-canvas,var(--color-bg)); }
+.rb-pane-alert { display:flex; align-items:center; gap:8px; flex:none; min-height:26px; box-sizing:border-box; padding:4px 10px; border-top:1px solid var(--color-rule); background:var(--color-paper); color:var(--color-ink); font-size:12px; }
+.rb-pane-alert>span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.rb-pane-alert button { flex:none; padding:0; border:0; background:none; color:var(--color-info-text); font:inherit; cursor:pointer; }
 /* The agent acting on a page on screen: a 26 px row under the page, since
    the native webview paints over anything drawn on it. */
 .rb-agent-status { display:flex; align-items:center; gap:8px; flex:none; height:26px; box-sizing:border-box; padding:0 10px; border-top:1px solid var(--color-rule); background:var(--color-paper); color:var(--color-ink); font-size:12px; min-width:0; }

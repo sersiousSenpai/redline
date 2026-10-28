@@ -47,13 +47,17 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
   const [feed, setFeed] = useState(empty), [candidates, setCandidates] = useState<CandidateTab[]>([]);
   const [servers, setServers] = useState<RunningServer[]>([]), [denied, setDenied] = useState(0);
   const [error, setError] = useState(""), [text, setText] = useState(""), [closedOpen, setClosedOpen] = useState(false);
+  // Until the history read settles the columns say nothing, rather than
+  // flashing their empty-state lines at someone who has history.
+  const [loaded, setLoaded] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const now = props.now ?? Date.now();
   useEffect(() => {
     let current = true;
     void Promise.all([invoke<BrowserHomeFeed>("browser_home_feed", { limit: 24 }), candidateTabs(invoke, localStorage)])
       .then(([next, found]) => { if (current) { setFeed(buildBrowserHome(next ?? empty, found, 24)); setCandidates(found); } })
-      .catch(() => { if (current) { setError("Browsing history could not be loaded."); setFeed(buildBrowserHome(empty, [])); } });
+      .catch(() => { if (current) { setError("Browsing history could not be loaded."); setFeed(buildBrowserHome(empty, [])); } })
+      .finally(() => { if (current) setLoaded(true); });
     // One sweep, not a poll: the strip says what is up as the page opens.
     void invoke<DevServerScan>("dev_servers_scan").then((scan) => { if (current) setServers(scan?.running ?? []); }).catch(() => {});
     void invoke<{ denylist: string }>("shots_get_policy").then((policy) => { if (current) setDenied(denylistCount(policy?.denylist)); }).catch(() => {});
@@ -75,7 +79,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
     ? <button type="button" className="rb-nt-link" onClick={onOpenMemory}>{label}</button>
     : <span>{label}</span>;
 
-  return <div className="rb-home" data-newtab>
+  return <div className="rb-home" data-newtab data-loaded={loaded || undefined}>
     <div className="rb-nt-column">
       <header className="rb-nt-head">
         <span className="rb-nt-kicker">{newTabKicker(new Date(now), webTabs.length)}</span>
@@ -111,7 +115,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
             : <Row key={row.key} icon={<ListTodo size={13} aria-hidden/>} title={row.title} detail={row.detail} onClick={() => props.onOpen(row.url)} hint={row.url}/>)}
           {closed.length > 0 && <Row icon={<History size={13} aria-hidden/>} muted title={`Recently closed · ${closed.length}`} expanded={closedOpen} onClick={() => setClosedOpen((v) => !v)}/>}
           {closedOpen && closed.map((item) => <Row key={`closed:${item.url}`} nested icon={<PageIcon/>} title={item.title || hostOf(item.url)} detail={hostOf(item.url)} age={shortAge(item.at, now)} onClick={() => props.onOpen(item.url)} hint={item.url}/>)}
-          {!picks.length && !closed.length && <p className="rb-nt-empty">Pages you open here stay in reach while you work.</p>}
+          {loaded && !picks.length && !closed.length && <p className="rb-nt-empty">Pages you open here stay in reach while you work.</p>}
         </section>
         <section className="rb-nt-section" aria-label="Reading, by subject">
           <SectionHead title="Reading, by subject" aside={onOpenMemory ? <button type="button" className="rb-nt-link" onClick={onOpenMemory}>Ask Memory</button> : null}/>
@@ -120,7 +124,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
               <span>· {group.pages.length} {group.pages.length === 1 ? "page" : "pages"}{group.span ? ` · ${group.span}` : ""}</span></div>
             {group.pages.map((item) => <Row key={item.url} icon={<PageIcon/>} title={item.title} age={shortAge(item.at, now)} onClick={() => props.onOpen(item.url)} hint={item.url}/>)}
           </div>)}
-          {!subjects.length && <p className="rb-nt-empty">Pages you read are gathered here by subject.</p>}
+          {loaded && !subjects.length && <p className="rb-nt-empty">Pages you read are gathered here by subject.</p>}
         </section>
       </div>
       <footer className="rb-nt-foot"><Brain size={12} aria-hidden/><span>Every page you read is filed in Memory, by subject, never by tab.</span>{memoryLink("What did I read on…")}

@@ -38,6 +38,8 @@ interface Props {
   loading?: ReadonlySet<string>;
   /** Tabs suspended to their snapshot: muted. */
   suspended?: ReadonlySet<string>;
+  /** Pages that could not load, by tab id: they need you. */
+  failed?: Readonly<Record<string, string>>;
   /** Pages closed in this pane, newest first, and how one comes back. */
   closed?: readonly ClosedPage[]; onReopen?: (page: ClosedPage) => void;
   groups: TabGroup[]; organized: boolean; organizing: boolean; onMode: (value: boolean) => void;
@@ -57,11 +59,12 @@ export default function BrowserTabRail(props: Props) {
   useLayoutEffect(() => { if (!closingFocus.current || props.tabs.some(tab => tab.id === closingFocus.current)) return; closingFocus.current = null; tabNodes.current.get(props.activeId)?.focus(); }, [props.tabs, props.activeId]);
   const renderTab = (tab: TilePage, index: number) => {
     const acting = !!props.acting?.has(tab.id), working = acting || !!props.loading?.has(tab.id);
-    const suspended = !working && !!props.suspended?.has(tab.id);
+    const needs = !working && !!props.failed?.[tab.id];
+    const suspended = !working && !needs && !!props.suspended?.has(tab.id);
     const badge = props.tileBadges?.[tab.browseId];
     const title = tab.title || "New tab";
-    return <div key={tab.id} ref={node => { if (node) tabNodes.current.set(tab.id, node); else tabNodes.current.delete(tab.id); }} role="tab" aria-label={`${title}${acting ? " — the agent is acting on this page" : ""}`} aria-selected={tab.id === props.activeId} tabIndex={tab.id === props.activeId ? 0 : -1} data-tab-id={tab.id} className="rb-tab" data-tile-hover={props.hoveredTileTab === tab.browseId || undefined} data-agent-acting={acting || undefined}
-      data-status={working ? "working" : suspended ? "suspended" : undefined}
+    return <div key={tab.id} ref={node => { if (node) tabNodes.current.set(tab.id, node); else tabNodes.current.delete(tab.id); }} role="tab" aria-label={`${title}${acting ? " — the agent is acting on this page" : props.failed?.[tab.id] ? " — this page could not load" : ""}`} aria-selected={tab.id === props.activeId} tabIndex={tab.id === props.activeId ? 0 : -1} data-tab-id={tab.id} className="rb-tab" data-tile-hover={props.hoveredTileTab === tab.browseId || undefined} data-agent-acting={acting || undefined}
+      data-status={working ? "working" : needs ? "needs" : suspended ? "suspended" : undefined}
       title={`${index + 1} · ${title}\n${tab.url}`} onPointerEnter={() => props.onHoverTile?.(tab.browseId)} onPointerLeave={() => props.onHoverTile?.(null)}
       onClick={event => { event.currentTarget.focus({ preventScroll: true }); props.onSelect(tab.id); }}
       onPointerDown={event => { if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return; event.currentTarget.focus({ preventScroll: true }); props.onTabDrag(event, tab.id); }}
@@ -69,6 +72,7 @@ export default function BrowserTabRail(props: Props) {
       onAuxClick={event => { if (event.button === 1) { event.preventDefault(); closeTab(tab.id); } }}>
       {tab.favicon && !failedFavicons[tab.favicon] ? <img className="rb-favicon" src={tab.favicon} alt="" referrerPolicy="no-referrer" onError={() => setFailedFavicons(failed => ({ ...failed, [tab.favicon!]: true }))}/>: <Globe size={16} aria-hidden/>}
       {working && <Spinner size={10} className="rb-tab-status"/>}
+      {needs && <i className="rb-needs-dot rb-tab-status" aria-hidden/>}
       <span className="rb-tab-title">{title}</span>
       {badge && <span className="rb-tile-badge" aria-label={`Tile ${badge}`}>{badge}</span>}
       {!collapsed && <button type="button" className="rb-tab-close" tabIndex={tab.id === props.activeId ? 0 : -1} aria-label={`Close ${tab.title || "tab"}`} onClick={event => { event.stopPropagation(); closeTab(tab.id); }}><X size={12}/></button>}
