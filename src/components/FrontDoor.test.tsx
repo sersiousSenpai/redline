@@ -844,7 +844,7 @@ describe("the floating replacement composer", () => {
     // App hands the door's composer no autofocus: the island owns the caret
     // on a summons, and a pointer on the pill leaves it on the room.
     const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
-    expect(app).toContain("autoFocusOnShow={where === \"chat\" && roomChat}");
+    expect(app).toContain("autoFocusOnShow={where === \"chat\" && !!chatPane}");
     const elsewhere = document.createElement("button");
     document.body.append(elsewhere); elsewhere.focus();
     try {

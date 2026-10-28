@@ -868,6 +868,12 @@ const selectFocusedDoorDestination = (state: WorkbenchState): LaunchDestination 
   const d = focused?.kind === "door" ? focused.data.destination : undefined;
   return d === "plan" || d === "run" || d === "chat" || d === "drafter" || d === "browser" ? d : null;
 };
+/** The companion chat pane the active tab shows, if any: the room is a
+ *  pane now, and the one ChatRoom body follows it. */
+const selectVisibleCompanion = (state: WorkbenchState): string | null => {
+  for (const pane of activePanes(state).panes) if (pane.kind === "chat" && pane.data.source === "companion") return pane.data.companionId;
+  return null;
+};
 const selectFocusedDoorDraftKey = (state: WorkbenchState): string => {
   const { set, tab } = activePanes(state);
   const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
@@ -931,9 +937,6 @@ function App() {
   const tripDoor = useCallback(() => setDoorTrip((n) => n + 1), []);
   // The door is up: open, or resting on the empty plate.
   const [doorVisible, setDoorVisible] = useState(false);
-  // Only opening a chat puts the chat in the door; any other summons is the
-  // door's home, its own composer.
-  const [chatInRoom, setChatInRoom] = useState(false);
   // The island's polite status line: a launch handed off, a plan arrived. The
   // same words twice are nudged apart so a screen reader reads them again.
   const [doorNews, setDoorNews] = useState("");
@@ -1217,7 +1220,6 @@ function App() {
   // door holds it, the conversation dock's once it was carried out. The host
   // moves between them; the conversation in it never remounts.
   const [chatHost] = useState(() => createBoundedPortalHost("conversation"));
-  const [chatRegularSlot, setChatRegularSlot] = useState<HTMLDivElement | null>(null);
   const [chatDockSlot, setChatDockSlot] = useState<HTMLDivElement | null>(null);
   const [browserHost] = useState(() => createBoundedPortalHost("browser"));
   // The plan body is a per-session singleton like the browser (decision
@@ -1724,16 +1726,24 @@ function App() {
   currentChatIdRef.current = chatId;
   const chatTitle =
     chats.find((c) => c.companionId === chatId)?.title ?? null;
-  // The open door is holding the chat rather than its own composer.
-  const roomChat = frontDoorOpen && chatInRoom && !!chatId;
-  const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;
+  // A companion chat is a pane of the active tab (W2): the one ChatRoom
+  // body shows there (its SingletonSlot takes the host), and the dock's
+  // column shows it only while no pane does. The pane on screen is the
+  // open conversation.
+  const chatPane = useWorkbench(wb, selectVisibleCompanion);
+  useEffect(() => {
+    if (chatPane && chatPane !== chatId) setChatId(chatPane);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatPane]);
+  const chatTarget = chatPane ? null : chatDockSlot;
   // A move lays the host out afresh, and a scroller laid out afresh starts at
   // its top: carried between the room and the dock, the thread would open on
   // its first message. It keeps its place — the end if it was there.
   const chatScroll = useRef<{ thread: HTMLElement; top: number; end: boolean } | null>(null);
   useLayoutEffect(() => {
     const target = chatTarget;
-    if (!target) { chatHost.remove(); return; }
+    // No dock column for it: a pane's slot holds it, or nothing does.
+    if (!target) return;
     target.appendChild(chatHost);
     const kept = chatScroll.current;
     chatScroll.current = null;
@@ -7505,9 +7515,8 @@ function App() {
       lastLaunchProject;
     setFrontDoorText(markdown);
     setFrontDoorProject({ path: initialProject });
-    // A plan to launch, so the door's composer — not a chat it was holding.
+    // A plan to launch, so the door's composer.
     setFrontDoorDest("plan");
-    setChatInRoom(false);
     setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(value => value + 1);
@@ -8681,7 +8690,7 @@ function App() {
   // stays per-turn. ONE cwd for the pre-warm and the room, or they never match.
   const chatCwd = activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null);
   const chatPrewarmKey =
-    doorVisible && !roomChat && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
+    doorVisible && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
       ? JSON.stringify([chatCwd, frontDoorBackend])
       : null;
   useEffect(() => {
@@ -8716,7 +8725,6 @@ function App() {
     // deliberately not called, because nothing is being navigated away from.
     // A plan launched from it earlier then lands as any other would.
     doorLaunchRef.current = null;
-    setFrontDoorOpen(true);
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
       // `companion_create`. It is a placeholder, not a name: the backend
@@ -8729,7 +8737,11 @@ function App() {
       ]);
       const context = (await chatAttachment(chat.companionId, blocks))?.context;
       setChatId(chat.companionId);
-      setChatInRoom(true);
+      // The door becomes the chat in place — a pane of this set, springing
+      // out of the island's box; a door with no tab of its own opens one.
+      if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: chat.companionId } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: chat.companionId } });
+      setFrontDoorOpen(false);
+      setDoorCompact(false);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
       setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface, context });
@@ -8756,9 +8768,11 @@ function App() {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
-    setChatInRoom(true);
     setDoorCompact(false);
-    setFrontDoorOpen(true);
+    setFrontDoorOpen(false);
+    // Its pane: the door tab it was picked in becomes it; otherwise the
+    // set's pane for it comes forward, or opens.
+    if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });
     setPanelBreaks({ sidebar: false, pane: false });
   };
   // The first conversation, from the dock's empty state. No seed and no
@@ -8919,8 +8933,6 @@ function App() {
   // anything — it would only ever show on a virgin install. This is that way.
   const openFrontDoor = useCallback(() => {
     setFrontDoorDest("plan");
-    // "New plan" means the composer, even when the door was holding a chat.
-    setChatInRoom(false);
     // Under the workbench "Plan a build" is a door tab in the active set.
     if (classicWb) {
       openDoorTab();
@@ -9272,29 +9284,8 @@ function App() {
     setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
     selectSurface("browser");
   };
-  // Leaving the room carries its chat into the conversation dock, still
-  // open — however the room was left: the door shut on it, or kept but handed
-  // back to its own composer (⌘⇧N, a plan sent to the door). Not over a dock
-  // already holding the surface's own conversation: that would end a voice
-  // discussion mid-thought, and the dock's strip has the chat a click away.
-  // The door, shut, goes back to being its own composer for the next summons.
-  // A chat minted for a door shut while it was being made lands in the room
-  // late: it is carried too. The room's New lets go of the chat instead (it
-  // stays in History), so there is nothing to carry.
-  const roomHeldChat = useRef(false);
-  useEffect(() => {
-    const left = chatInRoom ? !frontDoorOpen : roomHeldChat.current;
-    roomHeldChat.current = chatInRoom && frontDoorOpen;
-    if (!left) return;
-    if (chatInRoom) setChatInRoom(false);
-    // A surface with no dock has nowhere to show it: no pin is left behind.
-    if (!chatId || dockOpen || !dockScopeRef.current) return;
-    setConversationPin("companion");
-    openDock();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frontDoorOpen, chatInRoom]);
   // On screen in the dock's column — the same room, at column scale.
-  const chatDocked = !roomChat && !!chatId && voiceDocked && dockContext?.kind === "companion";
+  const chatDocked = !chatPane && !!chatId && voiceDocked && dockContext?.kind === "companion";
   // The compact card launches only in place — Plan or Run. Elsewhere than the
   // browser its menu also offers the Drafter and Chat, and picking either
   // grows the card into the door, which takes that destination.
@@ -9327,7 +9318,7 @@ function App() {
   };
   const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
     const card = where === "card";
-    const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat || chatDocked;
+    const shown = where === "door" ? doorVisible : card ? doorCompact : !!chatPane || chatDocked;
     const destination = where === "chat" ? "chat" : card ? cardDestination : frontDoorDest;
     return (
               <FrontDoor
@@ -9345,7 +9336,7 @@ function App() {
                 // for a click. The door's is the island's to focus — a pointer
                 // on the pill opens it quiet, anything else with the caret in
                 // it. A chat the room holds takes it on every summons.
-                autoFocusOnShow={where === "chat" && roomChat}
+                autoFocusOnShow={where === "chat" && !!chatPane}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 workbench={workbench}
@@ -9478,10 +9469,10 @@ function App() {
       // Chats are rows in both shells (the frame's "○ Billing chat"): the
       // open one reads selected while the door's room holds it.
       chats,
-      activeChatId: roomChat ? chatId : null,
-      ...(isFlowShell() ? { startActive: flowStartOnStage && !roomChat } : {}),
+      activeChatId: chatPane,
+      ...(isFlowShell() ? { startActive: flowStartOnStage } : {}),
     }),
-    [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
+    [flowStartOnStage, chatPane, chats, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
   // The workbench sidebar's own data (W1): which Place reads selected, the
   // live runs and Localhost ports beside them, and each session's terminals
@@ -9814,7 +9805,7 @@ function App() {
   // its plan and its terminal — or the chat the door is holding, or the
   // start screen while the door is open.
   const flowSummary = stageTarget.kind === "plan" ? summaries.find((s) => s.sessionId === stageTarget.sessionId) ?? null : null;
-  const flowChat = frontDoorOpen && chatInRoom && chatId ? chats.find((c) => c.companionId === chatId) ?? null : null;
+  const flowChat = null as Companion | null;
   const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : stageTarget.kind;
   const flowPlanId = flowTarget === "plan" && stageTarget.kind === "plan" ? stageTarget.sessionId : null;
   const flowTerminalId = flowTarget === "launch" || flowTarget === "plan" ? stageTerminalId : null;
@@ -12577,15 +12568,11 @@ function App() {
         compactOpen={doorCompact}
         onCompactChange={setDoorCompact}
         compact={doorCompact && renderMonochatComposer("card")}
-        context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
+        context={surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
         busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
         announce={doorNews}
-        // A chat in the room: its heading's New goes back to a blank
-        // composer, the conversation kept in History.
-        onNewChat={roomChat ? () => { setChatId(null); setChatSeed(null); setChatInRoom(false); refreshChats(); } : undefined}
       >
-        <div ref={setChatRegularSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
-        {!roomChat && renderMonochatComposer("door")}
+        {renderMonochatComposer("door")}
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
@@ -12623,7 +12610,7 @@ function App() {
               // there is none.
               cwd={chatCwd}
               // The room reads at plate scale; the dock's column at its own.
-              expanded={roomChat}
+              expanded={!!chatPane}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
               // Its own toolbar shows in the dock alone (the room wears the
               // door's heading): Close puts the column away, chat and all.

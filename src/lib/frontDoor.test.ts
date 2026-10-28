@@ -334,7 +334,7 @@ describe("the island never moves on its own", () => {
     // The door's composer never focuses itself: a pointer on the pill opens
     // the door quiet (10/11), every other summons puts the caret in — the
     // island decides, in one place.
-    expect(door).toContain('autoFocusOnShow={where === "chat" && roomChat}');
+    expect(door).toContain('autoFocusOnShow={where === "chat" && !!chatPane}');
     const island = readFileSync(join(process.cwd(), "src/components/MonochatIsland.tsx"), "utf8");
     expect(island).toMatch(/if \(summon\.current === "quiet" && !heldChat\.current\) body\.current\?\.focus\(/);
     // The type-to-start handoff is the door's alone.
@@ -385,43 +385,43 @@ describe("the island never moves on its own", () => {
 
 // One chat, two places (10/10): the door's room at plate scale, the
 // conversation dock's column once you leave the room. Carried, never closed.
-describe("the room's chat is carried, never closed", () => {
+describe("a companion chat is a pane, and the one room follows it", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
-  it("moves one mounted chat between the room's slot and the dock's", () => {
-    expect(app).toContain("const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;");
+  it("the ChatRoom body is mounted once and shown by the pane on screen, else the dock's column", () => {
+    // The pane's SingletonSlot takes the host; the dock's column gets it
+    // only while no pane shows it, and never pulls it out of a pane.
+    expect(app).toContain("const chatPane = useWorkbench(wb, selectVisibleCompanion);");
+    expect(app).toContain("const chatTarget = chatPane ? null : chatDockSlot;");
+    const move = app.slice(app.indexOf("const chatTarget = chatPane"), app.indexOf("}, [chatTarget, chatHost]);"));
+    expect(move).toContain("if (!target) return;");
     // A moved scroller starts at its top: the thread is put back where it was.
-    const move = app.slice(app.indexOf("const chatTarget = roomChat"), app.indexOf("}, [chatTarget, chatHost]);"));
     expect(move).toContain('const thread = chatHost.querySelector<HTMLElement>("[data-chat-messages]");');
     expect(move).toContain("kept.thread.scrollTop = kept.end ? kept.thread.scrollHeight : kept.top;");
     expect(app).toMatch(/<div ref=\{setChatDockSlot\}/);
-    // One ChatRoom, portalled into the host that moves.
     expect(app.match(/<ChatRoom\b/g)).toHaveLength(1);
     expect(app).toContain("</ErrorBoundary></Suspense>, chatHost)}");
+    expect(app).toContain('<SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />');
+    // The pane on screen is the open conversation.
+    expect(app).toContain("if (chatPane && chatPane !== chatId) setChatId(chatPane);");
   });
 
-  it("leaving the room, however it was left, carries the chat into the dock", () => {
-    const carry = app.slice(app.indexOf("// Leaving the room carries its chat"), app.indexOf("const chatDocked ="));
-    // The door shut on it, or kept but swapped for its own composer.
-    expect(carry).toContain("const left = chatInRoom ? !frontDoorOpen : roomHeldChat.current;");
-    expect(carry).toContain("roomHeldChat.current = chatInRoom && frontDoorOpen;");
-    expect(carry).toContain("if (!left) return;");
-    expect(carry).toContain('setConversationPin("companion");');
-    expect(carry).toContain("openDock();");
-    // Never over the surface's own conversation already in the dock, and
-    // never as a pin on a surface with no dock to show it.
-    expect(carry).toContain("if (!chatId || dockOpen || !dockScopeRef.current) return;");
-    // Nor lost when the door shut while the chat was still being minted.
-    expect(carry).toContain("}, [frontDoorOpen, chatInRoom]);");
+  it("the island never holds a chat: no room slot, no New, the door's own composer always", () => {
+    expect(app).not.toContain("chatInRoom");
+    expect(app).not.toContain("roomChat");
+    expect(app).not.toContain("onNewChat=");
+    expect(app).not.toContain("rl-frontdoor-chat-slot");
+    expect(app).toMatch(/<MonochatIsland[\s\S]*?>\s*\{renderMonochatComposer\("door"\)\}\s*<\/MonochatIsland>/);
   });
 
-  it("⌘⇧N in the room hands the door back to its composer and the chat to the dock", () => {
-    // The door stays open, so the carry above sees the room let go of a chat
-    // it held. The room's New clears the chat first: nothing is carried.
-    const door = app.slice(app.indexOf("const openFrontDoor = useCallback("), app.indexOf("openFrontDoorRef.current = openFrontDoor;"));
-    expect(door).toContain("setChatInRoom(false);");
-    expect(door).toContain("setFrontDoorOpen(true);");
-    expect(app).toMatch(/onNewChat=\{roomChat \? \(\) => \{ setChatId\(null\);[^}]*setChatInRoom\(false\);/);
+  it("the door's Chat destination and an opened chat become a pane in place, or come forward", () => {
+    const mint = app.slice(app.indexOf("const chatFromFrontDoor = async () => {"), app.indexOf("const openChat = (id: string) => {"));
+    expect(mint).toContain('if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: chat.companionId } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: chat.companionId } });');
+    expect(mint).toContain("setFrontDoorOpen(false);");
+    const open = app.slice(app.indexOf("const openChat = (id: string) => {"), app.indexOf("const startChat = useCallback("));
+    expect(open).toContain('if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });');
+    expect(open).toContain("setFrontDoorOpen(false);");
+    expect(open).not.toContain("setFrontDoorOpen(true);");
   });
 
   it("putting the dock away hands the column back to the surface's own conversation", () => {
@@ -430,8 +430,8 @@ describe("the room's chat is carried, never closed", () => {
   });
 
   it("the Discuss pill opens the plan's own discussion, never a carried chat", () => {
-    // The carry's pin outlives a home dock shut by walking to a plan; voice
-    // stays first-class, so the pill drops it before it opens the column.
+    // Voice stays first-class: the pill drops a companion pin before it
+    // opens the column.
     const discuss = app.slice(app.indexOf("const openDiscussion = useCallback("), app.indexOf("}, [setConversationPin, openDock]);"));
     expect(discuss).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
     expect(discuss).toContain("openDock();");
