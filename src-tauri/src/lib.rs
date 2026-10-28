@@ -12596,7 +12596,6 @@ pub fn run() {
             marketplace_index,
             marketplace_install,
             transparency::reduced_transparency,
-            workbench_menu::set_flow_menu,
             workbench_menu::set_workbench_menu,
             list_sessions,
             get_session,
@@ -13719,11 +13718,10 @@ pub fn run() {
                 "print_page" => {
                     let _ = app.emit("menu-print", ());
                 }
-                // The shells' own items (workbench_menu.rs): the flow shell's
-                // ⌘N and ⌘1–⌘4, or the workbench's ⌘T / ⌘⇧T / ⌘⇧W and its
-                // Tabs submenu — present only while the frontend paints that
-                // shell. The number is an i32: a flow tool (1–4), a cycle
-                // direction (±1) or a tab index (0..7, −1 = last).
+                // The workbench's own items (workbench_menu.rs): ⌘T / ⌘⇧T /
+                // ⌘⇧W and the Tabs submenu, installed by the frontend as it
+                // mounts. The number is an i32: a cycle direction (±1) or a
+                // tab index (0..7, −1 = last).
                 id => match workbench_menu::event_for(id) {
                     Some((event, Some(n))) => {
                         let _ = app.emit(event, n);
