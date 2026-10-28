@@ -72,6 +72,35 @@ export interface QueuedSend {
   at: number;
 }
 
+// The queue outlives a webview reload: a send that waits here (a plan held
+// for review, a CLI still starting, a refused write) is the reviewer's words
+// and a ⌘R must not eat them. The daemon's own outbox already survives (its
+// snapshot replays it); this is the part only the webview holds. Keyed by the
+// terminal the sends wait for; sessionStorage lives exactly as long as the
+// app run.
+const QUEUE_KEY = "redline.convo.queue.";
+
+export function readQueuedSends(terminalId: string | null): QueuedSend[] {
+  if (!terminalId) return [];
+  try {
+    const stored: unknown = JSON.parse(sessionStorage.getItem(QUEUE_KEY + terminalId) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((x): x is QueuedSend =>
+      !!x && typeof x === "object" && typeof (x as QueuedSend).id === "string" &&
+      typeof (x as QueuedSend).text === "string" && typeof (x as QueuedSend).at === "number");
+  } catch {
+    return [];
+  }
+}
+
+export function writeQueuedSends(terminalId: string | null, queue: readonly QueuedSend[]): void {
+  if (!terminalId) return;
+  try {
+    if (queue.length) sessionStorage.setItem(QUEUE_KEY + terminalId, JSON.stringify(queue));
+    else sessionStorage.removeItem(QUEUE_KEY + terminalId);
+  } catch { /* the in-memory queue still holds */ }
+}
+
 /** Send now, or join the queue: a composer that can't type queues, and so
  *  does one with older sends still waiting, so nothing overtakes them. */
 export function routeSend(readiness: Pick<ComposerReadiness, "ready">, queue: readonly QueuedSend[]): "send" | "queue" {

@@ -173,6 +173,19 @@ describe("suppression rules", () => {
     expect(item.id).toBe("skill-stale");
     expect(item.label).toContain("out of date");
   });
+
+  it("a skills update set aside with Later never blocks a send again this run", () => {
+    const pf = healthyPreflight();
+    pf.skill = { installed: true, outdated: true };
+    const blocked = deriveReadiness(healthy({ preflight: pf, requireIntegration: true }));
+    expect(blocked.find((i) => i.id === "skill-stale")?.state).toBe("blocked");
+    const deferred = deriveReadiness(healthy({ preflight: pf, requireIntegration: true, skillUpdateDeferred: true }));
+    expect(deferred.find((i) => i.id === "skill-stale")?.state).toBe("warn");
+    // Only the skills: a missing hook still blocks.
+    pf.hook = { installed: false, conflictingUrl: null };
+    const hookGone = deriveReadiness(healthy({ preflight: pf, requireIntegration: true, skillUpdateDeferred: true }));
+    expect(hookGone.find((i) => i.id === "hook-missing")?.state).toBe("blocked");
+  });
 });
 
 describe("the rest of the item set", () => {

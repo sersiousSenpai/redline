@@ -403,7 +403,7 @@ import {
   type HealthQuery,
   type IntegrationHealth,
 } from "./lib/integrationHealth";
-import { integrationNeedsRepair, repairIntegration } from "./lib/integrationSetup";
+import { deferSkillUpdate, integrationNeedsRepair, repairIntegration, skillUpdateDeferred } from "./lib/integrationSetup";
 import {
   clearDrafterShadow,
   drafterModeKey,
@@ -861,9 +861,14 @@ function App() {
   // on one or the chip is pressed.
   const [setupDismissed, setSetupDismissed] = usePersistedState("redline.setupDismissed", false);
   const setupContinuation = useRef<((ready: boolean) => void) | null>(null);
-  const requestSetup = useCallback((backend: Backend, projectPath: string | null = null): Promise<boolean> => {
+  // Why the dialog is up when a send raised it: "skill-stale" alone makes
+  // "Later" an answer (send with the installed skills, remembered for the app
+  // run) rather than a refusal, so a send can never loop on it.
+  const [setupReason, setSetupReason] = useState<ReadinessItem["id"] | null>(null);
+  const [skillDeferTick, setSkillDeferTick] = useState(0);
+  const requestSetup = useCallback((backend: Backend, projectPath: string | null = null, reason: ReadinessItem["id"] | null = null): Promise<boolean> => {
     if (setupContinuation.current || installBusyRef.current) return Promise.resolve(false);
-    setSetupPhase("setup"); setInstallError(null); setSetupBackend(backend);
+    setSetupPhase("setup"); setInstallError(null); setSetupBackend(backend); setSetupReason(reason);
     setSetupProject(projectPath); setSetupReviewInTerminal(false);
     return new Promise(resolve => { setupContinuation.current = resolve; });
   }, []);
@@ -6679,7 +6684,7 @@ function App() {
         : readinessRef.current,
     );
     if (gate.kind === "blocked" && gate.item.fix?.kind === "install-integration") {
-      if (await requestSetup(choice.backend, req.projectPath)) return launchPlan({ ...req, choice });
+      if (await requestSetup(choice.backend, req.projectPath, gate.item.id)) return launchPlan({ ...req, choice });
       return { ok: false, reason: gate.item.label, blocked: gate.item };
     }
     if (gate.kind === "blocked")
@@ -7427,8 +7432,13 @@ function App() {
     (setupPhase === "done" || (firstRun && integrationNeedsRepair(selectedSetupBackend, preflight))));
   const dismissSetup = () => {
     if (installBusyRef.current) return;
-    setSetupDismissed(true); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
-    const continuation = setupContinuation.current; setupContinuation.current = null; continuation?.(false);
+    // "Later" on a skills update is an answer: remembered until the app's next
+    // launch, and the send that raised the dialog goes on with the installed
+    // skills (its gate re-derives with the deferral and passes).
+    const skillsOnly = setupReason === "skill-stale" && setupPhase === "setup";
+    if (skillsOnly) { deferSkillUpdate(selectedSetupBackend); setSkillDeferTick((n) => n + 1); }
+    setSetupDismissed(true); setSetupPhase("setup"); setSetupBackend(null); setSetupReason(null); setInstallError(null);
+    const continuation = setupContinuation.current; setupContinuation.current = null; continuation?.(skillsOnly);
   };
   // First-run auto-start waits for the doors to finish — the tour's spotlight
   // is measured against plate geometry, and a coachmark pinned to a plate
@@ -7671,6 +7681,9 @@ function App() {
         targetBackend: isExtension ? "claude-code" : backend,
         targetModel: backendChoiceRef.current.model,
         codexHookInstalled: codexHookStatus?.installed,
+        // Read at call time, not closed over: the send that "Later" resumes
+        // re-derives its gate on the same tick the deferral is recorded.
+        skillUpdateDeferred: skillUpdateDeferred(isExtension ? "claude-code" : backend),
       };
     },
     [
@@ -7700,6 +7713,7 @@ function App() {
       ),
     [
       buildReadinessInput,
+      skillDeferTick,
       preflight,
       daemonBound,
       frontDoorResolvedProject,
@@ -10487,6 +10501,7 @@ function App() {
             progress={installProgress}
             done={setupPhase === "done"}
             pending={!!setupContinuation.current}
+            skillsUpdate={setupReason === "skill-stale" && !!preflight?.skill.installed}
             onInstall={() => { void installIntegration(true, selectedSetupBackend); }}
             onDismiss={dismissSetup}
             onLocate={() => { void applyReadinessFix({ id: "codex-missing", state: "blocked", label: "Locate Codex", detail: "Choose the Codex executable", fix: { label: "Locate CLI", kind: "locate-codex" } }); }}

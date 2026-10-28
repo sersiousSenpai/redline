@@ -4,9 +4,13 @@ import { backendLabel, type Backend } from "../lib/backendChoice";
 import type { PreflightStatus } from "../lib/readiness";
 import { CopyChip } from "./CopyChip";
 
-export function IntegrationSetupDialog({ backend, health, busy, progress, error, done, pending, onInstall, onDismiss, onReviewHooks, onLocate }: {
+export function IntegrationSetupDialog({ backend, health, busy, progress, error, done, pending, skillsUpdate = false, onInstall, onDismiss, onReviewHooks, onLocate }: {
   backend: Backend; health: PreflightStatus | null; busy: boolean;
   progress: string | null; error: string | null; done: boolean; pending: boolean;
+  /** A send raised the dialog for an installed-but-older skill set alone:
+   *  the dialog says what the update changes, and "Later" sends with the
+   *  installed skills (remembered until the app's next launch). */
+  skillsUpdate?: boolean;
   onInstall: () => void; onDismiss: () => void;
   onReviewHooks?: () => void; onLocate?: () => void;
 }) {
@@ -27,10 +31,12 @@ export function IntegrationSetupDialog({ backend, health, busy, progress, error,
   return <dialog ref={ref} className="rl-integration-dialog" aria-labelledby="integration-title"
     onCancel={event => { event.preventDefault(); if (!busy) onDismiss(); }}>
     <div className="rl-integration-eyebrow">{label} integration</div>
-    <h2 id="integration-title">{done ? "Integration files verified" : `Connect ${label} to Redline`}</h2>
-    <p>{done
+    <h2 id="integration-title">{done ? "Integration files verified" : skillsUpdate ? "Redline's skills have an update" : `Connect ${label} to Redline`}</h2>
+    {skillsUpdate && !done
+      ? <p>This version of Redline carries newer copies of the skills that teach {label} how to present a plan, fold your revisions back in and restore a plan. Updating rewrites them in <code>~/.claude/skills</code>; your hooks, settings and plans stay as they are. Later sends now with the skills you have, and Redline asks again the next time it starts.</p>
+      : <p>{done
       ? "Your review hooks and instructions are up to date."
-      : "Set up the components that bring plans, revisions, and captured prompts into Redline. Your message and project stay here."}</p>
+      : "Set up the components that bring plans, revisions, and captured prompts into Redline. Your message and project stay here."}</p>}
     <div className="rl-integration-pieces">
       {codex && <div><span aria-hidden>{health?.codex?.usable ? "✓" : "○"}</span> Codex CLI <small>{health?.codex?.usable ? `Version ${health.codex.version ?? "detected"}` : health?.codex?.found ? "Update required" : "Not installed"}</small></div>}
       {codex && health?.codex?.usable && <div><span aria-hidden>{health.codex.signedIn ? "✓" : "○"}</span> Codex account <small>{health.codex.authState === "signed-out" ? "Sign in required" : health.codex.signedIn ? "Connected" : "Not verified"}</small></div>}
@@ -45,10 +51,10 @@ export function IntegrationSetupDialog({ backend, health, busy, progress, error,
     {error && <p className="rl-integration-error" role="alert">{error}</p>}
     {busy && <p role="status" aria-live="polite">{progress ?? "Checking integration…"}</p>}
     <div className="rl-integration-actions">
-      <button type="button" disabled={busy} onClick={onDismiss}>{done ? "Done" : "Later"}</button>
+      <button type="button" disabled={busy} onClick={onDismiss}>{done ? "Done" : skillsUpdate && pending ? "Later — send now" : "Later"}</button>
       {codex && onLocate && <button type="button" disabled={busy} onClick={onLocate}>Locate CLI…</button>}
       {codex && health?.codex?.usable && (health.codex.authState === "signed-out" || hook && health?.codexHook?.trust !== "trusted") && onReviewHooks && <button type="button" disabled={busy} onClick={onReviewHooks}>{health.codex.authState === "signed-out" ? "Sign in to Codex" : "Review hooks in Codex"}</button>}
-      {!done && <button type="button" className="primary" disabled={busy} onClick={onInstall}>{busy ? "Working…" : codex && hook && !hookOutdated && health?.codex?.usable ? "Verify and continue" : pending ? "Install and continue" : error ? "Retry setup" : "Install integration"}</button>}
+      {!done && <button type="button" className="primary" disabled={busy} onClick={onInstall}>{busy ? "Working…" : codex && hook && !hookOutdated && health?.codex?.usable ? "Verify and continue" : skillsUpdate ? (pending ? "Update and send" : "Update skills") : pending ? "Install and continue" : error ? "Retry setup" : "Install integration"}</button>}
     </div>
   </dialog>;
 }

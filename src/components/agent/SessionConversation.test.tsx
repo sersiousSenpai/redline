@@ -97,6 +97,7 @@ async function typeAndSend(text: string) {
 }
 
 beforeEach(() => {
+  sessionStorage.clear();
   log.length = 0;
   api.batches.clear();
   api.snapshot = [BOUND, PROMPT, READ, DONE];
@@ -154,6 +155,17 @@ describe("SessionConversation", () => {
     await typeAndSend("Wait for me");
     expect(all(".rl-convo-bubble").map((e) => e.textContent)).not.toContain("Wait for me");
     expect(q(".rl-work-drawer-count")?.textContent).toBe("Queued · 1");
+  });
+
+  it("a dialog the CLI holds with no card behind it is never a bare Needs you: the card sends you to the terminal", async () => {
+    api.snapshot = [BOUND, PROMPT, ev("h1", 15, { kind: "readiness", ready: false, blocker: "native_dialog" })];
+    const onShowTerminal = vi.fn();
+    await render(props({ onShowTerminal }));
+    expect(q('[data-ask="terminal"]')?.textContent).toContain("Claude is asking in the terminal");
+    await act(async () => (q('[data-ask="terminal"] .rl-ask-terminal') as HTMLButtonElement).click());
+    expect(onShowTerminal).toHaveBeenCalled();
+    await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: true, blocker: null })] }));
+    expect(q('[data-ask="terminal"]')).toBeNull();
   });
 
   it("sends wait while the host says not ready, then go in order when it is", async () => {
@@ -395,6 +407,26 @@ describe("the work drawer and the pane's keys (W2)", () => {
     await render(props({ planState: { ...held, held: false }, header } as Partial<SessionConversationProps>));
     for (let i = 0; i < 4; i++) await flush();
     expect(log.filter((l) => /^(submit|steer)/.test(l))).toEqual(["steer term-1 n1", "submit term-1 and the tests"]);
+  });
+
+  it("a send waiting on a held plan survives a reload: the drawer has it back and nothing is typed", async () => {
+    api.snapshot = [BOUND, PROMPT, READ];
+    const held = { label: "Plan", kind: "plan" as const, held: true, toReview: 0 };
+    await render(props({ planState: held }));
+    await typeAndSend("and the tests");
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["and the tests"]);
+    // ⌘R: the webview's tree goes and comes back.
+    await act(async () => root.render(<div />));
+    await flush();
+    log.length = 0;
+    await render(props({ planState: held }));
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["and the tests"]);
+    expect(log.filter((l) => /^(submit|queue|steer)/.test(l))).toEqual([]);
+    // Released, it is typed once, and the stored copy goes with it.
+    await render(props({ planState: { ...held, held: false } }));
+    for (let i = 0; i < 4; i++) await flush();
+    expect(log.filter((l) => /^submit/.test(l))).toEqual(["submit term-1 and the tests"]);
+    expect(sessionStorage.getItem("redline.convo.queue.term-1")).toBeNull();
   });
 
   it("D25: in a genuine mid-turn (no plan held) Steer delivers now", async () => {

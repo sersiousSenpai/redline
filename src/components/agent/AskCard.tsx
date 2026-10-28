@@ -83,30 +83,54 @@ function Permission({
   // Always passes the payload's own suggestions back; with none there is no
   // rule to add, so there is no Always.
   const always = (ask.suggestions?.length ?? 0) > 0;
+  // The CLI's own "Ready to code? Would you like to proceed?" — ExitPlanMode
+  // asking for leave to build — reads as that question, not as a tool name.
+  const plan = ask.toolName === "ExitPlanMode";
   return (
     <>
       <div className="rl-ask-head">
         <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
-        <span>Allow {ask.toolName}?</span>
+        <span>{plan ? "Ready to build this plan?" : `Allow ${ask.toolName}?`}</span>
       </div>
-      {ask.summary && <code className="rl-ask-summary">{ask.summary}</code>}
+      {ask.summary && !plan && <code className="rl-ask-summary">{ask.summary}</code>}
       <div className="rl-ask-actions">
         <button type="button" className="rl-ask-btn" data-primary disabled={busy} onClick={() => onAnswer({ kind: "allow" })}>
-          {sending === "allow" ? "Allowing…" : "Allow once"}
+          {sending === "allow" ? (plan ? "Starting…" : "Allowing…") : plan ? "Yes, build" : "Allow once"}
         </button>
         {always && (
           <button type="button" className="rl-ask-btn" disabled={busy} title={ask.rule ?? undefined} onClick={() => onAnswer({ kind: "always" })}>
-            {sending === "always" ? "Allowing…" : "Always"}
+            {sending === "always" ? (plan ? "Starting…" : "Allowing…") : plan ? "Yes, accept edits" : "Always"}
           </button>
         )}
         <button type="button" className="rl-ask-btn" data-danger disabled={busy} onClick={() => onAnswer({ kind: "deny" })}>
-          {sending === "deny" ? "Denying…" : "Deny"}
+          {sending === "deny" ? (plan ? "Keeping…" : "Denying…") : plan ? "Keep planning" : "Deny"}
         </button>
         <span className="rl-ask-spacer" />
         {terminal}
       </div>
       {always && ask.rule && <p className="rl-ask-rule">Always: {ask.rule}</p>}
     </>
+  );
+}
+
+/** The CLI is showing a prompt of its own that no hook carried here (an
+ *  older hook install, a dialog the CLI raises by itself): the agent waits on
+ *  it, so the conversation says so and offers the terminal — never a bare
+ *  "Needs you" with nothing to answer. */
+export function TerminalAskCard({ harness, onShowTerminal }: { harness: string; onShowTerminal: () => void }) {
+  return (
+    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label="Question in the terminal" data-ask="terminal">
+      <div className="rl-ask-head">
+        <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
+        <span>{harness} is asking in the terminal</span>
+      </div>
+      <div className="rl-ask-actions">
+        <span className="rl-ask-spacer" />
+        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
+          Answer in terminal
+        </button>
+      </div>
+    </section>
   );
 }
 

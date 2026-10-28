@@ -2,7 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   forwardRef,
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -12,6 +14,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -93,6 +96,9 @@ import {
 } from "./TerminalTileMenu";
 import { TileGutter } from "./TileGutter";
 import { CloseConfirmModal } from "./CloseConfirmModal";
+// The tile ✕'s Terminate / Keep running ask: the wall close's own dialog,
+// loaded only when a running terminal's tile is closed.
+const CloseWallDialog = lazy(() => import("../workbench/CloseWallDialog").then((m) => ({ default: m.CloseWallDialog })));
 import {
   readTerminalWorkspace,
   saveTerminalWorkspace,
@@ -1621,6 +1627,29 @@ export const TerminalTabs = memo(
   };
   const runningNowRef = useRef(runningNow);
   runningNowRef.current = runningNow;
+  // A tile's ✕ (and its menu's Close) asks first when the terminal is still
+  // at work, exactly as a tab's close does: decided on a sample taken now,
+  // with an unread sample counted as running. Keep running takes the tile off
+  // the wall and leaves the shell alive under its session in the sidebar.
+  const [closeAsk, setCloseAsk] = useState<{ id: string; label: string } | null>(null);
+  const untileTab = (id: string) => {
+    const prev = tilesRef.current;
+    const at = prev.indexOf(id);
+    if (at === -1) return;
+    const next = prev.filter((tid) => tid !== id);
+    setTiles(next);
+    if (zoomedId === id) setZoomedId(null);
+    const focus = focusIdxRef.current;
+    setFocusedTile(Math.max(0, Math.min(focus > at ? focus - 1 : focus, next.length - 1)));
+  };
+  const requestCloseTerminal = (id: string) => {
+    const label = identity.byId.get(id)?.label ?? "terminal";
+    void runningNowRef.current([id]).then((running) => {
+      if (!tabsRef.current.some((t) => t.id === id)) return;
+      if (running.length === 0) closeRef.current(id);
+      else setCloseAsk({ id, label });
+    });
+  };
   const recoverDetached = async () => {
     if (recovering) return;
     setRecovering(true);
@@ -1733,6 +1762,7 @@ export const TerminalTabs = memo(
   const handlersRef = useRef({
     showInTile,
     closeTab,
+    requestCloseTerminal,
     newHere,
     addTab,
     openRepoTerminal,
@@ -1748,6 +1778,7 @@ export const TerminalTabs = memo(
   handlersRef.current = {
     showInTile,
     closeTab,
+    requestCloseTerminal,
     newHere,
     addTab,
     openRepoTerminal,
@@ -1763,7 +1794,7 @@ export const TerminalTabs = memo(
   const tileActions = useMemo<TileActions>(
     () => ({
       onPick: (tile, id) => handlersRef.current.showInTile(tile, id),
-      onCloseTerminal: (id) => handlersRef.current.closeTab(id),
+      onCloseTerminal: (id) => handlersRef.current.requestCloseTerminal(id),
       onNewHere: (tile) => handlersRef.current.newHere(tile),
       // New terminals land by the placement rule, not in the menu's tile.
       onNewHome: () => handlersRef.current.addTab(null),
@@ -1941,6 +1972,18 @@ export const TerminalTabs = memo(
         )}
       </div>
       </TerminalMenuDataContext.Provider>
+      {closeAsk && createPortal(
+        <Suspense fallback={null}>
+          <CloseWallDialog
+            running={[closeAsk.label]}
+            total={1}
+            onKeep={() => { untileTab(closeAsk.id); setCloseAsk(null); }}
+            onTerminate={() => { closeTab(closeAsk.id); setCloseAsk(null); }}
+            onCancel={() => setCloseAsk(null)}
+          />
+        </Suspense>,
+        document.body,
+      )}
       {showCloseConfirm && (
         <CloseConfirmModal
           onConfirm={() => {

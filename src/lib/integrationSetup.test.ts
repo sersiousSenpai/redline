@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { integrationNeedsRepair, integrationVerified, repairIntegration } from "./integrationSetup";
+import { clearSkillDeferrals, deferSkillUpdate, integrationNeedsRepair, integrationVerified, repairIntegration, skillUpdateDeferred } from "./integrationSetup";
 import type { PreflightStatus } from "./readiness";
 
 function health(): PreflightStatus {
@@ -37,5 +37,17 @@ describe("selected harness setup", () => {
     const result = await repairIntegration("codex", async () => {}, async () => { throw new Error("probe timed out"); }, () => {});
     expect(result.verified).toBe(false); expect(result.health).toBeNull();
     expect(result.errors).toContain("Verification failed: Error: probe timed out");
+  });
+});
+
+describe("Later on a skills update", () => {
+  it("is remembered per harness for the app run", () => {
+    clearSkillDeferrals();
+    expect(skillUpdateDeferred("claude-code")).toBe(false);
+    deferSkillUpdate("claude-code");
+    expect(skillUpdateDeferred("claude-code")).toBe(true);
+    expect(skillUpdateDeferred("codex")).toBe(false);
+    clearSkillDeferrals();
+    expect(skillUpdateDeferred("claude-code")).toBe(false);
   });
 });

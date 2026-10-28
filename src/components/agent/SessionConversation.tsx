@@ -77,9 +77,11 @@ import {
   routeSend,
   unqueueSend,
   type QueuedSend,
+  readQueuedSends,
+  writeQueuedSends,
 } from "./convo/readiness";
 import type { TermState } from "../../lib/termState";
-import { AskCard } from "./AskCard";
+import { AskCard, TerminalAskCard } from "./AskCard";
 import { SessionComposer } from "./SessionComposer";
 import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
 import "./conversation.css";
@@ -286,7 +288,7 @@ function SessionConversation(props: SessionConversationProps) {
     host: view.readiness,
     harness: props.harness,
   });
-  const [queue, setQueue] = useState<QueuedSend[]>([]);
+  const [queue, setQueue] = useState<QueuedSend[]>(() => readQueuedSends(terminalId));
   const queueRef = useRef(queue);
   queueRef.current = queue;
   // D25: the plan is held for review — the CLI is blocked in the review
@@ -319,6 +321,21 @@ function SessionConversation(props: SessionConversationProps) {
     if (moved) setQueue([]);
     owner.current = { terminalId, sessionId: props.sessionId };
   }, [terminalId, props.sessionId]);
+  // The queue survives a reload (`readQueuedSends`): read back for the
+  // terminal it waits for — at mount, or when that terminal is first known —
+  // and written on every change. A move to another terminal drops the old
+  // terminal's copy with its queue.
+  const persistedFor = useRef(terminalId);
+  useEffect(() => {
+    if (persistedFor.current !== terminalId) {
+      if (persistedFor.current) writeQueuedSends(persistedFor.current, []);
+      persistedFor.current = terminalId;
+      const stored = readQueuedSends(terminalId);
+      if (stored.length) setQueue((q) => (q.length ? q : stored));
+      return;
+    }
+    writeQueuedSends(terminalId, queue);
+  }, [terminalId, queue]);
 
   /** Sends go into the PTY one after another, never interleaved: each waits
    *  for the one before it to be typed. */
@@ -506,12 +523,15 @@ function SessionConversation(props: SessionConversationProps) {
   // the end of the conversation when no turn is running.
   const activeId = view.activeTurn?.id ?? null;
   const showWorking = !!status && status.kind !== "plan-ready" && (working || status.kind === "needs-you");
+  // The CLI holds a dialog of its own with no card behind it.
+  const terminalAsk = view.openAsks.length === 0 && view.readiness?.ready === false && view.readiness.blocker === "native_dialog";
   const tail =
-    view.openAsks.length > 0 || showWorking ? (
+    view.openAsks.length > 0 || terminalAsk || showWorking ? (
       <>
         {view.openAsks.map((ask) => (
           <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
         ))}
+        {terminalAsk && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
         {showWorking && <WorkingRow status={status!} onStop={terminalId ? stop : null} />}
       </>
     ) : null;

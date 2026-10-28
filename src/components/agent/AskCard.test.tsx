@@ -54,6 +54,15 @@ describe("AskCard", () => {
     expect(answers).toEqual([{ askId: "a1", answer: { kind: "always" } }]);
   });
 
+  it("ExitPlanMode's leave to build reads as the CLI's proceed question, with its three answers", async () => {
+    await act(async () => root.render(<AskCard ask={permission({ toolName: "ExitPlanMode", summary: "<!-- REDLINE_RESTORE:x -->", suggestions: [{}] })} onShowTerminal={() => {}} />));
+    expect(host.querySelector(".rl-ask-head")?.textContent).toBe("Ready to build this plan?");
+    expect(host.querySelector(".rl-ask-summary")).toBeNull();
+    expect([...host.querySelectorAll(".rl-ask-btn")].map((b) => b.textContent)).toEqual(["Yes, build", "Yes, accept edits", "Keep planning"]);
+    await act(async () => (host.querySelectorAll(".rl-ask-btn")[0] as HTMLButtonElement).click());
+    expect(answers).toEqual([{ askId: "a1", answer: { kind: "allow" } }]);
+  });
+
   it("Answer in terminal releases the hook, then shows the terminal", async () => {
     const onShowTerminal = vi.fn();
     await act(async () => root.render(<AskCard ask={permission()} onShowTerminal={onShowTerminal} />));

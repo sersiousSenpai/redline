@@ -59,3 +59,33 @@ export async function repairIntegration<T extends PreflightStatus>(
   if (!verified && errors.length === 0) errors.push(backend === "codex" && health?.codex?.authState === "signed-out" ? "Sign in to Codex, review Redline's hooks in /hooks, then verify again." : backend === "codex" && health?.codexHook?.trust && health.codexHook.trust !== "trusted" ? health.codexHook.trustDetail ?? "Review Redline's hooks in Codex /hooks, then verify again." : "Some integration components still need attention. Retry or inspect the integration settings.");
   return { health, errors, verified: verified && errors.length === 0 };
 }
+
+// ── "Later" on a skills update, remembered for the app run ─────────────────
+// An installed-but-older skill set still returns plans: what the update
+// changes is how they read. So "Later" on the setup dialog that a send raised
+// for the skills alone is an answer, not a dismissal — the send goes on with
+// the installed copies and the dialog stays away until the next launch of the
+// app. sessionStorage lives exactly that long (a webview reload keeps it, a
+// quit clears it); the module copy covers a storage that throws.
+const SKILL_DEFER_KEY = "redline.skillUpdateDeferred";
+const skillDeferred = new Set<Backend>();
+
+export function deferSkillUpdate(backend: Backend): void {
+  skillDeferred.add(backend);
+  try { sessionStorage.setItem(SKILL_DEFER_KEY, JSON.stringify([...skillDeferred])); } catch { /* the module copy holds */ }
+}
+
+export function skillUpdateDeferred(backend: Backend): boolean {
+  if (skillDeferred.has(backend)) return true;
+  try {
+    const stored: unknown = JSON.parse(sessionStorage.getItem(SKILL_DEFER_KEY) ?? "[]");
+    if (Array.isArray(stored) && stored.includes(backend)) { skillDeferred.add(backend); return true; }
+  } catch { /* nothing remembered */ }
+  return false;
+}
+
+/** Test seam: forget every deferral. */
+export function clearSkillDeferrals(): void {
+  skillDeferred.clear();
+  try { sessionStorage.removeItem(SKILL_DEFER_KEY); } catch { /* nothing to clear */ }
+}

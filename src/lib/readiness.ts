@@ -171,6 +171,10 @@ export interface ReadinessInput {
   /** Redline's Stop hook is installed in `~/.codex/hooks.json`
    *  (`get_codex_hook_status`). `undefined` while unprobed. */
   codexHookInstalled?: boolean;
+  /** The reviewer chose "Later" on a skills update this app run
+   *  (`deferSkillUpdate`): the item stays as a quiet warning and never blocks
+   *  a send again until the next launch. */
+  skillUpdateDeferred?: boolean;
 }
 
 /** How long a launch may sit with nothing arriving before we name the most
@@ -411,7 +415,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   ) {
     items.push({
       id: "skill-stale",
-      state: input.requireIntegration || input.targetIsExtension ? "blocked" : "warn",
+      state: (input.requireIntegration || input.targetIsExtension) && !input.skillUpdateDeferred ? "blocked" : "warn",
       label: pf.skill.outdated
         ? "The Redline skills are out of date"
         : "The Redline skills were removed",

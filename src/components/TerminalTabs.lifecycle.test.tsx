@@ -206,13 +206,43 @@ describe("walls: one fleet, many views", () => {
     await mount();
     const a = await open();
     const b = await open();
-    await open(true);
+    const c = await open(true);
+    // Idle shells: nothing to ask about.
+    mocks.procs = [a, b, c].map((id) => ({ id, fgComm: "zsh", fgIsShell: true, ports: [] }));
     await click(`[data-close="${b}"]`);
     expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: b });
     expect(order()).toEqual([a]);
     await click(`[data-close="${a}"]`);
     expect(order()).toEqual([]);
     expect(changes[changes.length - 1][1].tiles).toEqual([]);
+  });
+
+  it("a tile's ✕ on a terminal still at work asks first: Keep running takes it off the wall alive, Terminate kills it", async () => {
+    await mount();
+    const a = await open();
+    const b = await open();
+    mocks.procs = [
+      { id: a, fgComm: "node", fgIsShell: false, ports: [5173] },
+      { id: b, fgComm: "node", fgIsShell: false, ports: [3000] },
+    ];
+    // The sample and the lazy dialog both resolve off this tick: wait for
+    // the dialog itself (or, after a Keep / Terminate, for its absence).
+    const settle = () => act(async () => {
+      for (let i = 0; i < 200 && !document.body.querySelector("[aria-labelledby='rl-close-wall-title']"); i++) await new Promise((done) => setTimeout(done, 10));
+    });
+    await click(`[data-close="${a}"]`);
+    await settle();
+    expect(document.body.textContent).toContain("A terminal is still running");
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pty_kill", { id: a });
+    const button = (label: string) => [...document.body.querySelectorAll("button")].find((el) => el.textContent?.trim() === label)!;
+    await act(async () => button("Keep running").click());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pty_kill", { id: a });
+    expect(order()).toEqual([b]);
+    expect(ids()).toContain(a);
+    await click(`[data-close="${b}"]`);
+    await settle();
+    await act(async () => button("Terminate").click());
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: b });
   });
 
   it("reports every terminal's state and label to the host, only when one changes; closeTerminals kills several at once", async () => {
