@@ -26,10 +26,10 @@ const key = (
 });
 
 describe("submitAction", () => {
-  it("defaults to the original binding: ⏎ plans, ⌘⏎ drafts", () => {
+  it("⏎ and ⌘⏎ both launch the plan on the plan route — never a Draft", () => {
     expect(submitAction(key("Enter"))).toBe("plan");
-    expect(submitAction(key("Enter", { metaKey: true }))).toBe("drafter");
-    expect(submitAction(key("Enter", { ctrlKey: true }))).toBe("drafter");
+    expect(submitAction(key("Enter", { metaKey: true }))).toBe("plan");
+    expect(submitAction(key("Enter", { ctrlKey: true }))).toBe("plan");
   });
 
   it("sends to chat on ⏎ and falls back to plan on ⌘⏎", () => {
@@ -57,10 +57,11 @@ describe("submitAction", () => {
     expect(submitAction(key("Enter", { isComposing: true }), "chat")).toBe("ignore");
   });
 
-  it("puts the OTHER destination on the modifier, whichever is selected", () => {
-    // The point: both destinations stay one keystroke away in either mode.
+  it("puts the plan on the modifier, whichever is selected", () => {
+    // The re-walk: ⌘⏎ on the plan route opened a Draft and swapped the
+    // project chip. The build is one keystroke away from every route.
     expect(submitAction(key("Enter", { metaKey: true }), "plan")).toBe(
-      "drafter",
+      "plan",
     );
     expect(submitAction(key("Enter", { metaKey: true }), "drafter")).toBe(
       "plan",
@@ -81,7 +82,7 @@ describe("submitAction", () => {
 
   it("lets the command modifier win over shift", () => {
     expect(submitAction(key("Enter", { metaKey: true, shiftKey: true }))).toBe(
-      "drafter",
+      "plan",
     );
   });
 
@@ -102,11 +103,10 @@ describe("submitAction", () => {
 });
 
 describe("fallbackDestination", () => {
-  it("reproduces the two-destination behavior exactly", () => {
-    // The whole point of the rename: plan⇄drafter is untouched.
-    expect(fallbackDestination("plan")).toBe("drafter");
+  it("is the plan from every route, the plan route included", () => {
+    expect(fallbackDestination("plan")).toBe("plan");
     expect(fallbackDestination("drafter")).toBe("plan");
-    expect(fallbackDestination(fallbackDestination("plan"))).toBe("plan");
+    expect(fallbackDestination("browser")).toBe("plan");
   });
 
   it("gives chat a sane modifier — ⌘⏎ plans", () => {

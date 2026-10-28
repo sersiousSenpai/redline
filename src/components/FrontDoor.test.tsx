@@ -946,6 +946,14 @@ describe("FrontDoor — no Just run it", () => {
     expect(onLaunch).toHaveBeenCalledOnce(); expect(onDrafter).not.toHaveBeenCalled();
   });
 
+  it("⌘⏎ on the plan route launches the plan, as ⏎ does — never a Draft (the re-walk)", async () => {
+    const onLaunch = vi.fn(), onDrafter = vi.fn();
+    await mount({ destination: "plan", onLaunch, onDrafter, text: "Add one README line" });
+    await act(async () => composer()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })));
+    expect(onLaunch).toHaveBeenCalledOnce();
+    expect(onDrafter).not.toHaveBeenCalled();
+  });
+
   it("a sticky \"run\" from before the cut falls back to plan", async () => {
     const onLaunch = vi.fn();
     await mount({ destination: "run" as unknown as "plan", onLaunch, text: "Bump the lockfile" });

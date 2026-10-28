@@ -1253,9 +1253,9 @@ const OPEN_PREFIX = "open:";
  *  shaping long briefs shouldn't mean reaching for a modifier every time.
  *  Picking never sends — you choose the destination, then write.
  *
- *  The modifier always holds the OTHER destination, so both stay one
- *  keystroke away in either mode, and the rows show the live key so the
- *  binding is never something you have to remember. */
+ *  The modifier always launches the plan, so the build stays one keystroke
+ *  away from every route, and the rows show the live key so the binding is
+ *  never something you have to remember. */
 function PlanMenu({
   destination,
   onDestinationChange,
@@ -1274,7 +1274,9 @@ function PlanMenu({
   const browserOffered = !!openTargets?.some((t) => t.id === "browser");
   const rows = DESTINATIONS.filter(d => (!allowedDestinations || allowedDestinations.includes(d.id)) && (d.id !== "chat" || chatEnabled) && (d.id !== "browser" || browserOffered));
   const current = rows.find(d => d.id === destination) ?? rows[0];
-  const alternate = rows.some(row => row.id === fallbackDestination(destination)) ? fallbackDestination(destination) : rows.find(row => row.id !== destination)?.id;
+  // ⌘⏎ launches the plan (`fallbackDestination`): its row says so unless
+  // the plan is already where ⏎ goes.
+  const alternate = destination !== "plan" && rows.some(row => row.id === fallbackDestination(destination)) ? fallbackDestination(destination) : undefined;
   // The other Open targets act at once: picking one converts the door tab
   // into that surface, sentence kept.
   const opens = onOpenTarget ? (openTargets ?? []).filter((t) => t.id !== "browser" && !rows.some((d) => d.id === t.id)) : [];

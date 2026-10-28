@@ -40,28 +40,25 @@ export interface SubmitKeyInfo {
   isComposing?: boolean;
 }
 
-/** What the modifier reaches for.
+/** What the modifier reaches for: the plan, always.
  *
- *  With two destinations "the other one" was total; with three it isn't, and
- *  an involution over three values cannot exist. The rule that replaces it is
- *  the one the two-destination version already implemented in the only cases
- *  that existed: **plan is the fallback, unless you are already on plan.**
- *  So ⌘⏎ still opens the Drafter from the plan route and still plans from the
- *  Drafter route — byte-for-byte today's behavior — and chat gets the sane
- *  answer, ⌘⏎ = plan, because "I have written the thing out, just build it" is
- *  the move you want one key away from a half-formed thought. */
-export function fallbackDestination(d: LaunchDestination): LaunchDestination {
-  return d === "plan" ? "drafter" : "plan";
+ *  ⌘⏎ is "I have written the thing out, just build it" — it launches the
+ *  plan in the door's selected project, exactly as ⏎ does on the plan route.
+ *  It used to open the Drafter from the plan route (the other of two
+ *  destinations), which put a finished brief into a Draft and, with it, the
+ *  Drafter's own project in place of the one the chip showed. A modifier must
+ *  never move the sentence somewhere the reviewer did not choose. */
+export function fallbackDestination(_d: LaunchDestination): LaunchDestination {
+  return "plan";
 }
 
 /** What ⏎ does in the composer.
  *
- *  ⏎ sends to the SELECTED destination and ⌘⏎/^⏎ to the other one, so both
- *  are always one keystroke away whichever is current — and with the default
- *  (`plan`) selected this is exactly the original binding: ⏎ launches, ⌘⏎
- *  opens the Drafter. ⇧⏎ is always a newline; the composer is multi-line and
- *  any other binding breaks typing. A composition-in-flight Enter belongs to
- *  the IME. */
+ *  ⏎ sends to the SELECTED destination and ⌘⏎/^⏎ launches the plan
+ *  (`fallbackDestination`), so on the plan route the two keys agree and from
+ *  any other route the build is one keystroke away. ⇧⏎ is always a newline;
+ *  the composer is multi-line and any other binding breaks typing. A
+ *  composition-in-flight Enter belongs to the IME. */
 export function submitAction(
   e: SubmitKeyInfo,
   destination: LaunchDestination = "plan",
