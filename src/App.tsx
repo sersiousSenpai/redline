@@ -372,7 +372,7 @@ import { HOME_KEY, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, pl
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
-import { NARROW_DOC_MIN, NO_NARROW_OPEN, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
+import { NO_NARROW_OPEN, narrowLayoutInputs, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
 import { RAIL_EDGE_W, SIDEBAR_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
 import type { OpenFileDetail } from "./lib/fileLinks";
@@ -2795,6 +2795,10 @@ function App() {
   const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen });
   const poseRef = useRef(pose);
   poseRef.current = pose;
+  const narrowOpenRef = useRef(narrowOpen);
+  narrowOpenRef.current = narrowOpen;
+  const { docMin: narrowDocMin, overlayFirst: narrowOverlayFirst } = narrowLayoutInputs(pose, narrowOpen);
+  const narrowInputs = useMemo(() => ({ docMin: narrowDocMin, overlayFirst: narrowOverlayFirst }), [narrowDocMin, narrowOverlayFirst]);
   const { sidebarCollapsed, paneCollapsed } = pose;
   // A folded rail is never fullscreen underneath.
   const paneFullscreen = paneFullscreenPref && !paneCollapsed;
@@ -3548,6 +3552,10 @@ function App() {
         paneWidth,
         paneCollapsed,
         paneFullscreen,
+        // The same inputs the live path (`applyLiveLayout`) measures with.
+        paneEdgeW: RAIL_EDGE_W,
+        sidebarEdgeW: SIDEBAR_EDGE_W,
+        ...narrowInputs,
       }),
     [
       winWidth,
@@ -3556,6 +3564,7 @@ function App() {
       paneWidth,
       paneCollapsed,
       paneFullscreen,
+      narrowInputs,
     ],
   );
 
@@ -3629,8 +3638,9 @@ function App() {
         paneEdgeW: RAIL_EDGE_W,
         // A collapsed sidebar keeps its icon pose (D18).
         sidebarEdgeW: SIDEBAR_EDGE_W,
-        // Narrow, a column opened by hand curtains over a readable document.
-        docMin: poseRef.current.railNarrow ? NARROW_DOC_MIN : undefined,
+        // Narrow, a column opened by hand curtains over a readable document;
+        // the default narrow pose never does (D18).
+        ...narrowLayoutInputs(poseRef.current, narrowOpenRef.current),
       });
       liveLayoutRef.current = l;
 
@@ -10378,6 +10388,7 @@ function App() {
         onPillClick={openDoorTab}
         pill
         surfaceKey={doorNavKey}
+        plateKey={wbLayoutKey}
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
         onOpenChange={setFrontDoorOpen}

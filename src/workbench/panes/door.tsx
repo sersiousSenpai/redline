@@ -9,5 +9,8 @@
 import type { PaneContext } from "../WorkbenchStage";
 
 export function DoorPane({ ctx }: { ctx: PaneContext }) {
-  return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.visible && ctx.focused ? "" : undefined} />;
+  // `active`, not the deferred `visible`: the island measures this plate on
+  // the commit that makes its tab active (App's `landing` reads the same
+  // undeferred view), so the attribute must be there on that commit.
+  return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.active && ctx.focused ? "" : undefined} />;
 }

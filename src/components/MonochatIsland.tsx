@@ -138,7 +138,7 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, pill = true, onVisibilityChange, context, busy, announce = "", onNewChat, onPillClick, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, pill = true, onVisibilityChange, context, busy, announce = "", onNewChat, onPillClick, surfaceKey = "", clearanceKey = "", plateKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -174,6 +174,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   surfaceKey?: string;
   /** Anything that moves the footer: the pill re-measures its row. */
   clearanceKey?: string;
+  /** The workbench layout (sets, tabs, pane tree): a door plate replaced or
+   *  moved without a surface change (⌘T in another set, a split) is
+   *  re-measured, never landed on from a stale rect. */
+  plateKey?: string;
   children: ReactNode;
 }) {
   const [reduced, setReduced] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
@@ -353,9 +357,17 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     // The flow shell's stage names its own rect (`data-rl-door-plate`), and
     // that rect is the whole of the free area: its stage already sits between
     // the top bar, the sidebar and whatever is below.
-    const stage = document.querySelector<HTMLElement>("[data-rl-door-plate]");
-    const plate = stage ?? document.querySelector<HTMLElement>(".rl-doc-column");
+    // Found here for the observer, and again on every measure: a plate whose
+    // tab unmounted (a set switch, a closed door tab) measures as all zeros,
+    // and a fit taken from it would leave the next door tab blank.
+    const findPlate = () => {
+      const found = document.querySelector<HTMLElement>("[data-rl-door-plate]");
+      const stage = found?.isConnected ? found : null;
+      return { stage, plate: stage ?? document.querySelector<HTMLElement>(".rl-doc-column") };
+    };
+    const { plate: observed } = findPlate();
     const position = () => {
+      const { stage, plate } = findPlate();
       // Read afresh: the status bar is a lazy chunk whose placeholder holds
       // its row until it lands, so the element can change under the effect.
       const rect = (document.querySelector<HTMLElement>(".rl-app-footer") ?? footer)?.getBoundingClientRect();
@@ -399,10 +411,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     if (footer) observer?.observe(footer);
     if (header) observer?.observe(header);
-    if (plate) observer?.observe(plate);
+    if (observed) observer?.observe(observed);
     window.addEventListener("resize", position);
     return () => { observer?.disconnect(); window.removeEventListener("resize", position); };
-  }, [surfaceKey, clearanceKey, open]);
+  }, [surfaceKey, clearanceKey, open, landing, plateKey]);
 
   useEffect(() => { onVisibilityChange?.(visible); }, [visible, onVisibilityChange]);
   // The door coming up takes the card's place; it never comes back by itself.

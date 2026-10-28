@@ -328,7 +328,8 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
     if (!el) return;
     // Captured, so a fast drag that leaves the 6px handle keeps tracking.
     const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture?.(e.pointerId);
+    const pointerId = e.pointerId;
+    handle.setPointerCapture?.(pointerId);
     onDraggingChange?.(true);
     beginResizeSession();
     // The container cannot move during the drag: read it once, not per event.
@@ -361,13 +362,26 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", escape, true);
       handle.removeEventListener("lostpointercapture", cancel);
+      if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture?.(pointerId);
       if (commit) onRatioChange(pending);
       onDraggingChange?.(false);
       endResizeSession();
     };
     const up = () => finish(true);
     const cancel = () => finish(false);
+    // Esc mid-drag puts the split back where it was, and is the drag's alone:
+    // captured at the window and stopped there, so no door, pane or menu
+    // also takes it as its own dismissal (an untouched door closing under
+    // the drag left its pane blank).
+    const escape = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+    window.addEventListener("keydown", escape, true);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);

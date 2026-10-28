@@ -41,6 +41,18 @@ export interface Pose {
   sidebarNarrow: boolean;
 }
 
+/** What the pane layout needs from the pose (`computePaneLayout`): the
+ *  narrow document floor applies only while a column was opened BY HAND in
+ *  its narrow regime — the default narrow pose (rail at its edge, sidebar in
+ *  its icon pose) never curtains the document — and the hand-opened column
+ *  is the one that curtains. */
+export function narrowLayoutInputs(pose: Pose, open: NarrowOpen): { docMin?: number; overlayFirst?: "pane" | "sidebar" } {
+  const rail = pose.railNarrow && open.rail && !pose.paneCollapsed;
+  const sidebar = pose.sidebarNarrow && open.sidebar && !pose.sidebarCollapsed;
+  if (!rail && !sidebar) return {};
+  return { docMin: NARROW_DOC_MIN, overlayFirst: rail && sidebar ? undefined : rail ? "pane" : "sidebar" };
+}
+
 export function responsivePose(i: PoseInput): Pose {
   const railNarrow = i.winWidth < RAIL_FOLD_BELOW;
   const sidebarNarrow = i.winWidth < SIDEBAR_FOLD_BELOW;

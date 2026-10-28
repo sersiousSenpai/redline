@@ -58,7 +58,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -90,6 +90,7 @@ const SCENE = {
   tour: { board: "workbench" },
   "tour-no-wall": { board: "workbench" },
   tile: { board: "workbench" },
+  "plan-split-door": { board: "workbench" },
   drafter: { board: "workbench" },
   "rail-plan-discussion": { board: "workbench" },
   "rail-plan-talk": { board: "workbench" },
@@ -264,6 +265,15 @@ const DRIVES = {
     { do: "viewport", run: true, why: "back to the run's size" },
     { do: "click", css: [".rl-wb-right-btn[aria-label='Tile the plan alongside']"], why: "the strip's tile: the plan beside Localhost" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-split .rl-split-divider') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=plan]') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=servers]')", timeout: 8000, why: "the tab is the plan beside Localhost, a divider between" },
+  ],
+  // ⌘D on a plan: the plan's tab splits right, a door in the new half,
+  // and the door's composer lands on THAT half — never over the plan.
+  "plan-split-door": [
+    ...SELECT_PLAN,
+    { do: "click", css: [".rl-plan-pane h1"], why: "the plan pane has the focus" },
+    { do: "key", key: "d", modifiers: 4, why: "⌘D: split right with a door" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-split .rl-split-divider') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-rl-door-plate]')", timeout: 8000, why: "the tab is the plan beside a door" },
+    { do: "waitFor", expr: "(() => { const plate = document.querySelector('[data-rl-door-plate]').getBoundingClientRect(); const box = document.querySelector('.rl-frontdoor-focus[data-landed] .rl-fd-island'); if (!box) return false; const r = box.getBoundingClientRect(); return r.left >= plate.left - 1 && r.right <= plate.right + 1; })()", timeout: 8000, why: "the door's box lands inside its own half" },
   ],
   drafter: [
     ...AT_HOME,

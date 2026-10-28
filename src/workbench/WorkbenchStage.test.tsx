@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emptyWorkbench, type AnyPane } from "./model";
 import { reduce } from "./reducer";
@@ -96,6 +96,29 @@ describe("the tile's divider", () => {
     expect(isResizing()).toBe(false);
     expect(weights()).toEqual(before);
     expect(dragging()).toEqual([true, false]);
+  });
+
+  it("Esc mid-drag puts the split back, ends the session, and is the drag's alone", async () => {
+    const { divider, weights, dragging } = await split();
+    const before = weights();
+    const first = divider.previousElementSibling as HTMLElement;
+    const basis = first.style.flexBasis;
+    const bystander = vi.fn();
+    window.addEventListener("keydown", bystander);
+    await act(async () => { divider.dispatchEvent(pointer("pointerdown", 10)); });
+    await act(async () => { window.dispatchEvent(pointer("pointermove", 400)); });
+    const esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    await act(async () => { document.body.dispatchEvent(esc); });
+    window.removeEventListener("keydown", bystander);
+    expect(esc.defaultPrevented).toBe(true);
+    expect(bystander).not.toHaveBeenCalled();
+    expect(isResizing()).toBe(false);
+    expect(weights()).toEqual(before);
+    expect(first.style.flexBasis).toBe(basis);
+    expect(dragging()).toEqual([true, false]);
+    // A release afterwards commits nothing.
+    await act(async () => { window.dispatchEvent(pointer("pointerup")); });
+    expect(weights()).toEqual(before);
   });
 
   it("a lost capture ends it too, once; a release after it changes nothing", async () => {

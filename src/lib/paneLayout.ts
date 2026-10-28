@@ -161,6 +161,10 @@ export interface PaneLayoutInput {
    *  readable plan, and a side column opened over it there curtains rather
    *  than squeezing it (D18). */
   docMin?: number;
+  /** The column the user opened by hand in its narrow regime: it alone
+   *  curtains over the document, and the other column (in its default pose)
+   *  stays in flow, taking only what the first cannot (D18). */
+  overlayFirst?: "pane" | "sidebar";
 }
 
 export interface PaneLayout {
@@ -199,7 +203,13 @@ export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
   // which part of the doc stays uncovered.
   let paneOverlayPx = 0;
   let sidebarOverlayPx = 0;
-  if (deficit > 0) {
+  if (deficit > 0 && i.overlayFirst === "pane") {
+    paneOverlayPx = Math.min(p, deficit);
+    sidebarOverlayPx = Math.min(s, deficit - paneOverlayPx);
+  } else if (deficit > 0 && i.overlayFirst === "sidebar") {
+    sidebarOverlayPx = Math.min(s, deficit);
+    paneOverlayPx = Math.min(p, deficit - sidebarOverlayPx);
+  } else if (deficit > 0) {
     paneOverlayPx = Math.min(p, Math.round((deficit * p) / Math.max(1, s + p)));
     sidebarOverlayPx = Math.min(s, deficit - paneOverlayPx);
     // If one side couldn't absorb its share, the other takes the remainder.

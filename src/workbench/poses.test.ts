@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 
-import { NO_NARROW_OPEN, responsivePose, settleNarrowOpen } from "./poses";
+import { NARROW_DOC_MIN, NO_NARROW_OPEN, narrowLayoutInputs, responsivePose, settleNarrowOpen } from "./poses";
 
 const open = { sidebarCollapsed: false, paneCollapsed: false };
 
@@ -26,5 +26,14 @@ describe("responsive poses (D18)", () => {
     // Back above the breakpoint the stored preference applies again: a rail
     // the user had folded stays folded, one they had open is open.
     expect(responsivePose({ winWidth: 1300, sidebarCollapsed: false, paneCollapsed: true, narrowOpen: settleNarrowOpen(narrowOpen, 1300) })).toMatchObject({ paneCollapsed: true });
+  });
+  it("floors the document only for a column opened by hand while narrow, and names it as the curtain", () => {
+    const rest = responsivePose({ winWidth: 1000, ...open, narrowOpen: NO_NARROW_OPEN });
+    expect(narrowLayoutInputs(rest, NO_NARROW_OPEN)).toEqual({});
+    const railOpen = { rail: true, sidebar: false };
+    const pose = responsivePose({ winWidth: 1000, ...open, narrowOpen: railOpen });
+    expect(narrowLayoutInputs(pose, railOpen)).toEqual({ docMin: NARROW_DOC_MIN, overlayFirst: "pane" });
+    const both = { rail: true, sidebar: true };
+    expect(narrowLayoutInputs(responsivePose({ winWidth: 880, ...open, narrowOpen: both }), both)).toEqual({ docMin: NARROW_DOC_MIN, overlayFirst: undefined });
   });
 });

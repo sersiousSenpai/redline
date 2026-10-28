@@ -71,6 +71,17 @@ describe("gridShapeFor — shape tables", () => {
   });
 });
 
+describe("gridShapeFor — a crowded wall", () => {
+  it("14 tiles in a 758×750 wall make a grid, never fourteen one-row slivers", () => {
+    const wall: SizePx = { width: 758, height: 750 };
+    const s = gridShapeFor(14, wall);
+    expect(s.rows).toBeGreaterThanOrEqual(3);
+    expect(s).toEqual(shape(14, 4, 4, [4, 4, 4, 2]));
+    // Every crowded count shapes the same way: rows grow with n.
+    for (let n = 8; n <= 14; n++) expect(gridShapeFor(n, wall).rows).toBeGreaterThan(1);
+  });
+});
+
 describe("gridShapeFor — structural invariants", () => {
   const SIZES: SizePx[] = [
     { width: 1728, height: 291 },

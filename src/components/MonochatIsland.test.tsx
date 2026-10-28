@@ -490,6 +490,38 @@ describe("the flow shell", () => {
     expect(pose()).toBe("conversation");
   });
 
+  it("re-measures a door plate replaced without a surface change (the blank door tab in a plan set)", async () => {
+    vi.stubGlobal("innerWidth", 1280); vi.stubGlobal("innerHeight", 800);
+    // A detached element measures as all zeros in WebKit.
+    const box = (rect: { left: number; top: number; right: number; bottom: number }) => (element: HTMLElement | null) => {
+      if (element) element.getBoundingClientRect = () => (element.isConnected
+        ? { ...rect, x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top, toJSON() {} }
+        : { left: 0, top: 0, right: 0, bottom: 0, x: 0, y: 0, width: 0, height: 0, toJSON() {} }) as DOMRect;
+    };
+    function Swap({ plate, landing }: { plate: "a" | "b" | null; landing: boolean }) {
+      const [open, setOpen] = useState(false);
+      return <>
+        <header className="rl-app-header" ref={box({ left: 0, top: 0, right: 1280, bottom: 47 })}/>
+        {plate === "a" && <main key="a" data-rl-door-plate ref={box({ left: 253, top: 47, right: 1280, bottom: 800 })}/>}
+        {plate === "b" && <main key="b" data-rl-door-plate ref={box({ left: 640, top: 90, right: 1200, bottom: 760 })}/>}
+        <MonochatIsland landing={landing} plateKey={plate ?? ""} surfaceKey="document" open={open} onOpenChange={setOpen} context="Plan" busy={false}>
+          <div className="rl-frontdoor has-welcome"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div></div>
+        </MonochatIsland>
+      </>;
+    }
+    await render(<Swap plate="a" landing/>);
+    expect(layerOf().hasAttribute("data-landed")).toBe(true);
+    // A set switch: Home's tab bodies unmount; a stray measure meanwhile.
+    await render(<Swap plate={null} landing={false}/>);
+    await act(async () => { window.dispatchEvent(new Event("resize")); });
+    // ⌘T (or ⌘D) in the plan set: a new plate, the same surface.
+    await render(<Swap plate="b" landing/>);
+    expect(layerOf().hasAttribute("data-landed")).toBe(true);
+    expect(layerOf().style.getPropertyValue("--fd-rest-top")).toBe("90px");
+    expect(layerOf().style.getPropertyValue("--fd-rest-left")).toBe("640px");
+    expect(layerOf().style.getPropertyValue("--fd-rest-right")).toBe("80px");
+  });
+
   it("shows the pill on a Tools page", async () => {
     await render(<Stage landing={false} pill/>);
     expect(pill().dataset.hidden).toBe("false");

@@ -165,7 +165,7 @@ function scoreShape(size: SizePx, shape: GridShape): number | null {
  *  physically cannot hold two rows of terminal". Every `rows = 1..n` candidate
  *  is scored by the character grid a tile would get; ties break toward fewer
  *  rows. When every candidate is rejected (tiny dock, many tiles) the fall
- *  back maximizes raw character area — this never throws and never returns an
+ *  back maximizes each tile's scarcer dimension — this never throws and never returns an
  *  invalid shape, whatever n or size it is handed.
  *
  *  `opts.current` engages hysteresis: the incumbent shape survives unless a
@@ -216,18 +216,24 @@ export function gridShapeFor(
     return best;
   }
 
-  // Nothing clears the floor — maximize raw character area instead.
+  // Nothing clears the floor (many tiles in a modest wall) — give every tile
+  // the most of its SCARCER dimension, measured against the 80×24 target. Raw
+  // character area is the wrong measure here: one header strip per row makes
+  // a single row of N slivers win it (14 tiles six characters wide), when a
+  // 4×4 grid gives each tile four times the columns for a third of the rows.
+  const balance = (s: GridShape) =>
+    Math.min(charCols(size, s) / TARGET_COLS, charRows(size, s) / TARGET_ROWS);
   let fallback = candidates[0];
   let fallbackMetric = -Infinity;
   for (const s of candidates) {
-    const metric = charCols(size, s) * charRows(size, s);
+    const metric = balance(s);
     if (metric > fallbackMetric) {
       fallback = s;
       fallbackMetric = metric;
     }
   }
   if (incumbent && incumbent !== fallback) {
-    const incumbentMetric = charCols(size, incumbent) * charRows(size, incumbent);
+    const incumbentMetric = balance(incumbent);
     if (incumbentMetric > 0 && fallbackMetric <= incumbentMetric * SHAPE_HYSTERESIS) {
       return incumbent;
     }

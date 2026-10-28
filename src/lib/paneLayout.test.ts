@@ -57,6 +57,16 @@ describe("computePaneLayout", () => {
     expect(full.docFlowW).toBe(1440 - DIVIDER_W - 2 * SHELL_EDGE - 240);
   });
 
+  it("a hand-opened narrow rail curtains alone: the sidebar in its default pose stays in flow (D18)", () => {
+    const l = computePaneLayout({ ...base, winWidth: 900, paneWidth: 400, docMin: 560, overlayFirst: "pane" });
+    expect(l.sidebarOverlayPx).toBe(0);
+    expect(l.sidebarFlowW).toBe(240);
+    expect(l.paneOverlayPx).toBeGreaterThan(0);
+    // The default narrow pose (rail at its edge, no floor) never curtains.
+    const rest = computePaneLayout({ ...base, winWidth: 900, paneCollapsed: true, paneEdgeW: 40 });
+    expect(rest.curtainActive).toBe(false);
+  });
+
   it("passes widths through untouched when the doc has room", () => {
     const l = computePaneLayout(base);
     expect(l.sidebarFlowW).toBe(240);

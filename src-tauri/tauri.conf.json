@@ -22,7 +22,7 @@
         "title": "Redline",
         "width": 1440,
         "height": 900,
-        "minWidth": 900,
+        "minWidth": 800,
         "minHeight": 640,
         "center": true,
         "visible": false,
