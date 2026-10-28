@@ -14,6 +14,7 @@ import { useState } from "react";
 import { CircleHelp, CirclePause, ShieldQuestion } from "lucide-react";
 import { answerAsk } from "./convo/api";
 import type { AskAnswer, AskQuestion, ConvoAsk } from "./convo/types";
+import type { ProceedPrompt } from "./convo/proceedPrompt";
 
 export interface AskCardProps {
   ask: ConvoAsk;
@@ -278,6 +279,63 @@ export function StoppedCard({ harness, building, onRetry, onShowTerminal }: {
           Open Terminal
         </button>
       </div>
+    </section>
+  );
+}
+
+/** The CLI's own "Ready to code? Would you like to proceed?" read off its
+ *  terminal (`convo/proceedPrompt`) — no hook carried it here — as the card
+ *  a held ExitPlanMode would have been: its approving choices build, the
+ *  other sends you to the terminal to say what to change. Each choice is
+ *  answered with the keys a person would press there. */
+export function ProceedCard({ prompt, onChoose, onShowTerminal }: {
+  prompt: ProceedPrompt;
+  onChoose: (n: number) => Promise<void>;
+  onShowTerminal: () => void;
+}) {
+  const [sending, setSending] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+  const choose = (n: number, thenTerminal: boolean) => {
+    setSending(n);
+    setFailed(false);
+    onChoose(n)
+      .then(() => {
+        if (thenTerminal) onShowTerminal();
+      })
+      .catch(() => {
+        setSending(null);
+        setFailed(true);
+      });
+  };
+  const approving = prompt.options.filter((o) => o.approves);
+  const other = prompt.options.find((o) => !o.approves) ?? null;
+  return (
+    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label="Ready to build this plan?" data-ask="proceed">
+      <div className="rl-ask-head">
+        <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
+        <span>Ready to build this plan?</span>
+      </div>
+      <div className="rl-ask-actions">
+        {approving.map((o, i) => (
+          <button key={o.n} type="button" className="rl-ask-btn" data-primary={i === 0 || undefined} disabled={sending !== null} onClick={() => choose(o.n, false)}>
+            {sending === o.n ? "Starting…" : i === 0 ? `Yes, build · ${o.label.replace(/^Yes,\s*(and\s*)?/i, "")}` : o.label}
+          </button>
+        ))}
+        {other && (
+          <button type="button" className="rl-ask-btn" data-danger disabled={sending !== null} onClick={() => choose(other.n, true)}>
+            {other.label}
+          </button>
+        )}
+        <span className="rl-ask-spacer" />
+        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
+          Answer in terminal
+        </button>
+      </div>
+      {failed && (
+        <p className="rl-ask-note" role="alert">
+          That answer didn't reach the terminal. Try again, or answer there.
+        </p>
+      )}
     </section>
   );
 }

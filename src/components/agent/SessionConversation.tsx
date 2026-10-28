@@ -39,7 +39,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, use
 import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
 import { MarkdownView } from "../MarkdownView";
 import { Spinner } from "../Spinner";
-import { answerAsk, convoExpect, convoPage, convoQueue, convoSteer, convoSubscribe, convoUnqueue, convoUnsubscribe, interruptTerminal, ptySubmit } from "./convo/api";
+import { answerAsk, convoExpect, convoPage, convoQueue, convoSteer, convoSubscribe, convoUnqueue, convoUnsubscribe, interruptTerminal, ptyKeys, ptyScreenTail, ptySubmit } from "./convo/api";
+import { keysFor, parseProceedPrompt, type ProceedPrompt } from "./convo/proceedPrompt";
 import { questionsToRelease } from "./askRelease";
 import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "./convo/types";
 import {
@@ -81,7 +82,7 @@ import {
   writeQueuedSends,
 } from "./convo/readiness";
 import type { TermState } from "../../lib/termState";
-import { AskCard, StoppedCard, TerminalAskCard } from "./AskCard";
+import { AskCard, ProceedCard, StoppedCard, TerminalAskCard } from "./AskCard";
 import { setTerminalAsking } from "../../lib/openAsks";
 import { SessionComposer } from "./SessionComposer";
 import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
@@ -304,6 +305,9 @@ function SessionConversation(props: SessionConversationProps) {
   // The render a hold is released in belongs to the release (its effect
   // below delivers what waited); the flush must not race it for the head.
   const releasing = wasHeld.current && !reviewHeld;
+  // A release's sends wait for the CLI to take input (the release effect
+  // below); until they have gone, the ordinary flush leaves the queue alone.
+  const [releasedAt, setReleasedAt] = useState<number | null>(null);
   const [restore, setRestore] = useState<{ text: string; nonce: number } | null>(null);
   // A send the PTY refused holds the queue until the host says something new
   // about readiness, or HELD_RETRY_MS passes (`nextFlush`).
@@ -417,7 +421,7 @@ function SessionConversation(props: SessionConversationProps) {
 
   // The flush: one at a time, in order, whenever the composer can type —
   // into the outbox instead while a turn runs.
-  const next = nextFlush(queue, readiness, { inFlight: inFlight.current, held: isHeld || reviewHeld || releasing });
+  const next = nextFlush(queue, readiness, { inFlight: inFlight.current, held: isHeld || reviewHeld || releasing || releasedAt !== null });
   useEffect(() => {
     if (!next || inFlight.current) return;
     inFlight.current = true;
@@ -435,21 +439,52 @@ function SessionConversation(props: SessionConversationProps) {
   }, [next?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The hold released (Approve, Revise, Discuss): the CLI's turn runs on,
-  // so what waited goes into it now, oldest first — the outbox's rows by
-  // Steer, then the ones held here typed straight in. A Codex turn's steer
-  // would interrupt it, so those wait for the turn's end instead.
+  // and what waited goes into it, oldest first, THROUGH THE OUTBOX — but
+  // only once the CLI is taking input. Typed the instant the hold let go,
+  // a send landed in whatever the CLI drew next: its own "Ready to code?"
+  // prompt took the Enter as an answer and ate the words (the re-walk's
+  // "Undelivered" after Approve & build). So the release is remembered,
+  // and the sends go after a settle and with the composer ready — a prompt
+  // of the CLI's own is a blocker until it is answered. Each held here
+  // joins the outbox first and is steered from there: the daemon types it
+  // into the running turn when the CLI can take it, and otherwise keeps it
+  // at the outbox's head for the turn's end. A Codex turn's steer would
+  // interrupt it, so its rows wait for the turn's end instead.
   useEffect(() => {
     const was = wasHeld.current;
     wasHeld.current = reviewHeld;
     if (!was || reviewHeld || !terminalId) return;
+    if (view.outbox.length === 0 && queueRef.current.length === 0) return;
+    setReleasedAt(Date.now());
+    // Only the release itself matters; the rest is read when it goes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewHeld]);
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    setSettled(false);
+    if (releasedAt === null) return;
+    const t = window.setTimeout(() => setSettled(true), Math.max(0, releasedAt + RELEASE_SETTLE_MS - Date.now()));
+    return () => window.clearTimeout(t);
+  }, [releasedAt]);
+  useEffect(() => {
+    if (releasedAt === null || !settled || !readiness.ready || !terminalId || inFlight.current) return;
     const id = terminalId;
     const outbox = view.outbox.map((item) => item.id);
     const local = queueRef.current;
+    setReleasedAt(null);
     if (outbox.length === 0 && local.length === 0) return;
     inFlight.current = true;
     void (async () => {
-      for (const row of outbox) await convoSteer(id, row).catch(() => null);
+      const codex = props.harness === "codex";
+      // Oldest first: the outbox's rows, then the ones held here.
+      if (!codex) for (const row of outbox) await convoSteer(id, row).catch(() => null);
       for (const item of local) {
+        if (await hold(item.id, item.text)) {
+          setQueue((q) => q.filter((x) => x.id !== item.id));
+          if (!codex) await convoSteer(id, item.id).catch(() => null);
+          continue;
+        }
+        // Nothing holds it (the turn already ended): typed now, as any send.
         const sent = await deliver(item.text, item.id);
         if (!sent) break;
         setQueue((q) => q.filter((x) => x.id !== item.id));
@@ -457,9 +492,9 @@ function SessionConversation(props: SessionConversationProps) {
       inFlight.current = false;
       kick();
     })();
-    // Only the release itself matters; the rest is read as it stands then.
+    // `releasedAt` + `settled` + readiness are the trigger; the rest is read now.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reviewHeld]);
+  }, [releasedAt, settled, readiness.ready, terminalId]);
 
   /** Stop: Esc into the PTY, and the attention daemon told (one path with
    *  the dock's Esc, `interruptTerminal`). */
@@ -541,6 +576,37 @@ function SessionConversation(props: SessionConversationProps) {
   const showWorking = !!status && status.kind !== "plan-ready" && (working || status.kind === "needs-you");
   // The CLI holds a dialog of its own with no card behind it.
   const terminalAsk = view.openAsks.length === 0 && view.readiness?.ready === false && view.readiness.blocker === "native_dialog";
+  // A dialog the CLI holds with no card behind it may be its own "Ready to
+  // code?" (ExitPlanMode's proceed prompt): read the terminal's recent
+  // output while it waits, and put the "Ready to build this plan?" card up
+  // for that exact prompt, answered with the keys a person would press.
+  const [proceed, setProceed] = useState<ProceedPrompt | null>(null);
+  useEffect(() => {
+    if (!terminalAsk || !terminalId) {
+      setProceed(null);
+      return;
+    }
+    let alive = true;
+    const read = () =>
+      void ptyScreenTail(terminalId)
+        .then((tail) => {
+          if (alive) setProceed((prev) => sameProceed(prev, parseProceedPrompt(tail)));
+        })
+        .catch(() => {});
+    read();
+    const timer = window.setInterval(read, PROCEED_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [terminalAsk, terminalId]);
+  const chooseProceed = useCallback(
+    async (n: number) => {
+      if (!terminalId || !proceed) return;
+      await ptyKeys(terminalId, keysFor(proceed, n));
+    },
+    [terminalId, proceed],
+  );
   // The agent's CLI is gone (its terminal reads exited): the Detached notice,
   // with Retry for a session building its approved plan.
   const stopped = props.termState === "exited" && view.openAsks.length === 0;
@@ -559,7 +625,8 @@ function SessionConversation(props: SessionConversationProps) {
         {view.openAsks.map((ask) => (
           <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
         ))}
-        {terminalAsk && !stopped && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && proceed && <ProceedCard prompt={proceed} onChoose={chooseProceed} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && !proceed && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
         {showWorking && <WorkingRow status={status!} onStop={terminalId ? stop : null} />}
       </>
     ) : null;
@@ -669,6 +736,9 @@ function SessionConversation(props: SessionConversationProps) {
               bubble={bubble}
               queued={cliQueue.matched.has(bubble.nonce ?? "")}
               onShowTerminal={onShowTerminal}
+              // Never "Undelivered" with no way on: Retry sends the words
+              // again (through the queue when the CLI can't take them yet).
+              onRetry={bubble.delivery === "undelivered" && bubble.nonce ? () => { dispatch({ type: "retract", nonce: bubble.nonce! }); onSend(bubble.text); } : undefined}
             />
           ))}
           {cliQueue.unmatched.map((text, i) => (
@@ -972,7 +1042,22 @@ function ClosedAsk({ ask, outcome }: { ask: ConvoAsk; outcome: ConvoAskOutcome }
 
 // ── Bubbles, cards, the working row ───────────────────────────────────────
 
-function Bubble({ bubble, queued = false, onShowTerminal }: { bubble: UserBubble; queued?: boolean; onShowTerminal: () => void }) {
+/** How long after a hold's release its waiting sends hold back: the CLI
+ *  answers the hook and draws what comes next (a prompt of its own, if it
+ *  shows one, reaches the readiness as a blocker) in well under this. */
+const RELEASE_SETTLE_MS = 1500;
+
+/** How often a terminal holding a dialog with no card is read for the
+ *  CLI's own proceed prompt — only while it holds one. */
+const PROCEED_POLL_MS = 1000;
+
+function sameProceed(prev: ProceedPrompt | null, next: ProceedPrompt | null): ProceedPrompt | null {
+  if (!prev || !next) return next;
+  const same = prev.selected === next.selected && prev.options.length === next.options.length && prev.options.every((o, i) => o.label === next.options[i].label);
+  return same ? prev : next;
+}
+
+function Bubble({ bubble, queued = false, onShowTerminal, onRetry }: { bubble: UserBubble; queued?: boolean; onShowTerminal: () => void; onRetry?: () => void }) {
   const undelivered = bubble.delivery === "undelivered" && !queued;
   return (
     <div className="rl-convo-bubble-wrap" data-delivery={queued ? "queued" : bubble.delivery}>
@@ -981,6 +1066,14 @@ function Bubble({ bubble, queued = false, onShowTerminal }: { bubble: UserBubble
       {undelivered && (
         <div className="rl-convo-bubble-note" role="alert">
           Undelivered ·{" "}
+          {onRetry && (
+            <>
+              <button type="button" onClick={onRetry}>
+                Retry
+              </button>{" "}
+              ·{" "}
+            </>
+          )}
           <button type="button" onClick={onShowTerminal}>
             Open Terminal
           </button>

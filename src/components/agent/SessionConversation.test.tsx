@@ -14,6 +14,7 @@ const { api, log } = vi.hoisted(() => {
     /** What `convo_queue` answers: idle unless a test holds sends. */
     queue: { status: "idle" } as QueueResult,
     steer: { status: "sent" } as SteerResult,
+    screen: "",
     /** Holds `convo_subscribe`'s reply until released. */
     hold: null as null | (() => void),
   };
@@ -48,6 +49,8 @@ vi.mock("./convo/api", () => ({
   ptyInterrupt: vi.fn(async (terminalId: string) => void log.push(`interrupt ${terminalId}`)),
   interruptTerminal: vi.fn(async (terminalId: string) => void log.push(`interrupt ${terminalId}`)),
   answerAsk: vi.fn(async () => {}),
+  ptyScreenTail: vi.fn(async () => api.screen),
+  ptyKeys: vi.fn(async (terminalId: string, data: string) => void log.push(`keys ${terminalId} ${JSON.stringify(data)}`)),
   convoSetMode: vi.fn(async () => ({ status: "sent" })),
   convoSetModel: vi.fn(async () => ({ status: "sent" })),
 }));
@@ -56,10 +59,16 @@ vi.mock("../../lib/dictationComposer", () => ({ useDictationComposer: () => ({ l
 vi.mock("../MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div data-md>{body}</div> }));
 import SessionConversation, { type SessionConversationProps } from "./SessionConversation";
 import { FLOW_TALK_EVENT } from "./SessionComposer";
+import { convoExpect } from "./convo/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
 const flush = () => act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
+/** Past a hold release's settle (RELEASE_SETTLE_MS), then the sends' turns. */
+const settle = async () => {
+  await act(async () => { await new Promise((r) => setTimeout(r, 1_600)); });
+  for (let i = 0; i < 6; i++) await flush();
+};
 const ev = (id: string, offset: number, body: Record<string, unknown>): ConvoEvent => ({ id, epoch: 0, offset, ts: 1_000 + offset, ...body }) as ConvoEvent;
 const PROMPT = ev("u1", 10, { kind: "user_text", text: "Plan the roadmap" });
 const READ = ev("t1", 20, { kind: "tool_use", toolUseId: "tu1", name: "Read", summary: "/p/din/docs/a.md" });
@@ -166,6 +175,59 @@ describe("SessionConversation", () => {
     expect(onShowTerminal).toHaveBeenCalled();
     await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: true, blocker: null })] }));
     expect(q('[data-ask="terminal"]')).toBeNull();
+  });
+
+  it("the CLI's own \"Ready to code?\" read off its terminal is the Ready to build card, answered with a person's keys", async () => {
+    api.screen = "Claude has written up a plan and is ready to execute. Would you like to proceed?\n\n ❯ 1. Yes, and use auto mode\n   2. Yes, manually approve edits\n   3. Tell Claude what to change\n      shift+tab to approve with this feedback\n\n ctrl+g to edit in Vim · ~/.claude/plans/x.md\n";
+    api.snapshot = [BOUND, PROMPT, ev("h1", 15, { kind: "readiness", ready: false, blocker: "native_dialog" })];
+    const onShowTerminal = vi.fn();
+    await render(props({ onShowTerminal }));
+    await flush();
+    expect(q('[data-ask="proceed"]')?.textContent).toContain("Ready to build this plan?");
+    expect(q('[data-ask="terminal"]')).toBeNull();
+    const yes = [...host.querySelectorAll<HTMLButtonElement>('[data-ask="proceed"] .rl-ask-btn')][0];
+    expect(yes.textContent).toContain("Yes, build");
+    await act(async () => yes.click());
+    await flush();
+    expect(log.filter((l) => l.startsWith("keys"))).toEqual(['keys term-1 "\\r"']);
+    // Its other choice is the prompt's own words, and goes to the terminal.
+    expect([...host.querySelectorAll('[data-ask="proceed"] .rl-ask-btn')].map((b) => b.textContent)).toContain("Tell Claude what to change");
+    await act(async () => (q('[data-ask="proceed"] .rl-ask-terminal') as HTMLButtonElement).click());
+    expect(onShowTerminal).toHaveBeenCalled();
+    api.screen = "";
+  });
+
+  it("a release while the CLI shows its own prompt delivers only after it is answered", async () => {
+    api.snapshot = [BOUND, PROMPT, READ];
+    const held = { label: "Plan", kind: "plan" as const, held: true, toReview: 0 };
+    await render(props({ planState: held }));
+    await typeAndSend("keep it lowercase");
+    log.length = 0;
+    await render(props({ planState: { ...held, held: false } }));
+    await act(async () => api.batches.get("term-1")!({ events: [ev("h1", 40, { kind: "readiness", ready: false, blocker: "native_dialog" })] }));
+    await settle();
+    expect(log.filter((l) => /^(submit|steer|queue)/.test(l))).toEqual([]);
+    await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: true, blocker: null })] }));
+    for (let i = 0; i < 6; i++) await flush();
+    expect(log.filter((l) => /^(submit|steer)/.test(l))).toEqual(["submit term-1 keep it lowercase"]);
+  });
+
+  it("an undelivered send is never a dead end: Retry sends the words again", async () => {
+    api.snapshot = [BOUND, PROMPT];
+    await render(props());
+    await typeAndSend("also keep the line lowercase");
+    for (let i = 0; i < 3; i++) await flush();
+    const calls = vi.mocked(convoExpect).mock.calls;
+    const nonce = calls[calls.length - 1][1];
+    await act(async () => api.batches.get("term-1")!({ events: [ev("x1", 80, { kind: "undelivered", nonce })] }));
+    const note = q(".rl-convo-bubble-note");
+    expect(note?.textContent).toContain("Undelivered");
+    log.length = 0;
+    const retry = [...note!.querySelectorAll("button")].find((b) => b.textContent === "Retry")!;
+    await act(async () => retry.click());
+    for (let i = 0; i < 4; i++) await flush();
+    expect(log.filter((l) => l.startsWith("submit"))).toEqual(["submit term-1 also keep the line lowercase"]);
+    expect(host.textContent).not.toContain("Undelivered");
   });
 
   it("sends wait while the host says not ready, then go in order when it is", async () => {
@@ -406,6 +468,10 @@ describe("the work drawer and the pane's keys (W2)", () => {
     // steered into the resumed turn, then the one held here is typed in.
     await render(props({ planState: { ...held, held: false }, header } as Partial<SessionConversationProps>));
     for (let i = 0; i < 4; i++) await flush();
+    // Not the instant the hold lets go: what the CLI draws next (its own
+    // proceed prompt) would take the words. After the settle, ready, they go.
+    expect(log.filter((l) => /^(submit|steer)/.test(l))).toEqual([]);
+    await settle();
     expect(log.filter((l) => /^(submit|steer)/.test(l))).toEqual(["steer term-1 n1", "submit term-1 and the tests"]);
   });
 
@@ -424,7 +490,7 @@ describe("the work drawer and the pane's keys (W2)", () => {
     expect(log.filter((l) => /^(submit|queue|steer)/.test(l))).toEqual([]);
     // Released, it is typed once, and the stored copy goes with it.
     await render(props({ planState: { ...held, held: false } }));
-    for (let i = 0; i < 4; i++) await flush();
+    await settle();
     expect(log.filter((l) => /^submit/.test(l))).toEqual(["submit term-1 and the tests"]);
     expect(sessionStorage.getItem("redline.convo.queue.term-1")).toBeNull();
   });

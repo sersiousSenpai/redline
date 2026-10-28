@@ -114,3 +114,17 @@ export function convoSetModel(
 ): Promise<SwitchResult> {
   return invoke<SwitchResult>("convo_set_model", { terminalId, model, effort });
 }
+
+/** The terminal's recent output, escapes stripped (`pty_screen_tail`): what
+ *  the CLI last drew, for a prompt of its own no hook carried here
+ *  (`proceedPrompt`). Empty when the terminal is gone. */
+export function ptyScreenTail(terminalId: string): Promise<string> {
+  return invoke<string>("pty_screen_tail", { id: terminalId });
+}
+
+/** Raw keys into the PTY, as a person would press them (a prompt's arrows
+ *  and Enter). */
+export function ptyKeys(terminalId: string, data: string): Promise<void> {
+  noteTerminalInput(terminalId, data);
+  return invoke("pty_write", { id: terminalId, data });
+}
