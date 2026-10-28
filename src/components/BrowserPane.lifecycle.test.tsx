@@ -782,16 +782,17 @@ describe("mosaics", () => {
 });
 
 
-it("moves native pages when the tab rail collapses after a StrictMode remount", async () => {
+it("moves native pages when the tab rail changes width after a StrictMode remount", async () => {
   // StrictMode's effect replay used to cancel the pending sync frame without
-  // clearing its guard, so every later scheduleSync (rail collapse, resizes)
-  // was dropped and the page stayed at the expanded rail's bounds.
+  // clearing its guard, so every later scheduleSync (rail width, resizes)
+  // was dropped and the page stayed at the old rail's bounds. The rail
+  // starts as the 40 px icon strip; showing titles widens it.
   await act(async () => root.render(<StrictMode><BrowserPane onClose={() => {}} dockSlot={dock} dockPill="page"/></StrictMode>));
   await settle();
   const view = mocks.views.get("browser-t-two")!;
   expect(view.position?.x).toBe(10);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 182, y: 80, left: 182, top: 80, right: 1210, bottom: 880, width: 1028, height: 800, toJSON: () => ({}) });
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Collapse tab rail"]')!.click());
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show tab titles"]')!.click());
   await settle();
   expect(view.position?.x).toBe(182);
 });

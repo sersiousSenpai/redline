@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useRef, type PointerEvent } from "react";
-import { ArrowLeft, ArrowRight, Columns2, Download, Grid3x3, MessageSquare, MoreHorizontal, Palette, Printer, RotateCw, Scan, Settings2, Star, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Columns2, Download, Globe, Grid3x3, Link2, Lock, MessageSquare, MoreHorizontal, Palette, Printer, RotateCw, Scan, Search, Settings2, Star, Target, X } from "lucide-react";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import type { TilePage } from "./BrowserTileStage";
 
@@ -21,18 +21,38 @@ interface Props {
   onBookmarks: () => void; onAppearance: () => void; onPreferences: () => void;
   onInspect: () => void; onCloseBrowser: () => void;
   onPrint?: () => void; onSavePage?: () => void;
+  /** The page on screen is the new-tab page (no page, no history). */
+  newTab?: boolean;
+  /** Research missions (🎯): the pane's own entry, beside the page chat's. */
+  onResearch?: () => void;
+  /** One discussion across tabs (🔗), when the page chat can be linked. */
+  linked?: boolean; onToggleLinked?: () => void;
+}
+
+/** A local dev server's address: localhost, 127.0.0.1 or 0.0.0.0. */
+export function isDevServerUrl(url: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(url);
+    return /^https?:$/.test(protocol) && /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function BrowserChrome(props: Props) {
   const menuButton = useRef<HTMLButtonElement>(null);
   const addressPress = useRef<{ x: number; y: number; wasFocused: boolean } | null>(null);
   const act = (fn: () => void) => () => { props.onMenu(false); fn(); };
+  const address = props.address.trim();
+  const secure = /^https:\/\//i.test(address);
+  const devServer = !props.newTab && isDevServerUrl(address);
   return <header className="rb-chrome" aria-label="Browser navigation">
     <div className="rb-navigation-row">
-      <div className="rb-history"><button type="button" className="rb-icon-button" aria-label="Back" title="Back" onClick={props.onBack}><ArrowLeft size={17}/></button>
-        <button type="button" className="rb-icon-button" aria-label="Forward" title="Forward" onClick={props.onForward}><ArrowRight size={17}/></button>
+      <div className="rb-history"><button type="button" className="rb-icon-button" aria-label="Back" title="Back" disabled={props.newTab} onClick={props.onBack}><ArrowLeft size={16}/></button>
+        <button type="button" className="rb-icon-button" aria-label="Forward" title="Forward" disabled={props.newTab} onClick={props.onForward}><ArrowRight size={16}/></button>
         <button type="button" className="rb-icon-button" aria-label="Reload page" title="Reload page (⌘R)" onClick={props.onReload}><RotateCw size={16}/></button></div>
-      <form className="rb-address" onSubmit={(e) => { e.preventDefault(); props.onNavigate(); }}>
+      <form className="rb-address" data-secure={secure || undefined} onSubmit={(e) => { e.preventDefault(); props.onNavigate(); }}>
+        <span className="rb-address-icon" aria-hidden>{props.newTab || !address ? <Search size={12}/> : secure ? <Lock size={12}/> : <Globe size={12}/>}</span>
         <input aria-label="Address or search" value={props.address} onChange={(e) => props.onAddress(e.target.value)}
           onMouseDown={(e) => { addressPress.current = { x: e.clientX, y: e.clientY, wasFocused: document.activeElement === e.currentTarget }; }}
           onFocus={(e) => { props.onAddressFocus(true); e.currentTarget.select(); }}
@@ -62,18 +82,21 @@ export function BrowserChrome(props: Props) {
           }}
           onBlur={() => { addressPress.current = null; props.onAddressFocus(false); }}
           placeholder="Search or enter a website" spellCheck={false} autoCapitalize="off" autoCorrect="off"/>
+        {devServer && <span className="rb-address-status" title="A dev server on this machine"><i aria-hidden/>dev server</span>}
       </form>
       {props.mosaic && <span className="rb-mosaic-chip">
         <button type="button" title="Mosaics" onClick={props.onMosaics}><Grid3x3 size={14} aria-hidden/><span className="truncate">{props.mosaic.name}</span></button>
         <button type="button" className="rb-icon-button" aria-label={`Close ${props.mosaic.name}`} title="Close mosaic" onClick={props.mosaic.onClose}><X size={12}/></button>
       </span>}
       {props.split && <button type="button" className="rb-icon-button" aria-label="Arrange pages" title="Arrange pages" onClick={props.onArrange}><Columns2 size={17}/></button>}
-      <button type="button" className="rb-chat-toggle" aria-label="Toggle browser chat" aria-pressed={props.chatOpen} onClick={props.onToggleChat}><MessageSquare size={16}/><span>Chat</span></button>
-      <button type="button" ref={menuButton} className="rb-icon-button" aria-label="Page menu" title="Page menu" aria-haspopup="menu" aria-expanded={props.menuOpen} onClick={() => props.onMenu(!props.menuOpen)}><MoreHorizontal size={19}/></button>
+      <button type="button" className="rb-chat-toggle" aria-label="Page chat" title="Page chat" aria-pressed={props.chatOpen} onClick={props.onToggleChat}><MessageSquare size={14}/><span>Page chat</span></button>
+      <button type="button" ref={menuButton} className="rb-icon-button" aria-label="Page menu" title="Page menu" aria-haspopup="menu" aria-expanded={props.menuOpen} onClick={() => props.onMenu(!props.menuOpen)}><MoreHorizontal size={16}/></button>
     </div>
     {props.menuOpen && <BrowserPopover anchor={menuButton} title="Page menu" onClose={() => props.onMenu(false)}>
       <BrowserMenuItem icon={<Columns2 size={16}/>} onClick={act(props.onArrange)}>Arrange pages…</BrowserMenuItem>
       <BrowserMenuItem icon={<Grid3x3 size={16}/>} onClick={act(props.onMosaics)}>Mosaics…</BrowserMenuItem>
+      {props.onResearch && <BrowserMenuItem icon={<Target size={16}/>} onClick={act(props.onResearch)}>Research missions…</BrowserMenuItem>}
+      {props.onToggleLinked && <BrowserMenuItem icon={<Link2 size={16}/>} selected={!!props.linked} onClick={act(props.onToggleLinked)}>One discussion across tabs</BrowserMenuItem>}
       <div className="rb-menu-rule"/>
       <BrowserMenuItem icon={<Star size={16}/>} onClick={act(props.onBookmarks)}>Bookmarks…</BrowserMenuItem>
       <BrowserMenuItem icon={<Palette size={16}/>} onClick={act(props.onAppearance)}>Page appearance…</BrowserMenuItem>

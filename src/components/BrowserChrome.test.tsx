@@ -21,7 +21,9 @@ function Harness() {
   };
   return <><BrowserTabRail {...props} groups={[]} organized={false} organizing={false} onResize={noop} onMode={noop} onOrganize={noop} onToggleGroup={noop}/><BrowserChrome {...props}/></>;
 }
-beforeEach(async () => { host = document.createElement("div"); document.body.append(host); root = createRoot(host); await act(async () => root.render(<Harness/>)); });
+// The rail's list mode (titles shown), where each tab carries its ✕; the
+// icon strip names tabs in tooltips and closes them with Delete or a middle click.
+beforeEach(async () => { localStorage.setItem("redline.browser.railWidth", "220"); host = document.createElement("div"); document.body.append(host); root = createRoot(host); await act(async () => root.render(<Harness/>)); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const tabs = () => [...host.querySelectorAll<HTMLElement>('[role="tab"]')];
 const key = async (target: Element, value: string) => act(async () => { target.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true })); });

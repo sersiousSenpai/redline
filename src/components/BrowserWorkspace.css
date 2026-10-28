@@ -1,5 +1,5 @@
 .rb-workspace { display:flex; flex:1 1 0%; flex-direction:column; position:relative; min-width:0; min-height:0; height:100%; overflow:hidden; background:var(--color-paper); color:var(--color-ink); }
-.rb-chrome { flex:none; min-width:0; background:var(--color-bg-elevated); border-bottom:1px solid var(--color-rule); }
+.rb-chrome { flex:none; min-width:0; background:var(--color-paper); border-bottom:1px solid var(--color-rule); }
 .rb-tabs { display:flex; flex:0 1 auto; min-width:0; height:100%; gap:3px; overflow-x:auto; }
 .rb-tab { display:flex; align-items:center; gap:8px; flex:0 1 200px; min-width:110px; max-width:224px; border-radius:7px 7px 0 0; padding:0 9px; color:var(--color-ink-muted); border:1px solid transparent; border-bottom:0; cursor:default; user-select:none; touch-action:none; font-size:12px; transform:translateX(var(--tab-drag-x,0px)); }
 .rb-tabs-dragging .rb-tab:not([data-dragging]) { transition:transform 140ms cubic-bezier(.2,.8,.2,1); }
@@ -19,17 +19,24 @@
 .rb-tab>svg { flex:none; opacity:.6; }
 .rb-tab-close { display:grid; place-items:center; flex:none; width:20px; height:20px; border:0; border-radius:4px; background:transparent; color:inherit; cursor:pointer; opacity:.55; }
 .rb-tab-close:hover { opacity:1; background:var(--color-anchor-bg); }
-.rb-navigation-row { display:flex; align-items:center; gap:8px; padding:8px 10px; min-width:0; }
-.rb-history { display:flex; align-items:center; flex:none; gap:1px; }
-.rb-icon-button { display:inline-flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; border:0; border-radius:6px; background:transparent; color:var(--color-ink-muted); cursor:pointer; }
+/* The address bar (RLPaneBrowser): a 40 px row of 26 px controls around a
+   28 px field. */
+.rb-navigation-row { display:flex; align-items:center; gap:6px; height:40px; box-sizing:border-box; padding:0 8px 0 6px; min-width:0; }
+.rb-history { display:flex; align-items:center; flex:none; gap:6px; }
+.rb-icon-button { display:inline-flex; align-items:center; justify-content:center; flex:none; width:26px; height:26px; border:0; border-radius:6px; background:transparent; color:var(--color-ink-muted); cursor:pointer; }
 .rb-icon-button:hover,.rb-icon-button[aria-expanded="true"] { background:var(--color-anchor-bg); color:var(--color-ink); }
 .rb-icon-button[aria-pressed="true"] { color:var(--color-info-text); background:color-mix(in srgb,var(--color-info) 12%,transparent); }
 .rb-icon-button:disabled { opacity:.35; cursor:default; }
-.rb-address { flex:1 1 0%; min-width:60px; }
-.rb-address input { width:100%; height:34px; min-width:0; padding:0 12px; border:1px solid var(--color-rule); border-radius:7px; background:var(--color-paper); color:var(--color-ink); font:inherit; font-size:13px; }
-.rb-address input:focus { outline:2px solid color-mix(in srgb,var(--color-info) 50%,transparent); outline-offset:1px; }
-.rb-chat-toggle { display:flex; align-items:center; gap:7px; flex:none; height:32px; padding:0 10px; border:1px solid var(--color-rule); border-radius:6px; color:var(--color-ink); background:transparent; font:inherit; font-size:12px; cursor:pointer; }
-.rb-chat-toggle[aria-pressed="true"] { color:var(--color-info); border-color:color-mix(in srgb,var(--color-info) 45%,var(--color-rule)); background:color-mix(in srgb,var(--color-info) 8%,transparent); }
+.rb-address { flex:1 1 0%; min-width:60px; display:flex; align-items:center; gap:8px; height:28px; box-sizing:border-box; margin:0 4px; padding:0 10px; border:1px solid var(--color-rule-strong); border-radius:8px; background:var(--color-canvas,var(--color-bg)); }
+.rb-address:focus-within { border-color:var(--color-focus-rim); box-shadow:0 0 0 1px var(--color-focus-rim); }
+.rb-address-icon { display:flex; flex:none; color:var(--color-ink-quiet); }
+.rb-address input { flex:1; width:100%; height:100%; min-width:0; padding:0; border:0; outline:none; background:transparent; color:var(--color-ink); font:inherit; font-size:12.5px; }
+.rb-address input::placeholder { color:var(--color-ink-quiet); }
+.rb-address-status { display:inline-flex; align-items:center; gap:5px; flex:none; font-size:11px; color:var(--color-ink-muted); white-space:nowrap; }
+.rb-address-status i { width:6px; height:6px; border-radius:50%; background:var(--color-success); }
+.rb-chat-toggle { display:flex; align-items:center; gap:6px; flex:none; height:28px; box-sizing:border-box; padding:0 10px; border:1px solid var(--color-rule-strong); border-radius:7px; color:var(--color-ink); background:transparent; font:inherit; font-size:12.5px; font-weight:500; cursor:pointer; }
+.rb-chat-toggle:hover { background:var(--color-hover-wash); }
+.rb-chat-toggle[aria-pressed="true"] { color:var(--color-info-text); border-color:var(--color-info); background:color-mix(in srgb,var(--color-info) 12%,var(--color-paper)); }
 .rb-popover-cover { position:fixed; inset:0; z-index:65; color:var(--color-ink); }
 .rb-popover { position:fixed; box-sizing:border-box; overflow:auto; padding:6px; border:1px solid var(--color-rule); border-radius:10px; background:var(--color-bg-elevated); box-shadow:0 12px 36px #0005,0 2px 7px #0002; }
 .rb-menu-item { display:flex; width:100%; align-items:center; gap:10px; min-height:36px; padding:8px 10px; border:0; border-radius:5px; background:transparent; color:var(--color-ink); text-align:left; font:inherit; font-size:12px; line-height:1.4; cursor:pointer; }
@@ -101,9 +108,9 @@
 .rb-mosaic-startup legend { margin-bottom:6px; font-weight:500; }
 .rb-mosaic-startup label { display:flex; align-items:center; gap:8px; min-width:0; cursor:pointer; }
 .rb-mosaic-startup input { flex:none; accent-color:var(--color-info); }
-.rb-mosaic-chip { display:inline-flex; align-items:center; gap:2px; flex:none; max-width:200px; height:30px; padding:0 2px 0 8px; border:1px solid var(--color-rule); border-radius:6px; color:var(--color-ink); font-size:12px; }
+.rb-mosaic-chip { display:inline-flex; align-items:center; gap:2px; flex:none; max-width:200px; height:28px; box-sizing:border-box; padding:0 2px 0 8px; border:1px solid var(--color-rule); border-radius:6px; color:var(--color-ink); font-size:12px; }
 .rb-mosaic-chip>button:first-child { display:inline-flex; align-items:center; gap:6px; min-width:0; border:0; background:none; color:inherit; font:inherit; cursor:pointer; }
-.rb-mosaic-chip .rb-icon-button { width:24px; height:24px; }
+.rb-mosaic-chip .rb-icon-button { width:22px; height:22px; }
 .rb-fullscreen-edge { position:relative; display:flex; align-items:center; flex:none; height:6px; min-width:0; gap:12px; overflow:hidden; background:var(--color-bg-elevated); color:var(--color-ink); outline:none; }
 .rb-fullscreen-edge::after { content:""; position:absolute; width:36px; height:2px; border-radius:2px; background:var(--color-ink-muted); top:2px; left:calc(50% - 18px); }
 .rb-fullscreen-edge[data-expanded],.rb-fullscreen-edge:focus-within { height:32px; padding:0 10px; }
@@ -114,24 +121,40 @@
 .rb-fullscreen-edge button:hover,.rb-fullscreen-edge button:focus-visible { background:var(--color-anchor-bg); outline:1px solid var(--color-info); }
 .rb-fullscreen-edge kbd { color:var(--color-ink-muted); font:inherit; font-size:11px; }
 @media (max-width:520px) { .rb-mosaic-pages li { grid-template-columns:22px minmax(0,1fr); } .rb-mosaic-pages li>input:last-child { grid-column:2; } .rb-mosaic-shape { flex-direction:column; align-items:stretch; } }
-@media(max-width:700px) { .rb-navigation-row { gap:4px; padding:7px 6px; } .rb-history { gap:0; } .rb-icon-button { width:28px; } .rb-chat-toggle { padding:0 7px; } .rb-chat-toggle span { display:none; } }
+@media(max-width:700px) { .rb-navigation-row { gap:4px; padding:0 6px; } .rb-history { gap:0; } .rb-chat-toggle { padding:0 7px; } .rb-chat-toggle span, .rb-address-status { display:none; } }
 
 /* Browser refresh: rail and page form one measurable stage. */
 .rb-workspace { flex-direction:row; }
 .rb-workspace-pages { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
-.rb-tab-rail { position:relative; display:flex; flex-direction:column; flex:none; width:var(--browser-rail-width,220px); min-height:0; border-right:1px solid var(--color-rule); background:var(--color-bg-elevated); }
-.rb-rail-heading { display:flex; align-items:center; gap:4px; padding:6px; }
+/* The pane's tab strip (RLPaneBrowser): 40 px of 28 px icon buttons on the
+   canvas by default; "Show tab titles" widens it to a resizable list. */
+.rb-tab-rail { position:relative; display:flex; flex-direction:column; flex:none; width:var(--browser-rail-width,40px); min-height:0; box-sizing:border-box; border-right:1px solid var(--color-rule); background:var(--color-canvas,var(--color-bg-elevated)); user-select:none; }
+.rb-rail-heading { display:flex; align-items:center; gap:2px; padding:6px; }
 .rb-rail-heading strong { flex:1; font-size:12px; font-weight:500; }
-.rb-tab-rail[data-collapsed] .rb-rail-heading { flex-direction:column; }
+.rb-tab-rail .rb-icon-button { width:28px; height:28px; }
+.rb-tab-rail .rb-icon-button:hover:not(:disabled) { background:var(--color-fill-2,var(--color-anchor-bg)); }
+.rb-tab-rail[data-collapsed] .rb-rail-heading { flex-direction:column; padding:6px 0 0; }
+.rb-rail-rule { flex:none; width:20px; height:1px; margin:4px auto; background:var(--color-rule); }
 .rb-tab-rail .rb-tabs { flex:1; display:flex; flex-direction:column; gap:3px; overflow-y:auto; overflow-x:hidden; padding:5px; }
-.rb-tab-rail .rb-tab { min-height:34px; min-width:0; max-width:none; flex:0 0 auto; border-radius:6px; border:1px solid transparent; padding:7px; transform:translateY(var(--tab-drag-y,0px)); }
-.rb-tab-rail .rb-tab[aria-selected=true] { border-color:var(--color-rule); }
-.rb-favicon { width:14px; height:14px; flex:none; object-fit:contain; }
-/* The agent is acting on this page: a dot on the tab's icon until its turn ends. */
-.rb-tab-rail .rb-tab[data-agent-acting] { position:relative; }
-.rb-tab-rail .rb-tab[data-agent-acting]::after { content:""; position:absolute; top:4px; left:4px; width:7px; height:7px; border-radius:50%; background:var(--color-info); box-shadow:0 0 0 2px var(--color-bg-elevated); animation:rb-agent-acting 1.6s ease-in-out infinite; }
-@keyframes rb-agent-acting { 50% { opacity:.4; } }
-@media(prefers-reduced-motion:reduce) { .rb-tab-rail .rb-tab[data-agent-acting]::after { animation:none; } }
+.rb-tab-rail .rb-tab { position:relative; min-height:34px; min-width:0; max-width:none; flex:0 0 auto; border-radius:6px; border:1px solid transparent; padding:7px; transform:translateY(var(--tab-drag-y,0px)); }
+.rb-tab-rail .rb-tab[aria-selected=true] { border-color:var(--color-rule-strong); }
+.rb-tab-rail[data-collapsed] .rb-tabs { align-items:center; gap:2px; padding:0 0 6px; }
+.rb-tab-rail[data-collapsed] .rb-tab { justify-content:center; width:28px; height:28px; min-height:28px; padding:0; gap:0; border:0; }
+.rb-tab-rail[data-collapsed] .rb-tab[aria-selected=true] { background:var(--color-fill-3,var(--color-anchor-bg)); box-shadow:0 0 0 1px var(--color-rule-strong); }
+.rb-tab-rail[data-collapsed] .rb-tab[aria-selected=false]:hover { background:var(--color-fill-2,var(--color-anchor-bg)); }
+/* Icon mode names a tab in its tooltip and aria-label; the title node stays
+   for the list mode and is visually hidden here. */
+.rb-tab-rail[data-collapsed] .rb-tab-title { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.rb-tab-rail[data-collapsed] .rb-tile-badge { position:absolute; right:-3px; bottom:-3px; min-width:13px; height:13px; border-radius:4px; font-size:9px; box-shadow:0 0 0 1px var(--color-canvas,var(--color-bg)); }
+.rb-favicon { width:16px; height:16px; flex:none; object-fit:contain; }
+/* The one status vocabulary: working (the agent acting, a page loading) is
+   the shared Spinner in the icon's corner; a suspended page is muted. */
+.rb-tab-status { position:absolute; top:2px; right:2px; color:var(--color-info); background:var(--color-canvas,var(--color-bg)); border-radius:50%; }
+.rb-tab-rail:not([data-collapsed]) .rb-tab-status { position:static; flex:none; background:none; }
+.rb-tab[data-status="suspended"] > img, .rb-tab[data-status="suspended"] > svg { opacity:.45; }
+.rb-rail-foot { flex:none; display:flex; justify-content:center; padding:4px 6px 6px; }
+.rb-tab-rail:not([data-collapsed]) .rb-rail-foot { justify-content:flex-start; }
+.rb-tab-rail:not([data-collapsed]) .rb-rail-foot .rb-icon-button { width:auto; gap:6px; padding:0 8px; font:inherit; font-size:12px; }
 .rb-rail-mode { display:flex; padding:3px 8px; gap:3px; }
 .rb-rail-mode button { flex:1; padding:5px; border:0; border-radius:5px; background:transparent; color:var(--color-ink-muted); font:inherit; font-size:11px; cursor:pointer; }
 .rb-rail-mode button[aria-pressed=true] { background:var(--color-paper); color:var(--color-ink); }
@@ -146,3 +169,10 @@
 .rb-waking-label::before { content:""; display:inline-block; width:10px; height:10px; margin-right:7px; border:1px solid var(--color-rule); border-top-color:var(--color-ink-muted); border-radius:50%; animation:rb-wake 800ms linear infinite; }
 @keyframes rb-wake { to { transform:rotate(360deg); } }
 @media(prefers-reduced-motion:reduce) { .rb-waking-label::before { animation:none; } }
+/* The agent acting on a page on screen: a 26 px row under the page, since
+   the native webview paints over anything drawn on it. */
+.rb-agent-status { display:flex; align-items:center; gap:8px; flex:none; height:26px; box-sizing:border-box; padding:0 10px; border-top:1px solid var(--color-rule); background:var(--color-paper); color:var(--color-ink); font-size:12px; min-width:0; }
+.rb-agent-status .rl-spinner { color:var(--color-info); flex:none; }
+.rb-agent-status>span { flex:none; white-space:nowrap; }
+.rb-agent-status .rb-agent-status-note { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--color-ink-quiet); }
+.rb-agent-status button { flex:none; padding:0; border:0; background:none; color:var(--color-info-text); font:inherit; cursor:pointer; }

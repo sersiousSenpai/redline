@@ -168,7 +168,7 @@ try {
     check(`${size}: a new page chat opens on the composer with things to start and one tip`, empty?.within && empty.bottom <= composerBox.y + 1 && await cdp.evaluate("[...document.querySelectorAll('[data-browser-chat-empty] .rb-suggestion')].map(b=>b.textContent).join('|')==='Summarize this page|Extract a table|Start a mission' && !!document.querySelector('[data-browser-chat-empty] .rb-tip') && document.querySelector('[data-browser-chat-composer] .rl-send').dataset.send==='mic'"), { empty, composerBox });
     await screenshot(`${size}-page-chat-empty`);
     await cdp.evaluate("window.__qa.setChatKind('browser')"); await settle();
-    check(`${size}: the tab the agent is acting on shows a dot`, await cdp.evaluate("!!document.querySelector('.rb-tab-rail [data-agent-acting]') && getComputedStyle(document.querySelector('.rb-tab-rail [data-agent-acting]'), '::after').content !== 'none'"));
+    check(`${size}: the tab the agent is acting on shows the working spinner`, await cdp.evaluate("!!document.querySelector('.rb-tab-rail [data-agent-acting] .rl-spinner')"));
     if (width === 1200) {
       // Every quiet word in the page chat reads at 4.5:1 or better on what is
       // behind it, in every theme (design decision 12).
@@ -205,13 +205,13 @@ try {
       await cdp.evaluate("window.__qa.setTheme('studio')"); await settle();
     }
     check(`${size}: vertical rail and new-tab button stay visible`, (await bounds('.rb-tab-rail'))?.within && (await bounds('.rb-rail-heading [aria-label="New tab"]'))?.within);
-    await click('[aria-label="Collapse tab rail"]'); check(`${size}: rail collapses to icons`, (await bounds('.rb-tab-rail')).width === 48);
-    await click('[aria-label="Expand tab rail"]');
+    check(`${size}: the rail starts as the 40 px icon strip`, (await bounds('.rb-tab-rail')).width === 40);
+    await click('[aria-label="Show tab titles"]'); check(`${size}: showing titles widens the rail`, (await bounds('.rb-tab-rail')).width >= 168);
     await cdp.evaluate("window.__qa.setOrganized(true)"); await settle(); check(`${size}: organized groups render`, await cdp.evaluate("!!document.querySelector('[data-tab-group]')")); await screenshot(`${size}-organized-rail`);
     await cdp.evaluate("window.__qa.setOrganized(false)"); await settle();
     const savedHomeLayout = await cdp.evaluate("window.__qa.getState().layout");
     await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true)"); await settle();
-    check(`${size}: homepage presents resumable work and recent pages`, await cdp.evaluate("!!document.querySelector('.rb-home [aria-label=\"Pick back up\"]') && !!document.querySelector('.rb-home [aria-label=Recent]')")); await screenshot(`${size}-homepage`);
+    check(`${size}: the new tab presents the omnibox, Pick back up and Reading by subject`, await cdp.evaluate("!!document.querySelector('.rb-home [aria-label=\"Browse or search\"]') && !!document.querySelector('.rb-home [aria-label=\"Pick back up\"]') && !!document.querySelector('.rb-home [aria-label=\"Reading, by subject\"]')")); await screenshot(`${size}-homepage`);
     // A pointer resting on the pill springs the compact card out.
     const pill = await bounds('.rl-monochat-notch'); await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: pill.x + pill.width / 2, y: pill.y + pill.height / 2 }); await delay(1200); await settle(); const island = await bounds('.rl-monochat-float');
     check(`${size}: the pill's compact card bounded to 640 wide over the mounted page`, island?.within && island.width <= 641 && island.height <= Math.min(420, height - 96) + 1 && await cdp.evaluate("!!document.querySelector('.rb-home') && !document.querySelector('[inert]:not(.rl-frontdoor-focus)')"), island);
@@ -275,7 +275,7 @@ try {
       check("clicking a tab selects it and removes address focus", await cdp.evaluate(`document.activeElement?.dataset.tabId===${JSON.stringify(order[1])} && document.activeElement.getAttribute('aria-selected')==='true' && !document.querySelector('.rb-address input:focus')`));
       await screenshot(`${size}-tab-selected`);
       await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
-      await click('[aria-label="Collapse tab rail"]');
+      await click('[aria-label="Hide tab titles"]');
       const fromTile = await bounds('[data-tile-index="0"] .rb-tile-header'), toTile = await bounds('[data-tile-index="2"] .rb-tile-header');
       const fromPoint = { x: fromTile.x + 4, y: fromTile.y + fromTile.height / 2 }, toPoint = { x: toTile.x + 4, y: toTile.y + toTile.height / 2 };
       await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...fromPoint });

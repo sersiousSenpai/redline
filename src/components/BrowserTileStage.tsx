@@ -120,7 +120,7 @@ function TileHeader({ page, index, tabs, pages, active, maximized, hovered, onHo
       window.addEventListener("pointercancel", cleanup); window.addEventListener("blur", cleanup); window.addEventListener("keydown", key);
       node.addEventListener("lostpointercapture", cleanup); cleanupRef.current = cleanup;
     }}
-    style={{ height: 30, cursor: "grab", userSelect: "none", background: active ? "var(--color-bg-elevated)" : "var(--color-paper)", borderBottom: `2px solid ${active ? "var(--color-info)" : "var(--color-rule)"}` }}>
+    style={{ height: 28, cursor: "grab", userSelect: "none", background: active ? "var(--color-bg-elevated)" : "var(--color-paper)", borderBottom: `2px solid ${active ? "var(--color-info)" : "var(--color-rule)"}` }}>
     <GripVertical size={12} aria-hidden/>
     <button type="button" className="rb-tile-badge" onClick={onFocus} aria-label={`Focus page ${index + 1}`}>{index + 1}</button>
     <button ref={picker} type="button" className="rb-tile-picker" aria-label={`Assign tab to page ${index + 1}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>

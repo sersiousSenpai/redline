@@ -46,6 +46,8 @@ import {
 } from "../lib/browseChatState";
 import { cartKey, sameTabUrl } from "../lib/browseList";
 import { agentSearchTurn, rememberClosed, searchAddress, type ClosedPage } from "../lib/browserNewTab";
+import { liveStepLabel } from "../lib/browserChat/transcript";
+import { Spinner } from "./Spinner";
 import {
   parseSelectionEvents,
   promptForSelection,
@@ -2386,6 +2388,18 @@ function BrowserPaneBase({
     setChatFor(tab.browseId, { open: true, pill: "page" });
   };
   const actingTabs = new Set(tabs.filter((tab) => pageActions.acting.has(`browser-${tab.id}`)).map((tab) => tab.id));
+  // The strip's status: a page reloading or waking is working too; a page
+  // with no live webview (and not the new-tab page) is suspended to its
+  // snapshot.
+  const loadingTabs = new Set(tabs.filter((tab) => reloading.has(tab.id)).map((tab) => tab.id));
+  const suspendedTabs = new Set(tabs.filter((tab) => tab.url !== NEWTAB && tab.id !== activeId && !wvMapRef.current.has(tab.id)).map((tab) => tab.id));
+  const reopenClosed = (page: ClosedPage) => {
+    setClosedPages((list) => list.filter((item) => item.url !== page.url));
+    openTab(page.url);
+  };
+  // The agent acting on a page on screen: the native webview paints over any
+  // overlay, so the pane says so in a row under the page instead.
+  const visibleAction = tilePages.map((page) => pageActions.running.get(page.label)).find(Boolean) ?? null;
   // The page chat is memoized. What it is handed keeps its identity across
   // the pane's own renders (a title, a dot, a layout tick) unless it really
   // changed: handlers through refs, the rail's cards by value. A handler
@@ -2440,7 +2454,7 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
-      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
@@ -2463,7 +2477,9 @@ function BrowserPaneBase({
         onAppearance={() => setAppearanceOpen(true)} onPreferences={() => setPreferencesOpen(true)}
         onInspect={() => void picker.start(tabs.find(tab => tab.id === activeId)?.url ?? "")}
         onPrint={() => pageOutputRef.current("browser_print")} onSavePage={() => pageOutputRef.current("browser_save_page")}
-        onCloseBrowser={onClose}/>}
+        onCloseBrowser={onClose}
+        newTab={(tabs.find((tab) => tab.id === activeId)?.url ?? NEWTAB) === NEWTAB}
+        onResearch={openResearch} linked={chatWorld.linkedMode} onToggleLinked={chatHandlers.toggleLinkedMode}/>}
 
       {videoFs.stage === "browser" && <BrowserFullscreenEdge title={tabs.find((tab) => tab.id === activeId)?.title ?? "Video"}
         onScreen={() => void videoFs.requestScreen()} onExit={() => videoFs.dispatch({ type: "exit" })}/>}
@@ -2581,6 +2597,11 @@ function BrowserPaneBase({
         );
       })()}
 
+      {visibleAction && !browserFullscreen && <div className="rb-agent-status" role="status">
+        <Spinner size={10}/><span>{liveStepLabel("Acting on the page…", visibleAction)}</span>
+        <span className="rb-agent-status-note">the agent reads the accessibility tree, not pixels</span>
+        {!chatOpen && <button type="button" onClick={() => setChatHere({ open: true, pill: "page" })}>Page chat</button>}
+      </div>}
       </div>
       {picker.picking && <div role="status" className="shrink-0 px-3 py-1 text-xs">Click an element · Esc to cancel <button type="button" onClick={picker.cancel}>Cancel</button></div>}
       {workspaceError && <div role="alert" className="flex items-center justify-between px-3 py-2 text-xs" style={{ color: "var(--color-danger)", background: "var(--color-paper)" }}>{workspaceError}<button type="button" onClick={() => setWorkspaceError(null)}>Dismiss</button></div>}

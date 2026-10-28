@@ -16,8 +16,18 @@ it("uses vertical keyboard navigation, Delete and middle-click close", () => {
   act(()=>document.activeElement!.dispatchEvent(new KeyboardEvent("keydown",{key:"Delete",bubbles:true}))); expect(handlers.onCloseTab).toHaveBeenLastCalledWith("tab-2");
   act(()=>first.dispatchEvent(new MouseEvent("auxclick",{button:1,bubbles:true}))); expect(handlers.onCloseTab).toHaveBeenLastCalledWith("tab-0");
 });
-it("persists collapse width and falls back when a favicon fails", () => {
+it("starts as the icon strip, persists showing and hiding titles, and falls back when a favicon fails", () => {
   mount(); const icon=host.querySelector("img")!;
+  expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(true);
+  expect(host.querySelector(".rb-tab-close")).toBeNull();
+  expect(host.querySelector('[data-tab-id="tab-1"]')!.getAttribute("title")).toBe("2 · Second\nhttps://page1.test");
   act(()=>icon.dispatchEvent(new Event("error"))); expect(host.querySelector("img")).toBeNull(); expect(host.querySelector('[data-tab-id="tab-0"] svg')).not.toBeNull();
-  act(()=>host.querySelector<HTMLButtonElement>('[aria-label="Collapse tab rail"]')!.click()); expect(localStorage.getItem("redline.browser.railWidth")).toBe("48"); expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(true);
+  act(()=>host.querySelector<HTMLButtonElement>('[aria-label="Show tab titles"]')!.click()); expect(localStorage.getItem("redline.browser.railWidth")).toBe("220"); expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(false);
+  expect(host.querySelectorAll(".rb-tab-close")).toHaveLength(3);
+  act(()=>host.querySelector<HTMLButtonElement>('[aria-label="Hide tab titles"]')!.click()); expect(localStorage.getItem("redline.browser.railWidth")).toBe("40"); expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(true);
+});
+it("reads the old 48 px collapsed width as the icon strip", () => {
+  localStorage.setItem("redline.browser.railWidth","48"); mount();
+  expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(true);
+  expect(host.querySelector<HTMLElement>("aside")!.style.getPropertyValue("--browser-rail-width")).toBe("40px");
 });
