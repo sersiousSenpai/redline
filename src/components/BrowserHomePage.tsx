@@ -8,6 +8,7 @@
 // lists, recently closed) and Reading, by subject. No thumbnail grid.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ArrowRight, Brain, Folder, Globe, History, ListTodo, Sparkles, Target } from "lucide-react";
 import { candidateTabs, type CandidateTab } from "../lib/doorRecents";
 import { buildBrowserHome, type BrowserHomeFeed } from "../lib/browserHome";
@@ -38,6 +39,12 @@ export interface BrowserHomePageProps {
   onMission: (id: string) => void;
   /** Opens Memory; the page's Memory links are plain text without it. */
   onOpenMemory?: () => void;
+  /** Brings a recently closed page back (and forgets it as closed). */
+  onReopenClosed?: (page: ClosedPage) => void;
+  /** Pages that need you (could not load): the kicker's "· N need you". */
+  needYou?: number;
+  /** The omnibox takes the caret on mount (a tab just opened as new). */
+  autoFocus?: boolean; onAutoFocused?: () => void;
   /** Fixed for tests; defaults to the wall clock. */
   now?: number;
 }
@@ -51,6 +58,14 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
   // flashing their empty-state lines at someone who has history.
   const [loaded, setLoaded] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  // Missions whose orchestrator is mid-turn: their chip shows the Spinner.
+  const [runningMissions, setRunningMissions] = useState<ReadonlySet<string>>(() => new Set());
+  const onAutoFocused = useRef(props.onAutoFocused); onAutoFocused.current = props.onAutoFocused;
+  useEffect(() => {
+    if (!props.autoFocus) return;
+    input.current?.focus();
+    onAutoFocused.current?.();
+  }, [props.autoFocus]);
   const now = props.now ?? Date.now();
   useEffect(() => {
     let current = true;
@@ -63,6 +78,22 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
     void invoke<{ denylist: string }>("shots_get_policy").then((policy) => { if (current) setDenied(denylistCount(policy?.denylist)); }).catch(() => {});
     return () => { current = false; };
   }, []);
+
+  const missionIds = feed.missions.map((m) => m.missionId).join("|");
+  useEffect(() => {
+    if (!missionIds) return;
+    let current = true;
+    const mark = (id: string, on: boolean) => setRunningMissions((prev) => {
+      if (prev.has(id) === on) return prev;
+      const next = new Set(prev); if (on) next.add(id); else next.delete(id); return next;
+    });
+    for (const id of missionIds.split("|")) void invoke<{ streaming?: boolean } | null>("mission_turn_status", { missionId: id }).then((status) => { if (current && status?.streaming) mark(id, true); }).catch(() => {});
+    const subscriptions = [
+      listen<{ missionId?: string }>("mission-delta", ({ payload }) => { if (current && payload?.missionId) mark(payload.missionId, true); }),
+      ...["mission-done", "mission-error", "mission-cancelled"].map((name) => listen<{ missionId?: string }>(name, ({ payload }) => { if (current && payload?.missionId) mark(payload.missionId, false); })),
+    ];
+    return () => { current = false; subscriptions.forEach((p) => void p.then((un) => un()).catch(() => {})); };
+  }, [missionIds]);
 
   const webTabs = tabs.filter((tab) => /^https?:\/\//i.test(tab.url));
   const openUrls = new Set(webTabs.map((tab) => tab.url));
@@ -82,7 +113,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
   return <div className="rb-home" data-newtab data-loaded={loaded || undefined}>
     <div className="rb-nt-column">
       <header className="rb-nt-head">
-        <span className="rb-nt-kicker">{newTabKicker(new Date(now), webTabs.length)}</span>
+        <span className="rb-nt-kicker">{newTabKicker(new Date(now), webTabs.length, props.needYou ?? 0)}</span>
         <h1>A place to pick up{" "}<br/>where you left off.</h1>
       </header>
       <form className="rb-nt-omnibox" role="search" aria-label="Browse or search" onSubmit={(e) => { e.preventDefault(); submit(false); }}>
@@ -105,7 +136,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
         {actingTabs.map((tab) => <button key={`act:${tab.id}`} type="button" className="rb-nt-chip" onClick={() => props.onSelectTab(tab.id)} title={tab.url}>
           <Spinner size={10}/>{tab.title || hostOf(tab.url)}<span>agent working</span></button>)}
         {feed.missions.map((mission) => <button key={`mission:${mission.missionId}`} type="button" className="rb-nt-chip" onClick={() => props.onMission(mission.missionId)}>
-          <Target size={13} aria-hidden/>{mission.title}<span>research</span></button>)}
+          {runningMissions.has(mission.missionId) ? <Spinner size={10}/> : <Target size={13} aria-hidden/>}{mission.title}<span>{runningMissions.has(mission.missionId) ? "research · working" : "research"}</span></button>)}
       </div>}
       <div className="rb-nt-columns">
         <section className="rb-nt-section" aria-label="Pick back up">
@@ -114,7 +145,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
             ? <Row key={row.key} icon={<PageIcon favicon={row.favicon}/>} title={row.title} detail={row.detail} age={shortAge(row.at, now)} onClick={() => props.onSelectTab(row.tabId)} hint={row.url}/>
             : <Row key={row.key} icon={<ListTodo size={13} aria-hidden/>} title={row.title} detail={row.detail} onClick={() => props.onOpen(row.url)} hint={row.url}/>)}
           {closed.length > 0 && <Row icon={<History size={13} aria-hidden/>} muted title={`Recently closed · ${closed.length}`} expanded={closedOpen} onClick={() => setClosedOpen((v) => !v)}/>}
-          {closedOpen && closed.map((item) => <Row key={`closed:${item.url}`} nested icon={<PageIcon/>} title={item.title || hostOf(item.url)} detail={hostOf(item.url)} age={shortAge(item.at, now)} onClick={() => props.onOpen(item.url)} hint={item.url}/>)}
+          {closedOpen && closed.map((item) => <Row key={`closed:${item.url}`} nested icon={<PageIcon/>} title={item.title || hostOf(item.url)} detail={hostOf(item.url)} age={shortAge(item.at, now)} onClick={() => props.onReopenClosed ? props.onReopenClosed(item) : props.onOpen(item.url)} hint={item.url}/>)}
           {loaded && !picks.length && !closed.length && <p className="rb-nt-empty">Pages you open here stay in reach while you work.</p>}
         </section>
         <section className="rb-nt-section" aria-label="Reading, by subject">

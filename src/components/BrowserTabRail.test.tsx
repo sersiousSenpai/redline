@@ -19,7 +19,8 @@ it("uses vertical keyboard navigation, Delete and middle-click close", () => {
 it("starts as the icon strip, persists showing and hiding titles, and falls back when a favicon fails", () => {
   mount(); const icon=host.querySelector("img")!;
   expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(true);
-  expect(host.querySelector(".rb-tab-close")).toBeNull();
+  // Icon mode closes a page from the ✕ on its icon (shown on hover).
+  expect(host.querySelectorAll(".rb-tab-close")).toHaveLength(3);
   expect(host.querySelector('[data-tab-id="tab-1"]')!.getAttribute("title")).toBe("2 · Second\nhttps://page1.test");
   act(()=>icon.dispatchEvent(new Event("error"))); expect(host.querySelector("img")).toBeNull(); expect(host.querySelector('[data-tab-id="tab-0"] svg')).not.toBeNull();
   act(()=>host.querySelector<HTMLButtonElement>('[aria-label="Show tab titles"]')!.click()); expect(localStorage.getItem("redline.browser.railWidth")).toBe("220"); expect(host.querySelector("aside")?.hasAttribute("data-collapsed")).toBe(false);
@@ -59,4 +60,10 @@ it("lists recently closed pages at the strip's foot and reopens one", () => {
   act(() => items[1].click());
   expect(onReopen).toHaveBeenCalledWith(closed[1]);
   expect(document.querySelector('[role="menu"][aria-label="Recently closed"]')).toBeNull();
+});
+it("closes a page from the ✕ on its icon in the icon strip", () => {
+  const handlers = mount();
+  act(() => host.querySelector<HTMLButtonElement>('[data-tab-id="tab-1"] .rb-tab-close')!.click());
+  expect(handlers.onCloseTab).toHaveBeenCalledWith("tab-1");
+  expect(handlers.onSelect).not.toHaveBeenCalled();
 });

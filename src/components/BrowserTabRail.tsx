@@ -75,7 +75,7 @@ export default function BrowserTabRail(props: Props) {
       {needs && <i className="rb-needs-dot rb-tab-status" aria-hidden/>}
       <span className="rb-tab-title">{title}</span>
       {badge && <span className="rb-tile-badge" aria-label={`Tile ${badge}`}>{badge}</span>}
-      {!collapsed && <button type="button" className="rb-tab-close" tabIndex={tab.id === props.activeId ? 0 : -1} aria-label={`Close ${tab.title || "tab"}`} onClick={event => { event.stopPropagation(); closeTab(tab.id); }}><X size={12}/></button>}
+      {<button type="button" className="rb-tab-close" tabIndex={tab.id === props.activeId ? 0 : -1} aria-label={`Close ${tab.title || "tab"}`} onClick={event => { event.stopPropagation(); closeTab(tab.id); }}><X size={12}/></button>}
     </div>;
   };
   const ordered = props.organized && !collapsed

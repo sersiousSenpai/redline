@@ -97,7 +97,8 @@ it("opens the new-tab home without a native webview via the button", async () =>
   const tab = host.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
   expect(tab.querySelector(".rb-tab-title")!.textContent).toBe("New tab");
   expect(mocks.views.has(`browser-${tab.dataset.tabId}`)).toBe(false);
-  expect(document.activeElement?.getAttribute("aria-label")).toBe("Address or search");
+  // The new tab's omnibox takes the caret, so ⌥⏎ Agent search is a key away.
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Address, or something to find");
 });
 
 it("ignores an older URL poll after a page event provides a newer URL and title", async () => {
@@ -858,15 +859,25 @@ describe("the design's pane (RLPaneBrowser)", () => {
     expect(host.querySelector<HTMLButtonElement>('[aria-label="Recently closed"]')!.disabled).toBe(true);
   });
 
-  it("says under the page when the agent is acting on a page on screen, and stops when the action ends", async () => {
+  it("says under the page while the agent's turn acts on a page on screen, holding the page still from action to action", async () => {
     await mount();
-    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "running", turns: ["x"] });
+    const view = mocks.views.get("browser-t-two")!;
+    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "running", turns: ["two"] });
     const row = () => host.querySelector<HTMLElement>(".rb-agent-status");
     expect(row()?.getAttribute("role")).toBe("status");
     expect(row()?.textContent).toContain("Clicking · tab 2");
     expect(row()?.textContent).toContain("the agent reads the accessibility tree, not pixels");
     expect(row()?.querySelector(".rl-spinner")).not.toBeNull();
-    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "completed", turns: ["x"] });
+    const geometry = view.log.length;
+    // Between actions the row stays (one line, no step), so nothing moves.
+    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "completed", turns: ["two"] });
+    expect(row()?.textContent).toContain("Working on this page");
+    await event("browser-action", { label: "browser-t-two", kind: "type", tab: 2, status: "running", turns: ["two"] });
+    await event("browser-action", { label: "browser-t-two", kind: "type", tab: 2, status: "completed", turns: ["two"] });
+    expect(row()).not.toBeNull();
+    expect(view.log.slice(geometry).filter((step) => step === "size" || step === "position")).toEqual([]);
+    // The turn ends: the row goes.
+    await event("browse-done", { browseId: "two" });
     expect(row()).toBeNull();
   });
 
@@ -875,5 +886,16 @@ describe("the design's pane (RLPaneBrowser)", () => {
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Page menu"]')!.click());
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Research missions…")!.click());
     expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("Research missions");
+  });
+
+  it("opens a fresh workspace on the new-tab page, not a search engine", async () => {
+    localStorage.removeItem("redline.browser.tabs"); localStorage.removeItem("redline.browser.activeId");
+    mocks.load.mockResolvedValue(null);
+    await mount();
+    const tabsNow = [...host.querySelectorAll<HTMLElement>('[role="tab"]')];
+    expect(tabsNow).toHaveLength(1);
+    expect(tabsNow[0].getAttribute("aria-label")).toBe("New tab");
+    expect(host.querySelector(".rb-home[data-newtab]")).not.toBeNull();
+    expect(mocks.views.size).toBe(0);
   });
 });

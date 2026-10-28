@@ -195,7 +195,8 @@ const newBrowseId = (): string =>
 
 const freshHomeTab = (): Tab => {
   const browseId = newBrowseId(); const id = canonicalTabId(browseId);
-  return { id, label: `browser-${id}`, url: HOME, title: initialBrowserTitle(HOME), browseId };
+  // A fresh workspace opens on the new-tab page, not a search engine.
+  return { id, label: `browser-${id}`, url: NEWTAB, title: initialBrowserTitle(NEWTAB), browseId };
 };
 
 function loadTabs(): Tab[] {
@@ -362,6 +363,8 @@ function BrowserPaneBase({
   // Pages closed in this pane, newest first: the strip's Recently closed and
   // the new-tab page's row. Kept for the pane's life only.
   const [closedPages, setClosedPages] = useState<ClosedPage[]>([]);
+  // The new tab whose omnibox takes the caret once its page mounts.
+  const [homeFocus, setHomeFocus] = useState<string | null>(null);
   const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
   const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {}, { debounceMs: 120 });
   const [groupsByWorkspace, setGroupsByWorkspace] = usePersistedState<Record<string, TabGroup[]>>("redline.browser.groups", {});
@@ -1796,7 +1799,9 @@ function BrowserPaneBase({
     setActiveId(id);
     updateTileLayout({ focused: browseId, maximized: null });
     dispatchChat(opened(tab, false));
-    if (url === NEWTAB) window.setTimeout(() => focusAddressRef.current(), 0);
+    // The new-tab page's omnibox takes the caret (⌥⏎ Agent search is a key
+    // away); the address bar keeps it in page state.
+    if (url === NEWTAB) setHomeFocus(id);
     return browseId;
   };
 
@@ -2398,8 +2403,12 @@ function BrowserPaneBase({
     openTab(page.url);
   };
   // The agent acting on a page on screen: the native webview paints over any
-  // overlay, so the pane says so in a row under the page instead.
-  const visibleAction = tilePages.map((page) => pageActions.running.get(page.label)).find(Boolean) ?? null;
+  // overlay, so the pane says so in a row under the page instead. The row
+  // follows `acting`, which lasts the whole turn, not each action: it mounts
+  // once when the turn starts and goes when it ends, so the page's rect (and
+  // the native webview) holds still while the agent works.
+  const actingLabel = tilePages.map((page) => page.label).find((label) => pageActions.acting.has(label)) ?? null;
+  const visibleAction = actingLabel ? pageActions.running.get(actingLabel) ?? null : null;
   // The page chat is memoized. What it is handed keeps its identity across
   // the pane's own renders (a title, a dot, a layout tick) unless it really
   // changed: handlers through refs, the rail's cards by value. A handler
@@ -2492,7 +2501,9 @@ function BrowserPaneBase({
           renderHome={page => <Suspense fallback={<div className="rb-page-cover">Opening new tab…</div>}><BrowserHomePage page={page} tabs={tabs} acting={actingTabs} closed={closedPages}
             onBrowse={text => navigate(text, page.id)} onAgentSearch={text => agentSearch(text, page.id)}
             onOpen={url => { const open = tabs.find(tab => sameTabUrl(tab.url, url) && tab.id !== page.id); if (open) selectTab(open.id); else navigate(url, page.id); }}
-            onSelectTab={selectTab} onMission={id => void switchToMission(id)} onOpenMemory={onOpenMemory}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))}
+            onSelectTab={selectTab} onMission={id => void switchToMission(id)} onOpenMemory={onOpenMemory}
+            onReopenClosed={reopenClosed} needYou={tabs.filter((tab) => pageErrors[tab.id]).length}
+            autoFocus={homeFocus === page.id} onAutoFocused={() => { setHomeFocus(null); void Webview.getCurrent().setFocus().catch(() => {}); }}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))}
           waking={new Set(tilePages.filter((page) => page.url !== NEWTAB && !wvMapRef.current.has(page.id) && !reloading.has(page.id) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
           onAssign={(index, browseId) => { const next = assignVisibleTile(tileLayout, visibleBrowseIds, index, browseId); updateTileLayout(next); const tab = tabs.find((t) => t.browseId === browseId); if (tab) selectTab(tab.id); }}
           onAddPage={(index) => { const browseId = openTab(); if (browseId) updateTileLayout(assignTile(tileLayout, index, browseId)); }}
@@ -2598,8 +2609,8 @@ function BrowserPaneBase({
         );
       })()}
 
-      {visibleAction && !browserFullscreen && <div className="rb-agent-status" role="status">
-        <Spinner size={10}/><span>{liveStepLabel("Acting on the page…", visibleAction)}</span>
+      {actingLabel && !browserFullscreen && <div className="rb-agent-status" role="status">
+        <Spinner size={10}/><span>{visibleAction ? liveStepLabel("Acting on the page…", visibleAction) : "Working on this page"}</span>
         <span className="rb-agent-status-note">the agent reads the accessibility tree, not pixels</span>
         {!chatOpen && <button type="button" onClick={() => setChatHere({ open: true, pill: "page" })}>Page chat</button>}
       </div>}

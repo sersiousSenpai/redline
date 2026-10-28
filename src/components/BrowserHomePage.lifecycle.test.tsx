@@ -10,7 +10,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
+const listeners = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, fn: (event: { payload: unknown }) => void) => { listeners.set(name, fn); return () => { listeners.delete(name); }; }) }));
 import BrowserHomePage, { type BrowserHomePageProps } from "./BrowserHomePage";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -160,5 +162,39 @@ describe("the new-tab page", () => {
     expect(q(".rb-nt-kicker")!.textContent).toBe("Tuesday · 1:52 AM");
     // Without a way to open Memory its links are plain words.
     expect(buttonNamed(host, "Ask Memory")).toBeUndefined();
+  });
+
+  it("counts pages that need you in the kicker", async () => {
+    await mount({ needYou: 2 });
+    expect(q(".rb-nt-kicker")!.textContent).toBe("Tuesday · 1:52 AM · 2 pages open · 2 need you");
+  });
+
+  it("reopens a recently closed page through the pane, which forgets it as closed", async () => {
+    const onReopenClosed = vi.fn(), closed = [{ url: "https://gone.test/a", title: "Gone page", at: NOW - 5 * MIN }];
+    const h = await mount({ closed, onReopenClosed });
+    const pick = section("Pick back up");
+    await act(async () => buttonNamed(pick, "Recently closed").click());
+    await act(async () => buttonNamed(pick, "Gone page").click());
+    expect(onReopenClosed).toHaveBeenCalledWith(closed[0]);
+    expect(h.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("puts the caret in the omnibox when the tab opens as new", async () => {
+    const onAutoFocused = vi.fn();
+    await mount({ autoFocus: true, onAutoFocused });
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Address, or something to find");
+    expect(onAutoFocused).toHaveBeenCalledOnce();
+  });
+
+  it("spins a mission's chip while its orchestrator is mid-turn", async () => {
+    results.mission_turn_status = { streaming: false };
+    await mount();
+    const chip = () => [...host.querySelectorAll<HTMLElement>('[aria-label="Live now"] .rb-nt-chip')].find((c) => c.textContent?.includes("Agent harness landscape"))!;
+    expect(chip().querySelector(".rl-spinner")).toBeNull();
+    await act(async () => listeners.get("mission-delta")?.({ payload: { missionId: "m1", text: "…", seq: 1 } }));
+    expect(chip().querySelector(".rl-spinner")).not.toBeNull();
+    expect(chip().textContent).toContain("research · working");
+    await act(async () => listeners.get("mission-done")?.({ payload: { missionId: "m1", messageId: "x", body: "" } }));
+    expect(chip().querySelector(".rl-spinner")).toBeNull();
   });
 });
