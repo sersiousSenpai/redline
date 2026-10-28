@@ -10110,7 +10110,7 @@ function App() {
               fontSize: "12px",
             }}
           >
-            <span>The footer hit a rendering error.</span>
+            <span>The status bar hit a rendering error.</span>
             <button
               type="button"
               onClick={reset}
@@ -10121,22 +10121,17 @@ function App() {
           </div>
         )}
       >
-      {/* Same swap at the bottom — no native constraint here, so the footer
-          hides outright behind a SHELL_EDGE strip of hull. */}
-      <Suspense fallback={null}>
+      {/* The status bar (W6): status around the Plan a build pill, and no
+          plan verbs — those are the Plan pane's own footer's. Its 28px are
+          held while its chunk lands, so the pill centres on the row from
+          the first frame. */}
+      <Suspense fallback={<div className="rl-app-footer rl-statusbar" aria-hidden />}>
       <Footer
-        planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
-        onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
-        onMoveProject={session ? () => { void openMovePlan(session.sessionId); } : undefined}
         comments={threadComments}
         sessionReady={sessionReady}
-        canSubmit={canSubmit}
-        canApprove={canApprove}
+        version={latest?.versionNumber ?? null}
         waiting={waiting}
         waitingAsk={waitingAsk}
-        onSubmit={submitReview}
-        onApprove={approvePlan}
-        onApproveLater={() => void approvePlanLater()}
         approval={
           session?.status === "approved"
             ? {
@@ -10145,18 +10140,13 @@ function App() {
               }
             : null
         }
-        buildTargets={buildTargets}
-        onBuild={(id) => void buildApproved(id)}
-        onReopen={() => void reopenApproved()}
         termNeedYou={termNeedYou}
         onJumpToNeedsYou={jumpToNeedsYou}
         reviewNews={reviewNews === "review" ? "Review ready" : null}
         onOpenReviewNews={() => selectSurface("review")}
         onShowTerminal={showSessionTerminal}
         backend={session?.backend ?? null}
-        // A Plan pane on screen carries the verbs in its own footer; this
-        // bar keeps the status (W6 slims it to that).
-        planVerbs={!view.visibleKinds.includes("plan")}
+        bridge={daemonState}
       />
       </Suspense>
       </ErrorBoundary>

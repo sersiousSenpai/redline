@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import type { Comment } from "../types";
+//
+// The window's status bar (W6, the design's RLFooter): one 28px row of
+// status around the Plan a build pill. Left, what is happening — the plan's
+// state in a word, the author working (a press shows its terminal), a review
+// an agent is waiting on, the terminals that need you. Centre, the pill's
+// place: MonochatIsland's pill (hover → the compact composer, click → a door
+// tab, an outside tap dismisses, the caret never moves on a hover) sits over
+// it, centred on this row. Right, the bridge the hooks reach (:7676).
+//
+// It holds NO plan verbs (D13): Send, Approve & build, Build and Reopen live
+// in the Plan pane's own footer, where the plan is. A status bar that also
+// approved would offer "Approve & build" over Home's door.
+
+import type { Comment, DaemonState } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
-import { Button } from "./ui/Button";
-import type { ManualPlanState, PlanStateTarget } from "./PlanStateMenu";
-import { MenuSurface } from "./ui/MenuSurface";
 import { ridesSubmit } from "../lib/planSearch";
-
-const PlanStateMenu = lazy(() => import("./PlanStateMenu").then((module) => ({ default: module.PlanStateMenu })));
-
-/** Where an approved plan can be built from — the same agent, or a hand-off. */
-export interface BuildTarget {
-  id: string;
-  label: string;
-  detail?: string;
-}
+import { Spinner } from "./Spinner";
 
 /** The open plan, once approved. `runState` NULL is "approved · not built". */
 export interface FooterApproval {
@@ -23,472 +24,116 @@ export interface FooterApproval {
   runState: string | null;
 }
 
-interface FooterProps {
+export interface FooterProps {
+  /** The open plan's thread: what the next Send carries is counted. */
   comments: Comment[];
-  planState?: PlanStateTarget;
-  onSetPlanState?: (state: ManualPlanState) => void;
-  onMoveProject?: () => void;
-  /** A session is open in the main pane — false when the app sits idle. */
+  /** A session is open — false when the app sits on the door. */
   sessionReady: boolean;
-  canSubmit: boolean;
-  canApprove: boolean;
+  /** The plan's latest version, when one is open. */
+  version?: number | null;
+  /** The author is answering a Send. */
   waiting: boolean;
   /** The in-flight submit was an Ask batch — the author is answering. */
   waitingAsk: boolean;
-  onSubmit: () => void;
-  /** "Approve & build": the same agent builds now. */
-  onApprove: () => void;
-  /** "Approve, build later": approved, the agent stands down, nothing builds. */
-  onApproveLater: () => void;
   /** Present once the open plan is approved. */
   approval?: FooterApproval | null;
-  buildTargets?: BuildTarget[];
-  onBuild?: (targetId: string) => void;
-  /** Rescind the approval and bring the plan back held, in review. */
-  onReopen?: () => void;
+  /** The working line's press: show the terminal the agent works in. */
+  onShowTerminal?: () => void;
   /** Terminals that need you (lib/termState's loud states). */
   termNeedYou?: number;
   /** ⌘⇧J's action: show the next terminal that needs you, in its session. */
   onJumpToNeedsYou?: () => void;
-  /** An agent's review request, waiting for you on the
-   *  review surface ("Review ready"), or null. */
+  /** An agent's review request, waiting for you ("Review ready"), or null. */
   reviewNews?: string | null;
   onOpenReviewNews?: () => void;
-  /** The working line's click: show the terminal the agent is working in. */
-  onShowTerminal?: () => void;
   /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
-  /** Draw Send and Approve & build. False while a Plan pane on screen draws
-   *  its own footer verbs: one Approve on screen, never two. */
-  planVerbs?: boolean;
+  /** How far this window's daemon got binding its port. */
+  bridge?: DaemonState;
+}
+
+/** The daemon's port: the hooks, the skills' curl bridge and MCP reach it. */
+export const BRIDGE_PORT = 7676;
+
+/** The status line, in a word or two. Exported for the tests. */
+export function footerStatus(p: Pick<FooterProps, "comments" | "sessionReady" | "version" | "waiting" | "waitingAsk" | "approval" | "backend">): { text: string; tone: "working" | "needs" | "done" | "idle" } {
+  const author = agentLabelFor(p.backend);
+  const v = p.version ? ` v${p.version}` : "";
+  if (p.waiting) return { text: p.waitingAsk ? `${author} is answering${v ? ` on${v}` : ""}` : `${author} is revising${v}`, tone: "working" };
+  if (p.approval) {
+    const run = p.approval.runState;
+    return { text: `Approved · v${p.approval.version} · ${run === null ? "not built" : run.replace(/_/g, " ")}`, tone: "done" };
+  }
+  if (!p.sessionReady) return { text: "No plan open", tone: "idle" };
+  const pending = p.comments.filter(ridesSubmit).length;
+  const waitingOnYou = p.comments.filter((c) => c.status === "resolved").length;
+  if (waitingOnYou > 0) return { text: `In review${v} · ${waitingOnYou} ${waitingOnYou === 1 ? "answer" : "answers"} to read`, tone: "needs" };
+  if (pending > 0) return { text: `In review${v} · ${pending} ${pending === 1 ? "mark" : "marks"} to send`, tone: "needs" };
+  return { text: `In review${v}`, tone: "idle" };
 }
 
 export function Footer({
   comments,
-  planState, onSetPlanState, onMoveProject,
   sessionReady,
-  canSubmit,
-  canApprove,
+  version = null,
   waiting,
   waitingAsk,
-  onSubmit,
-  onApprove,
-  onApproveLater,
   approval = null,
-  buildTargets = [],
-  onBuild,
-  onReopen,
+  onShowTerminal,
   termNeedYou = 0,
   onJumpToNeedsYou,
   reviewNews = null,
   onOpenReviewNews,
-  onShowTerminal,
   backend,
-  planVerbs = true,
+  bridge = "ready",
 }: FooterProps) {
-  const author = agentLabelFor(backend);
-  // What the next Send carries — an unpromoted research comment doesn't.
-  const pending = comments.filter(ridesSubmit);
-  const counts = countByType(pending);
-  const total = pending.length;
-  // "All resolutions handled" surfaces once the reviewer has dispatched every
-  // author resolution in the current revision: nothing pending, nothing still
-  // sitting at resolved (i.e. awaiting accept/reopen), and at least one comment
-  // has reached a terminal state. The line is a nudge, not a state machine —
-  // the buttons below already drive everything.
-  const hasUnreviewedResolution = comments.some(
-    (c) => c.status === "resolved",
-  );
-  const hasTerminalComment = comments.some(
-    (c) => c.status === "accepted" || c.status === "withdrawn",
-  );
-  const allResolutionsHandled =
-    total === 0 &&
-    !hasUnreviewedResolution &&
-    hasTerminalComment &&
-    !waiting;
-  // Ask-mode whenever the tray is non-empty and every pending comment is a
-  // non-actionable question — mirrors the backend's SubmissionMode::infer
-  // exactly (a promoted question flips the batch to Revise). Purely for UI
-  // labelling.
-  const askMode =
-    total > 0 && pending.every((c) => c.type === "question" && !c.actionable);
-  const submitCaption = askMode ? "asks questions only" : "requests a revision";
-  const waitingCopy = waitingAsk
-    ? `${author} is working — answering in the terminal…`
-    : `${author} is working — revising in the terminal…`;
-
-  // No session open and nothing in flight — the app is waiting for a plan.
-  // The selected provider's plan opens the review surface.
-  const idle = !sessionReady && !waiting;
-
-  // Semantic status dot for the footer: amber while you have pending work,
-  // info-blue while the author is in-flight, success-green when the tray is clear,
-  // muted while idle.
-  const dotColor = waiting
-    ? "var(--color-info)"
-    : idle
-      ? "var(--color-ink-muted)"
-      : total > 0
-        ? "var(--color-warning)"
-        : "var(--color-success)";
-
+  const status = footerStatus({ comments, sessionReady, version, waiting, waitingAsk, approval, backend });
+  const dot = status.tone === "needs" ? "var(--color-warning)" : status.tone === "done" ? "var(--color-success)" : "var(--color-ink-muted)";
   return (
-    <footer
-      className="rl-app-footer flex items-center justify-between gap-4 px-6 py-2 border-t"
-      style={{
-        borderColor: "var(--color-rule)",
-        color: "var(--color-ink-muted)",
-        fontSize: "var(--rl-text-sm)",
-      }}
-    >
-      <span className="rl-footer-status flex items-center gap-2">
+    <footer className="rl-app-footer rl-statusbar" aria-label="Status">
+      <span className="rl-footer-status">
         {/* The way to a review an agent asked for, instead of being taken
             there: present only while it waits. First, because a long status
-            is cut off short of the pill, and this is the part that must
-            never be out of sight. */}
+            is cut off short of the pill, and this must never be out of sight. */}
         {reviewNews && onOpenReviewNews && (
           <>
-            <button
-              type="button"
-              onClick={onOpenReviewNews}
-              title="Open the review surface"
-              className="flex items-center"
-              style={{
-                height: 24,
-                padding: "0 8px",
-                borderRadius: 9999,
-                border: "1px solid color-mix(in srgb, var(--color-info) 60%, var(--color-rule))",
-                color: "var(--color-ink)",
-                fontSize: "var(--rl-text-xs)",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
+            <button type="button" className="rl-statusbar-chip" data-tone="info" onClick={onOpenReviewNews} title="Open the review surface">
               {reviewNews} → Open
             </button>
-            <span style={{ color: "var(--color-rule)" }}>·</span>
+            <span className="rl-statusbar-sep" aria-hidden>·</span>
           </>
         )}
-        <span
-          aria-hidden
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 9999,
-            background: dotColor,
-            display: "inline-block",
-          }}
-        />
-        {waiting ? (
-          <button
-            type="button"
-            onClick={onShowTerminal}
-            title="Show terminal"
-            className="italic flex items-center gap-1"
-            style={{
-              color: "var(--color-ink-muted)",
-              fontSize: "var(--rl-text-sm)",
-              cursor: "pointer",
-            }}
-          >
-            {waitingCopy}
+        {status.tone === "working" ? (
+          <button type="button" className="rl-statusbar-item rl-statusbar-press" onClick={onShowTerminal} title="Show terminal">
+            <Spinner size={10} />
+            <span>{status.text}</span>
           </button>
-        ) : approval ? (
-          <span style={{ color: "var(--color-success)" }}>
-          {planState && onSetPlanState ? <Suspense fallback={<>Approved · v{approval.version}</>}><PlanStateMenu session={planState} onState={onSetPlanState} onMove={onMoveProject}>
-            Approved · v{approval.version} · {approval.runState === null ? "not built" : approval.runState.replace(/_/g, " ")}
-          </PlanStateMenu></Suspense> : <>
-            Approved · v{approval.version}
-            <span style={{ color: "var(--color-ink-muted)" }}>
-              {approval.runState === null
-                ? " · not built"
-                : ` · ${approval.runState.replace(/_/g, " ")}`}
-            </span>
-          </>}
-          </span>
-        ) : idle ? (
-          <span>
-            Waiting for a plan — start a planning session from the front door
-          </span>
-        ) : allResolutionsHandled ? (
-          <span style={{ color: "var(--color-success)" }}>
-            All resolutions handled — Approve plan, or add another round of
-            comments.
-          </span>
-        ) : total === 0 ? (
-          "no pending comments"
         ) : (
-          <>
-            {total} pending ·{" "}
-            <Badge n={counts.edit} label="edit" color="var(--color-info)" />
-            {" · "}
-            <Badge
-              n={counts.feedback}
-              label="feedback"
-              color="var(--color-warning)"
-            />
-            {" · "}
-            <Badge
-              n={counts.question}
-              label="question"
-              color="var(--color-success)"
-            />
-          </>
+          <span className="rl-statusbar-item">
+            <span aria-hidden className="rl-statusbar-dot" style={{ background: dot }} />
+            <span>{status.text}</span>
+          </span>
         )}
-        {!approval && planState && !planState.held && onSetPlanState && <Suspense fallback={null}><PlanStateMenu session={planState} onState={onSetPlanState} onMove={onMoveProject}/></Suspense>}
-        {/* The way to a blocked agent wherever you are — and a standing
-            hint at ⌘⇧J. Present only while something
-            needs you; never a permanent control. */}
+        {/* The way to a blocked agent wherever you are — and a standing hint
+            at ⌘⇧J. Present only while something needs you. */}
         {termNeedYou > 0 && onJumpToNeedsYou && (
           <>
-            <span style={{ color: "var(--color-rule)" }}>·</span>
-            <button
-              type="button"
-              onClick={onJumpToNeedsYou}
-              title="Jump to the terminal that needs you (⌘⇧J)"
-              className="flex items-center gap-1.5"
-              style={{
-                height: 18,
-                padding: "0 8px",
-                borderRadius: 9999,
-                border: "1px solid color-mix(in srgb, var(--color-warning) 60%, var(--color-rule))",
-                color: "var(--color-ink)",
-                fontSize: "var(--rl-text-xs)",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              <span
-                aria-hidden
-                className="rl-term-badge rl-term-badge--needs"
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: 9999,
-                  background: "var(--color-warning)",
-                }}
-              />
+            <span className="rl-statusbar-sep" aria-hidden>·</span>
+            <button type="button" className="rl-statusbar-chip" data-tone="needs" onClick={onJumpToNeedsYou} title="Jump to the terminal that needs you (⌘⇧J)">
+              <span aria-hidden className="rl-term-badge rl-term-badge--needs rl-statusbar-dot" style={{ background: "var(--color-warning)" }} />
               {termNeedYou} {termNeedYou === 1 ? "needs" : "need"} you
             </button>
           </>
         )}
       </span>
-      {planVerbs && <span data-tour="footer" className="rl-footer-actions flex items-center gap-2">
-        <Button
-          size="sm"
-          onClick={onSubmit}
-          disabled={!canSubmit || waiting}
-          className="font-medium"
-        >
-          {/* One constant verb naming the destination — the original author
-              session, never the per-comment Discuss fork. The caption carries
-              the mode so the label can't be mistaken for the sidecar. */}
-          <span className="flex flex-col items-center leading-tight">
-            <span>Send to {author}</span>
-            {total > 0 && (
-              <span
-                style={{
-                  fontSize: "10px",
-                  fontWeight: 400,
-                  color: "var(--color-ink-muted)",
-                }}
-              >
-                {submitCaption}
-              </span>
-            )}
-          </span>
-        </Button>
-        {approval ? (
-          <ApprovedActions
-            approval={approval}
-            buildTargets={buildTargets}
-            onBuild={onBuild}
-            onReopen={onReopen}
-          />
-        ) : (
-          // Approve & build hands the plan to the agent that wrote it, in its
-          // own terminal; build later parks it here.
-          <SplitButton
-            label="Approve & build"
-            sublabel={`with ${author}`}
-            disabled={!canApprove || waiting}
-            onPrimary={onApprove}
-            menuLabel="More approve options"
-            items={[
-              { id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" },
-            ]}
-            onItem={() => onApproveLater()}
-          />
-        )}
-      </span>}
-    </footer>
-  );
-}
-
-function Badge({
-  n,
-  label,
-  color,
-}: {
-  n: number;
-  label: string;
-  color: string;
-}) {
-  // Tracked microtype on the label keeps the chrome reading as an IDE/editor
-  // surface. The count stays in the normal type for legibility.
-  return (
-    <span style={{ color }}>
-      {n}{" "}
-      <span
-        style={{
-          textTransform: "uppercase",
-          letterSpacing: "0.12em",
-          fontSize: "var(--rl-text-xs)",
-          fontWeight: 600,
-        }}
-      >
-        {label}
+      {/* The pill's place: MonochatIsland centres its pill on this row. */}
+      <span className="rl-statusbar-pill" data-tour="pill" aria-hidden />
+      <span className="rl-footer-meta">
+        <span className="rl-statusbar-item" title={bridge === "failed" ? `Another process holds port ${BRIDGE_PORT}: this window receives no plans` : `Plans reach Redline on port ${BRIDGE_PORT}`}>
+          <span aria-hidden className="rl-statusbar-dot" style={{ background: bridge === "ready" ? "var(--color-success)" : bridge === "failed" ? "var(--color-warning)" : "var(--color-ink-muted)" }} />
+          <span>{bridge === "failed" ? "Bridge offline" : `Bridge ${BRIDGE_PORT}`}</span>
+        </span>
       </span>
-    </span>
-  );
-}
-
-function countByType(comments: Comment[]): Record<Comment["type"], number> {
-  const out: Record<Comment["type"], number> = {
-    edit: 0,
-    feedback: 0,
-    question: 0,
-    "block-insert": 0,
-    "block-delete": 0,
-    "block-move": 0,
-  };
-  for (const c of comments) {
-    out[c.type] += 1;
-  }
-  return out;
-}
-
-/** An approved plan's actions: Build ▾ while it isn't built, and Reopen
- *  unless a live run sits on it. Reopening something already building asks
- *  once, inline — the agent may already have changed files. */
-function ApprovedActions({
-  approval,
-  buildTargets,
-  onBuild,
-  onReopen,
-}: {
-  approval: FooterApproval;
-  buildTargets: BuildTarget[];
-  onBuild?: (targetId: string) => void;
-  onReopen?: () => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  const built = approval.runState !== null;
-  return (
-    <>
-      {onReopen && (confirming ? (
-        <span className="flex items-center gap-2" role="group" aria-label="Confirm reopen">
-          <span style={{ fontSize: "11px" }}>The agent may already have made changes.</span>
-          <Button size="sm" onClick={() => { setConfirming(false); onReopen(); }}>Reopen anyway</Button>
-          <Button size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-        </span>
-      ) : (
-        <Button
-          size="sm"
-          onClick={() => (built ? setConfirming(true) : onReopen())}
-          title="Rescind the approval and bring the plan back into review, with its comments"
-        >
-          Reopen
-        </Button>
-      ))}
-      {!built && buildTargets.length > 0 && onBuild && (
-        <SplitButton
-          label="Build"
-          sublabel={buildTargets[0].label}
-          onPrimary={() => onBuild(buildTargets[0].id)}
-          menuLabel="Build with"
-          items={buildTargets}
-          onItem={onBuild}
-        />
-      )}
-    </>
-  );
-}
-
-/** A primary action with a ▾ beside it that opens a small menu upward — the
- *  footer sits on the bottom edge, so the menu grows into the page. */
-function SplitButton({
-  label,
-  sublabel,
-  disabled = false,
-  onPrimary,
-  menuLabel,
-  items,
-  onItem,
-}: {
-  label: string;
-  sublabel?: string;
-  disabled?: boolean;
-  onPrimary: () => void;
-  menuLabel: string;
-  items: BuildTarget[];
-  onItem: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", esc);
-    };
-  }, [open]);
-  return (
-    <span ref={wrap} className="relative inline-flex items-stretch">
-      <Button size="sm" variant="success" onClick={onPrimary} disabled={disabled} className="font-medium" style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
-        <span className="flex flex-col items-center leading-tight">
-          <span>{label}</span>
-          {sublabel && <span style={{ fontSize: "10px", fontWeight: 400, opacity: 0.85 }}>{sublabel}</span>}
-        </span>
-      </Button>
-      <Button
-        size="sm"
-        variant="success"
-        ariaLabel={menuLabel}
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: "1px solid color-mix(in srgb, var(--color-on-accent) 35%, transparent)", paddingLeft: 6, paddingRight: 6 }}
-      >
-        ▾
-      </Button>
-      {open && (
-        <MenuSurface
-          ariaLabel={menuLabel}
-          className="absolute right-0 z-50 py-1"
-          style={{ bottom: "calc(100% + 6px)", minWidth: 220 }}
-        >
-          {items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="menuitem"
-              className="block w-full text-left px-3 py-1.5 hover:bg-[color-mix(in_srgb,var(--color-ink)_7%,transparent)]"
-              style={{ color: "var(--color-ink)", fontSize: "12px" }}
-              onClick={() => { setOpen(false); onItem(item.id); }}
-            >
-              {item.label}
-              {item.detail && <span className="block" style={{ color: "var(--color-ink-muted)", fontSize: "10.5px" }}>{item.detail}</span>}
-            </button>
-          ))}
-        </MenuSurface>
-      )}
-    </span>
+    </footer>
   );
 }

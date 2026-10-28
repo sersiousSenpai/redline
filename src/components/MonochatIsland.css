@@ -9,7 +9,7 @@
 /* The brand's mark and what the pill opens. The mark side is optically
    tighter, so its padding is too. Working, the mark's strike spins
    (`.rl-pulse-blades`); reduced motion keeps it still. */
-.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 4px; display: flex; align-items: center; justify-content: center; gap: 7px; width: 144px; height: 32px; padding: 0 14px 0 12px; border: 1px solid var(--color-rule); border-radius: 18px; color: var(--color-ink); font-size: 12px; font-weight: 500; letter-spacing: -0.003em; background: var(--color-bg-elevated); box-shadow: 0 2px 12px #0002; transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
+.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 9px; display: flex; align-items: center; justify-content: center; gap: 6px; width: 144px; height: 22px; padding: 0 12px 0 10px; border: 1px solid var(--color-rule); border-radius: 11px; color: var(--color-ink); font-size: 11.5px; font-weight: 500; letter-spacing: -0.003em; background: var(--color-bg-elevated); transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
 .rl-portal-membrane svg { display: block; flex: none; }
 .rl-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-monochat-notch:hover .rl-portal-membrane, .rl-monochat-notch:focus-visible .rl-portal-membrane { border-color: var(--color-info); }
@@ -106,11 +106,11 @@
 .rl-monochat [data-chat-empty="true"] { justify-content: center; }
 .rl-monochat [data-chat-empty="true"] [data-chat-messages] { display: none; }
 
-/* The entrance occupies the footer's center without adding a row or height.
-   On narrow windows the existing groups scroll within their own half. */
-.rl-footer-status, .rl-footer-actions { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
-.rl-footer-status::-webkit-scrollbar, .rl-footer-actions::-webkit-scrollbar { display: none; }
-.rl-footer-status > *, .rl-footer-actions > * { flex-shrink: 0; }
+/* The entrance occupies the status bar's centre without adding a row or
+   height. On narrow windows each side scrolls within its own half. */
+.rl-footer-status, .rl-footer-meta { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.rl-footer-status::-webkit-scrollbar, .rl-footer-meta::-webkit-scrollbar { display: none; }
+.rl-footer-status > *, .rl-footer-meta > * { flex-shrink: 0; }
 
 /* ── The resting door ──────────────────────────────────────────────────────
    On the empty plate the door lands in the plate's free area (header →

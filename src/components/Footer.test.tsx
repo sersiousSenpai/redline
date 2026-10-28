@@ -4,173 +4,114 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { Footer } from "./Footer";
+import type { Comment } from "../types";
+import { Footer, footerStatus, type FooterProps } from "./Footer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
 beforeEach(() => { host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
-async function mount(backend?: string, waiting = false, waitingAsk = false) {
-  await act(async () => root.render(createElement(Footer, {
-    comments: [], sessionReady: true, canSubmit: true, canApprove: true,
-    waiting, waitingAsk, backend,
-    onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-  })));
+const base: FooterProps = { comments: [], sessionReady: true, version: 3, waiting: false, waitingAsk: false };
+async function mount(over: Partial<FooterProps> = {}) {
+  await act(async () => root.render(createElement(Footer, { ...base, ...over })));
 }
-describe("plan footer provider and execution labels", () => {
+const mark = (id: string, over: Partial<Comment> = {}): Comment => ({ id, type: "feedback", status: "draft", body: "x", anchorId: "a", ...over } as Comment);
+
+describe("the status bar (RLFooter)", () => {
+  it("is one row: status, the pill's place, the bridge", async () => {
+    await mount();
+    const bar = host.querySelector("footer.rl-app-footer.rl-statusbar")!;
+    expect(bar).not.toBeNull();
+    expect(bar.querySelector(".rl-footer-status")).not.toBeNull();
+    // The pill's place, which the tour points at.
+    expect(bar.querySelector('.rl-statusbar-pill[data-tour="pill"]')).not.toBeNull();
+    expect(bar.querySelector(".rl-footer-meta")?.textContent).toBe("Bridge 7676");
+  });
+
+  it("carries no plan verbs at all, on a plan or anywhere else (D13)", async () => {
+    for (const over of [{}, { sessionReady: false }, { comments: [mark("c1")] }, { approval: { version: 2, runState: null } }]) {
+      await mount(over);
+      expect(host.querySelectorAll("button").length).toBe(0);
+      expect(host.textContent).not.toMatch(/Approve &|Approve,|Send to|Send \d|\bBuild\b|Reopen/);
+    }
+  });
+
   it.each([["claude-code", "Claude"], ["codex", "Codex"], ["cursor", "Cursor"], ["antigravity", "Antigravity"]])(
-    "routes %s feedback labels to the plan author", async (backend, author) => {
-      await mount(backend, true, true);
-      expect(host.textContent).toContain(`Send to ${author}`);
-      expect(host.textContent).toContain(`${author} is working — answering in the terminal`);
-      await mount(backend, true, false);
-      expect(host.textContent).toContain(`${author} is working — revising in the terminal`);
+    "names %s as the author at work, and its line shows the terminal",
+    async (backend, author) => {
+      let shown = 0;
+      await mount({ backend, waiting: true, waitingAsk: true, onShowTerminal: () => shown++ });
+      expect(host.textContent).toContain(`${author} is answering on v3`);
+      await mount({ backend, waiting: true, waitingAsk: false, onShowTerminal: () => shown++ });
+      expect(host.textContent).toContain(`${author} is revising v3`);
+      // Working is the shared Spinner, not a dot.
+      expect(host.querySelector(".rl-spinner")).not.toBeNull();
+      await act(async () => host.querySelector<HTMLButtonElement>('button[title="Show terminal"]')!.click());
+      expect(shown).toBe(1);
     },
   );
-  it("approves through the plan's own agent, never a run graph", async () => {
-    await mount("codex");
-    expect(host.textContent).toContain("Approve & build");
-    expect(host.textContent).toContain("with Codex");
-    expect(host.textContent).not.toContain("Orchestrate");
-  });
-});
 
-describe("approve, build later, build and reopen", () => {
-  const button = (text: string) =>
-    [...host.querySelectorAll("button")].find((b) => b.textContent?.trim().startsWith(text));
-  async function mountWith(over: Record<string, unknown>) {
-    await act(async () => root.render(createElement(Footer, {
-      comments: [], sessionReady: true, canSubmit: false, canApprove: true, waiting: false, waitingAsk: false,
-      backend: "claude-code", onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      ...over,
-    })));
-  }
-
-  it("offers build later from the approve split button", async () => {
-    const calls: string[] = [];
-    await mountWith({ onApprove: () => calls.push("now"), onApproveLater: () => calls.push("later") });
-    await act(async () => button("Approve & build")!.click());
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
-    const later = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes("Approve, build later"))!;
-    await act(async () => later.click());
-    expect(calls).toEqual(["now", "later"]);
+  it("says the plan's state in a word", () => {
+    expect(footerStatus({ ...base, sessionReady: false }).text).toBe("No plan open");
+    expect(footerStatus(base)).toEqual({ text: "In review v3", tone: "idle" });
+    expect(footerStatus({ ...base, comments: [mark("a"), mark("b")] })).toEqual({ text: "In review v3 · 2 marks to send", tone: "needs" });
+    expect(footerStatus({ ...base, comments: [mark("a", { status: "resolved" })] }).text).toBe("In review v3 · 1 answer to read");
+    expect(footerStatus({ ...base, approval: { version: 3, runState: null } })).toEqual({ text: "Approved · v3 · not built", tone: "done" });
+    expect(footerStatus({ ...base, approval: { version: 3, runState: "building_now" } }).text).toBe("Approved · v3 · building now");
   });
 
-  it("an approved, unbuilt plan shows Build ▾ and Reopen", async () => {
-    const built: string[] = [];
-    let reopened = 0;
-    await mountWith({
-      approval: { version: 3, runState: null },
-      buildTargets: [{ id: "same", label: "with Claude" }, { id: "codex", label: "with Codex" }],
-      onBuild: (id: string) => built.push(id),
-      onReopen: () => reopened++,
-    });
-    expect(host.textContent).toContain("Approved · v3");
-    expect(host.textContent).toContain("not built");
-    expect(button("Approve & build")).toBeUndefined();
-    await act(async () => button("Build")!.click());
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Build with"]')!.click());
-    const codex = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes("with Codex"))!;
-    await act(async () => codex.click());
-    expect(built).toEqual(["same", "codex"]);
-    await act(async () => button("Reopen")!.click());
-    expect(reopened).toBe(1);
-  });
-
-  it("reopening a plan that is already building asks once, inline", async () => {
-    let reopened = 0;
-    await mountWith({ approval: { version: 2, runState: "building" }, onReopen: () => reopened++ });
-    expect(button("Build")).toBeUndefined();
-    await act(async () => button("Reopen")!.click());
-    expect(reopened).toBe(0);
-    expect(host.textContent).toContain("may already have made changes");
-    await act(async () => button("Reopen anyway")!.click());
-    expect(reopened).toBe(1);
-  });
-});
-
-describe("Approve & build is one launch", () => {
-  it("its menu holds only build later: no team, no run", async () => {
-    let later = 0;
-    await act(async () => root.render(createElement(Footer, {
-      comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
-      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => { later++; },
-    })));
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
-    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    expect(items.map((b) => b.textContent)).toEqual([expect.stringContaining("Approve, build later")]);
-    await act(async () => items[0].click());
-    expect(later).toBe(1);
+  it("says when the bridge is not this window's", async () => {
+    await mount({ bridge: "failed" });
+    expect(host.querySelector(".rl-footer-meta")?.textContent).toBe("Bridge offline");
   });
 });
 
 describe("the terminals that need you", () => {
-  async function mountWith(extra: Record<string, unknown>) {
-    await act(async () => root.render(createElement(Footer, {
-      comments: [], sessionReady: true, canSubmit: true, canApprove: true,
-      waiting: false, waitingAsk: false,
-      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      ...extra,
-    })));
-  }
   const chip = () => [...host.querySelectorAll("button")].find((b) => b.title.includes("⌘⇧J"));
 
   it("shows a chip only while something needs you, and its click runs the jump", async () => {
     let jumps = 0;
-    await mountWith({ termNeedYou: 0, onJumpToNeedsYou: () => { jumps++; } });
+    await mount({ termNeedYou: 0, onJumpToNeedsYou: () => { jumps++; } });
     expect(chip()).toBeUndefined();
     // No terminal count: the bottom dock that chip opened is gone.
     expect(host.textContent).not.toMatch(/\d terminals?/);
-    await mountWith({ termNeedYou: 2, onJumpToNeedsYou: () => { jumps++; } });
+    await mount({ termNeedYou: 2, onJumpToNeedsYou: () => { jumps++; } });
     expect(chip()?.textContent).toBe("2 need you");
     await act(async () => chip()!.click());
     expect(jumps).toBe(1);
-    await mountWith({ termNeedYou: 1, onJumpToNeedsYou: () => {} });
+    await mount({ termNeedYou: 1, onJumpToNeedsYou: () => {} });
     expect(chip()?.textContent).toBe("1 needs you");
   });
-
 });
 
 // An agent's review request is news, never a move (10/10): the chip is the
 // way there, for as long as the agent waits.
 describe("a review waiting for you", () => {
-  async function mountWith(extra: Record<string, unknown>) {
-    await act(async () => root.render(createElement(Footer, {
-      comments: [], sessionReady: true, canSubmit: true, canApprove: true,
-      waiting: false, waitingAsk: false,
-      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      ...extra,
-    })));
-  }
   const chip = () => [...host.querySelectorAll("button")].find((b) => b.title === "Open the review surface");
 
   it("shows a chip only while a review waits, and its click is the way there", async () => {
     let opened = 0;
-    await mountWith({ reviewNews: null, onOpenReviewNews: () => { opened++; } });
+    await mount({ reviewNews: null, onOpenReviewNews: () => { opened++; } });
     expect(chip()).toBeUndefined();
-    await mountWith({ reviewNews: "Review ready", onOpenReviewNews: () => { opened++; } });
+    await mount({ reviewNews: "Review ready", onOpenReviewNews: () => { opened++; } });
     expect(chip()?.textContent).toBe("Review ready → Open");
     await act(async () => chip()!.click());
     expect(opened).toBe(1);
   });
 });
 
-describe("one set of plan verbs on screen", () => {
-  it("planVerbs={false} keeps the status and drops Send and Approve & build: the Plan pane's footer carries them", async () => {
-    await act(async () => root.render(createElement(Footer, {
-      comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
-      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      planVerbs: false,
-    })));
-    expect(host.textContent).toContain("no pending comments");
-    expect(host.textContent).not.toContain("Approve & build");
-    expect(host.textContent).not.toContain("Send to");
-    expect(host.querySelector(".rl-footer-actions")).toBeNull();
+describe("App's status bar", () => {
+  const app = readFileSync("src/App.tsx", "utf8");
+  const footer = app.slice(app.indexOf("<Footer\n"), app.indexOf("/>", app.indexOf("<Footer\n")));
+
+  it("is handed no plan verb: they are the Plan pane's footer's", () => {
+    for (const verb of ["onSubmit", "onApprove", "onApproveLater", "onBuild", "onReopen", "buildTargets", "canSubmit", "canApprove", "onSetPlanState", "planVerbs"]) {
+      expect(footer, verb).not.toContain(`${verb}=`);
+    }
+    expect(footer).toContain("bridge={daemonState}");
   });
 
-  it("App ties it to a Plan pane being on screen", () => {
-    const app = readFileSync("src/App.tsx", "utf8");
-    const footer = app.slice(app.indexOf("<Footer\n"), app.indexOf("/>", app.indexOf("<Footer\n")));
-    expect(footer).toMatch(/planVerbs=\{!view\.visibleKinds\.includes\("plan"\)\}/);
+  it("holds its row while its chunk lands, so the pill centres from the first frame", () => {
+    expect(app).toContain('<Suspense fallback={<div className="rl-app-footer rl-statusbar" aria-hidden />}>');
   });
 });

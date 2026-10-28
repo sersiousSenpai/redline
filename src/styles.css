@@ -3360,6 +3360,21 @@ html[data-rl-tile-drag] * {
    carries this class, so the door island lands where the strip will be
    instead of jumping once the chunk arrives. */
 .rl-wb-strip { flex: none; height: 34px; box-sizing: border-box; }
+/* The status bar (W6, RLFooter): one 28px row — status left, the Plan a
+   build pill's place in the centre (MonochatIsland centres its pill on this
+   row), the bridge right. The lazy bar's placeholder holds the same row. */
+.rl-statusbar { position: relative; flex: none; height: 28px; box-sizing: border-box; display: flex; align-items: center; gap: 14px; padding: 0 12px; border-top: 1px solid var(--color-rule); background: var(--color-canvas); color: var(--color-ink-muted); font-size: 12px; white-space: nowrap; user-select: none; }
+.rl-statusbar .rl-footer-status, .rl-statusbar .rl-footer-meta { display: flex; align-items: center; gap: 7px; }
+.rl-statusbar .rl-footer-meta { justify-content: flex-end; }
+.rl-statusbar-pill { flex: 1; align-self: stretch; min-width: 160px; }
+.rl-statusbar-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.rl-statusbar-press { color: inherit; font: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.rl-statusbar-press:hover span:last-child { color: var(--color-ink); text-decoration: underline; }
+.rl-statusbar-dot { width: 6px; height: 6px; border-radius: 9999px; display: inline-block; flex: none; }
+.rl-statusbar-sep { color: var(--color-rule); }
+.rl-statusbar-chip { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 9999px; border: 1px solid var(--color-rule); background: none; color: var(--color-ink); font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+.rl-statusbar-chip[data-tone="needs"] { border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-rule)); }
+.rl-statusbar-chip[data-tone="info"] { border-color: color-mix(in srgb, var(--color-info) 60%, var(--color-rule)); }
 /* The header's lazy memory pill: its slot keeps the cluster's width while
    the chunk arrives. */
 .rl-mem-pill-slot { display: inline-block; min-width: 190px; height: 26px; }

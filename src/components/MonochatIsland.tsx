@@ -354,10 +354,12 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     const stage = document.querySelector<HTMLElement>("[data-rl-door-plate]");
     const plate = stage ?? document.querySelector<HTMLElement>(".rl-doc-column");
     const position = () => {
-      const rect = footer?.getBoundingClientRect();
-      // Center within the existing footer row. This fixed overlay contributes
-      // no height and never moves the footer or the main viewport.
-      const clearance = rect && rect.height >= 32
+      // Read afresh: the status bar is a lazy chunk whose placeholder holds
+      // its row until it lands, so the element can change under the effect.
+      const rect = (document.querySelector<HTMLElement>(".rl-app-footer") ?? footer)?.getBoundingClientRect();
+      // Centred on the status bar's row (W6: 28px). This fixed overlay
+      // contributes no height and never moves the bar or the main viewport.
+      const clearance = rect && rect.height > 0
         ? window.innerHeight - (rect.top + rect.height / 2) - 20
         : 8;
       if (dock.current) dock.current.style.bottom = `${clearance}px`;
