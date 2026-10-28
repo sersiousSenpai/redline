@@ -115,6 +115,11 @@ export type WorkbenchAction =
    *  moves here: it leaves every other wall and this wall's set owns it. A
    *  wall left with nothing closes. */
   | { type: "setWall"; paneId: string; data: PaneDataByKind["terminals"] }
+  /** Close a terminals pane. Its terminals are either kept running
+   *  (`keep`: stowed, listed under their session until a click puts them
+   *  back on a wall) or terminated (the host kills them; they leave
+   *  `owners`). Never remembered for ⌘⇧T: a wall is its terminals. */
+  | { type: "closeWall"; key?: SessionKey; paneId: string; keep: boolean }
   | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[] };
 
 let counter = 0;
@@ -945,6 +950,22 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const holder = current.panes[pane.id];
       if (!holder || holder.kind !== "terminals") return refillEmpty(next);
       return refillEmpty(putSet(next, key, { ...current, panes: { ...current.panes, [pane.id]: { ...holder, data } } }));
+    }
+
+    case "closeWall": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const pane = set?.panes[action.paneId];
+      if (!set || !pane || pane.kind !== "terminals") return state;
+      const tiles = pane.data.tiles;
+      const next: WorkbenchState = action.keep
+        ? { ...state, stowed: [...state.stowed, ...tiles.filter((id) => !state.stowed.includes(id))] }
+        : {
+            ...state,
+            owners: Object.fromEntries(Object.entries(state.owners).filter(([id]) => !tiles.includes(id))),
+            stowed: state.stowed.filter((id) => !tiles.includes(id)),
+          };
+      return refillEmpty(putSet(next, key, dropPane(set, pane.id, false)));
     }
 
     case "adoptTerminal":

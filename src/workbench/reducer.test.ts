@@ -518,6 +518,24 @@ describe("terminals", () => {
     expect(kinds(s, HOME_KEY)).toEqual(["door"]);
   });
 
+  it("closing a wall keeps its terminals running (stowed, still owned) or terminates them (owners forget them)", () => {
+    let s = home(door(1), wall(["a", "b"]));
+    s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY } };
+    const kept = reduce(s, { type: "closeWall", paneId: "p2", keep: true });
+    expect(tabKinds(kept)).toEqual(["door"]);
+    expect(set(kept).closed).toHaveLength(0);
+    expect(kept.stowed).toEqual(["a", "b"]);
+    expect(kept.owners).toEqual({ a: HOME_KEY, b: HOME_KEY });
+    // A kept terminal comes back onto a wall on a click.
+    const back = reduce(kept, { type: "revealTerminal", ptyId: "a" });
+    expect(back.stowed).toEqual(["b"]);
+    expect(kinds(back)).toEqual(["terminals"]);
+    const gone = reduce(s, { type: "closeWall", paneId: "p2", keep: false });
+    expect(gone.owners).toEqual({});
+    expect(gone.stowed).toEqual([]);
+    expect(reduce(s, { type: "closeWall", paneId: "p1", keep: true })).toBe(s);
+  });
+
   it("a wall the component empties closes without a closed entry", () => {
     let s = home(door(1), wall(["a"]));
     s = reduce(s, { type: "setWall", paneId: "p2", data: { tiles: [], focus: 0, zoomed: null, pinned: [] } });

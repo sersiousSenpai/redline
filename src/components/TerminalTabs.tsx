@@ -109,6 +109,13 @@ interface Tab {
   placeholder?: boolean;
 }
 
+/** What the host shows about a terminal outside the wall: its state (one
+ *  derivation, lib/termState) and the label its tile wears. */
+export interface TerminalStatus {
+  state: TermState;
+  label: string;
+}
+
 interface TerminalTabsProps {
   theme: string;
   /** The wall on screen: which terminals pane's tiles, focus, zoom and pins
@@ -136,6 +143,10 @@ interface TerminalTabsProps {
   /** How many terminals need you (needs-you, or an unread your-turn) —
    *  the footer's "N need you" chip and the ⌘⇧J gate. */
   onNeedsYouChange?: (count: number) => void;
+  /** Every terminal's state and label, whenever one changes: the host's tab
+   *  dots, the sidebar's nested terminal rows and the close-a-wall prompt
+   *  read these, so nothing outside the wall derives a state of its own. */
+  onStatesChange?: (states: ReadonlyMap<string, TerminalStatus>) => void;
   /** No wall is on screen, so no tile is really visible: the fleet poll
    *  and its `lsof` stop, and a terminal's output counts as unseen. */
   collapsed: boolean;
@@ -251,6 +262,9 @@ export interface TerminalTabsHandle {
   /** Hand a terminal's view the caret (a jump to a tile already on screen
    *  has no reveal transition to do it). */
   focusTerminal: (id: string) => void;
+  /** Terminate terminals (a closed wall's, when the user says so): each
+   *  shell is killed and its tile, wherever it is on screen, collapses. */
+  closeTerminals: (ids: readonly string[]) => void;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -321,6 +335,7 @@ export const TerminalTabs = memo(
       onTabsChange,
       onTabIdsChange,
       onNeedsYouChange,
+      onStatesChange,
       collapsed,
       onActiveTabChange,
       onFocusedCwd,
@@ -1005,6 +1020,19 @@ export const TerminalTabs = memo(
   }, [tabs, attention, acks, procs, heldTerminalIds, exited]);
   const statesRef = useRef(termStates);
   statesRef.current = termStates;
+  // Keyed on what the host reads, so an OSC title or a cwd tick that moved
+  // no state and no label never reaches it.
+  const statusKey = tabs.map((t) => `${t.id}\u0001${termStates.get(t.id) ?? "idle"}\u0001${identity.byId.get(t.id)?.label ?? ""}`).join("\u0002");
+  useEffect(() => {
+    if (!onStatesChange) return;
+    const out = new Map<string, TerminalStatus>();
+    for (const t of tabsRef.current) {
+      out.set(t.id, { state: statesRef.current.get(t.id) ?? "idle", label: identity.byId.get(t.id)?.label ?? "terminal" });
+    }
+    onStatesChange(out);
+    // `statusKey` is the change; the rest is read fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusKey, onStatesChange]);
 
   // A terminal's work line: a loud state carries the agent's own words (the
   // needs-you message, the your-turn excerpt); anything else keeps what it
@@ -1480,6 +1508,8 @@ export const TerminalTabs = memo(
   // closed since the mapping that named it was recorded).
   const hailTileRef = useRef(hailTile);
   hailTileRef.current = hailTile;
+  const closeRef = useRef(closeTab);
+  closeRef.current = closeTab;
   const recoverDetached = async () => {
     if (recovering) return;
     setRecovering(true);
@@ -1513,6 +1543,9 @@ export const TerminalTabs = memo(
       },
       nextNeedsYou: () => nextRef.current(),
       focusTerminal: (id: string) => focusTerminalView(id),
+      closeTerminals: (ids: readonly string[]) => {
+        for (const id of ids) closeRef.current(id);
+      },
     }),
     [setTabs],
   );

@@ -48,7 +48,7 @@ const click = async (selector: string) => {
 let walls: Record<string, WallData> = {};
 let wallKey: string | null = "w1";
 let changes: [string, WallData][] = [];
-type MountProps = { collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null };
+type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null };
 let props: MountProps = {};
 const order = () => (wallKey ? walls[wallKey]?.tiles ?? [] : []);
 function view() {
@@ -64,6 +64,7 @@ function view() {
         onTabsChange={() => {}}
         collapsed={props.collapsed ?? false}
         onNeedsYouChange={props.onNeedsYouChange}
+        onStatesChange={props.onStatesChange}
         onFocusedCwd={props.onFocusedCwd}
         onActiveTabChange={props.onActiveTabChange}
         solo={props.solo ?? null}
@@ -212,6 +213,25 @@ describe("walls: one fleet, many views", () => {
     await click(`[data-close="${a}"]`);
     expect(order()).toEqual([]);
     expect(changes[changes.length - 1][1].tiles).toEqual([]);
+  });
+
+  it("reports every terminal's state and label to the host, only when one changes; closeTerminals kills several at once", async () => {
+    const reports: Map<string, { state: string; label: string }>[] = [];
+    await mount({ onStatesChange: (states) => reports.push(new Map(states)) });
+    const a = await open();
+    const b = await open(true);
+    const last = () => reports[reports.length - 1];
+    expect(last().get(a)).toEqual({ state: "idle", label: "repo 1" });
+    expect(last().get(b)).toEqual({ state: "idle", label: "repo 2" });
+    const count = reports.length;
+    await rerender();
+    expect(reports.length).toBe(count);
+    await act(async () => mocks.listeners.get("term-attention")!({ payload: { terminalId: b, sessionId: "s", at: 3, kind: "working" } }));
+    expect(last().get(b)?.state).toBe("working");
+    await act(async () => handle.current!.closeTerminals([a, b]));
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: a });
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: b });
+    expect(ids()).toEqual([]);
   });
 
   it("a menu row's New terminal goes to the host's placement, never into a tile it takes from someone", async () => {

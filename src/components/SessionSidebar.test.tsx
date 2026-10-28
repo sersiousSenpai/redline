@@ -266,6 +266,28 @@ describe("the grouped sidebar", () => {
     expect(full.onNewSession).not.toHaveBeenCalled();
   });
 
+  it("a terminal kept running after its wall closed stays under its session, says so, and a click brings it back; Home's sit under Home", async () => {
+    const onSelectTerminal = vi.fn();
+    await renderWith({
+      sessions: [summary("a", 1)],
+      terminals: { a: [{ id: "k1", title: "npm run dev", status: "idle", kept: true }, { id: "k2", title: "claude", status: "working", kept: true }] },
+      homeTerminals: [{ id: "h1", title: "zsh 1", status: "needs" }],
+      onSelectTerminal,
+    });
+    const kept = [...planRow("Plan a").querySelectorAll<HTMLElement>(".rl-sb-term")];
+    expect(kept.map((t) => t.dataset.kept)).toEqual(["", ""]);
+    expect(kept[0].querySelector(".rl-sb-term-state")!.textContent).toBe("kept");
+    // A working one says working: its status wins over the hint.
+    expect(kept[1].querySelector(".rl-sb-term-state")!.textContent).toBe("working");
+    await click(kept[0].querySelector(".rl-sb-term-row"));
+    expect(onSelectTerminal).toHaveBeenCalledWith("a", "k1");
+    const home = host.querySelector(".rl-sb-places .rl-sb-term")!;
+    expect(home.querySelector(".rl-sb-term-title")!.textContent).toBe("zsh 1");
+    expect(home.querySelector(".rl-sb-need")).not.toBeNull();
+    await click(home.querySelector(".rl-sb-term-row"));
+    expect(onSelectTerminal).toHaveBeenCalledWith("", "h1");
+  });
+
   it("nests a plan's terminals under its row, always, in the shared status vocabulary", async () => {
     const onSelectTerminal = vi.fn();
     await renderWith({

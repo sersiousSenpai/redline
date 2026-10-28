@@ -59,6 +59,8 @@ export interface SidebarTerminal {
   id: string;
   title: string;
   status: PaneStatus;
+  /** Kept running after its wall closed: on no wall, a click puts it back. */
+  kept?: boolean;
 }
 
 export interface SessionSidebarProps {
@@ -146,6 +148,8 @@ export interface SessionSidebarProps {
   localhostPorts?: readonly string[];
   /** Each plan's terminals, by session id; always shown under the row. */
   terminals?: Readonly<Record<string, readonly SidebarTerminal[]>>;
+  /** Home's terminals (shells opened in Home, orphans), under Home. */
+  homeTerminals?: readonly SidebarTerminal[];
   onSelectTerminal?: (sessionId: string, terminalId: string) => void;
   /** The footer's "＋ New tab ⌘T"; the row renders only when given. */
   onNewTab?: () => void;
@@ -227,7 +231,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
     onSelectLaunch, needs, working, place, onSelectPlace, runsLive, localhostPorts,
-    terminals, onSelectTerminal, onNewTab,
+    terminals, homeTerminals, onSelectTerminal, onNewTab,
   } = props;
 
   // Home reads selected when it is the Place, or — with no Places — when
@@ -415,6 +419,13 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           full views. Without `onSelectPlace` there is nowhere but Home. */}
       <div className="rl-sb-places">
         <PlaceRow id="home" icon={House} label="Home" current={homeCurrent} onSelect={selectPlace} />
+        {homeTerminals && homeTerminals.length > 0 && (
+          <ul className="rl-sb-terms" aria-label="Home's terminals">
+            {homeTerminals.map((t) => (
+              <TerminalRow key={t.id} sessionId="" terminal={t} onSelect={onSelectTerminal} />
+            ))}
+          </ul>
+        )}
         {onSelectPlace && (
           <PlaceRow id="runs" icon={Workflow} label="Runs" current={place === "runs"} onSelect={selectPlace}
             end={runsLive ? <span className="rl-sb-place-live">{runsLive} live</span> : null} />
@@ -686,13 +697,13 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
   terminal: SidebarTerminal;
   onSelect?: (sessionId: string, terminalId: string) => void;
 }) {
-  const { id, title, status } = terminal;
+  const { id, title, status, kept } = terminal;
   return (
-    <li className="rl-sb-term" data-status={status}>
+    <li className="rl-sb-term" data-status={status} data-kept={kept ? "" : undefined}>
       <button
         type="button"
         className="rl-sb-term-row"
-        title={`${title} — ${status === "needs" ? "needs you" : status}`}
+        title={`${title} — ${status === "needs" ? "needs you" : status}${kept ? " · kept running, on no wall: click to bring it back" : ""}`}
         onClick={() => onSelect?.(sessionId, id)}
       >
         <Terminal size={13} aria-hidden />
@@ -710,6 +721,7 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
           </>
         )}
         {status === "exited" && <span className="rl-sb-term-state">exited</span>}
+        {kept && status === "idle" && <span className="rl-sb-term-state">kept</span>}
       </button>
     </li>
   );

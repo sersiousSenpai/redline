@@ -66,12 +66,15 @@ export interface WorkbenchStageProps {
   right?: ReactNode;
   /** ⌘T: App opens the door tab (it knows the active pane's destination). */
   onNewTab: () => void;
+  /** A tab's ×: App closes it (it asks first when a wall in it is still
+   *  running). Absent, the tab just closes. */
+  onCloseTab?: (tabId: string) => void;
 }
 
 const selectSet = (s: ReturnType<WorkbenchStore["getState"]>): TabSet | null => s.sets[s.activeKey] ?? null;
 const selectKey = (s: ReturnType<WorkbenchStore["getState"]>) => s.activeKey;
 
-export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab }: WorkbenchStageProps) {
+export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab, onCloseTab }: WorkbenchStageProps) {
   const set = useWorkbench(store, selectSet);
   const activeKey = useWorkbench(store, selectKey);
   const activeTabId = set?.activeTabId ?? null;
@@ -95,7 +98,7 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
     beginMeasure("wb:tab-switch");
     dispatch({ type: "selectTab", tabId });
   }, [dispatch]);
-  const onClose = useCallback((tabId: string) => dispatch({ type: "closeTab", tabId }), [dispatch]);
+  const onClose = useCallback((tabId: string) => (onCloseTab ? onCloseTab(tabId) : dispatch({ type: "closeTab", tabId })), [dispatch, onCloseTab]);
   const onReorder = useCallback((tabId: string, to: number) => dispatch({ type: "reorderTab", tabId, to }), [dispatch]);
   const onReopen = useCallback(() => dispatch({ type: "reopenClosed" }), [dispatch]);
   const onRename = useCallback(

@@ -374,7 +374,8 @@ import { MonochatContext } from "./components/MonochatContext";
 const loadTerminalLayer = () => import("./workbench/TerminalLayer");
 const TerminalLayer = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalLayer })));
 const TerminalWallSlot = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalWallSlot })));
-import type { TerminalTabsHandle } from "./components/TerminalTabs";
+import type { TerminalStatus, TerminalTabsHandle } from "./components/TerminalTabs";
+const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m) => ({ default: m.CloseWallDialog })));
 // Which terminal a session runs in, and what its CLI is doing
 // (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
 // spinners read it. The dock pins itself over an Agent pane's CLI view
@@ -488,6 +489,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
+import { paneStatusOf } from "./workbench/status";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
@@ -2703,6 +2705,46 @@ function App() {
   // closes the pane through `onClose`), else the focused pane of a split,
   // else the tab. Never the window: ⌘⇧W is the window, and the reducer
   // refills a set whose last tab closed, so Home always keeps a door.
+  // ── Closing a terminal wall ──────────────────────────────────────────────
+  // Every terminal's state and label, as the one TerminalTabs derives them:
+  // the tab dots, the sidebar's terminal rows and this prompt read them.
+  const [termStatuses, setTermStatuses] = useState<ReadonlyMap<string, TerminalStatus>>(() => new Map());
+  const termStatusesRef = useRef(termStatuses);
+  termStatusesRef.current = termStatuses;
+  // A wall closing with something still running in it: Terminate or Keep
+  // running. Nothing is ever hidden on its own — a kept terminal stays under
+  // its session in the sidebar until a click puts it back on a wall.
+  const [wallClose, setWallClose] = useState<{ key: SessionKey; tabId: string | null; walls: string[]; tiles: string[]; running: string[] } | null>(null);
+  const finishWallClose = useCallback((close: { key: SessionKey; tabId: string | null; walls: string[]; tiles: string[] }, keep: boolean) => {
+    for (const paneId of close.walls) wb.dispatch({ type: "closeWall", key: close.key, paneId, keep });
+    if (!keep) terminalsRef.current?.closeTerminals(close.tiles);
+    // The rest of a closed tab (a document tiled beside the wall) goes too.
+    if (close.tabId && wb.getState().sets[close.key]?.tabs[close.tabId]) wb.dispatch({ type: "closeTab", key: close.key, tabId: close.tabId });
+  }, []);
+  /** Close a tab (its strip ×) or a pane (⌘W inside a split), asking first
+   *  when a wall in it still has something running. */
+  const requestClose = useCallback((target: { tabId: string } | { paneId: string }) => {
+    const state = wb.getState();
+    const key = state.activeKey;
+    const set = state.sets[key];
+    if (!set) return;
+    const paneIds = "tabId" in target ? (set.tabs[target.tabId] ? paneIdsOf(set.tabs[target.tabId].root) : []) : [target.paneId];
+    const walls = paneIds.map((id) => set.panes[id]).filter((p): p is Extract<AnyPane, { kind: "terminals" }> => p?.kind === "terminals");
+    if (walls.length === 0) {
+      if ("tabId" in target) wb.dispatch({ type: "closeTab", tabId: target.tabId });
+      else wb.dispatch({ type: "closePane", paneId: target.paneId });
+      return;
+    }
+    const tiles = walls.flatMap((w) => w.data.tiles);
+    const running = tiles.filter((id) => {
+      const state = termStatusesRef.current.get(id)?.state;
+      return state !== undefined && state !== "idle" && state !== "exited";
+    });
+    const close = { key, tabId: "tabId" in target ? target.tabId : null, walls: walls.map((w) => w.id), tiles };
+    if (running.length === 0) finishWallClose(close, false);
+    else setWallClose({ ...close, running: running.map((id) => termStatusesRef.current.get(id)?.label ?? "terminal") });
+  }, [finishWallClose]);
+  const closeTabRequest = useCallback((tabId: string) => requestClose({ tabId }), [requestClose]);
   const closeFromInside = useCallback(() => {
     // The flow shell (until W2) has pages but no tabs: a browser page, or
     // nothing — never the window.
@@ -2717,9 +2759,8 @@ function App() {
       window.dispatchEvent(new CustomEvent("redline:browser-close-page"));
       return;
     }
-    if (isSplit(tab.root)) wb.dispatch({ type: "closePane", paneId: tab.focusedPaneId });
-    else wb.dispatch({ type: "closeTab", tabId: tab.id });
-  }, []);
+    requestClose(isSplit(tab.root) ? { paneId: tab.focusedPaneId } : { tabId: tab.id });
+  }, [requestClose]);
   /** Close the active tab's pane of `kind` (a surface's own ✕ or Exit). */
   const closeSurfacePane = useCallback((kind: PaneKind) => {
     const { tab, panes } = activePanes(wb.getState());
@@ -9100,19 +9141,39 @@ function App() {
   // Read off the Localhost scan, which runs only while that pane is on
   // screen; a ports chip of its own comes with W7's discovery.
   const sidebarPorts = useMemo(() => (devServers.scan?.running ?? []).map((r) => `:${r.port}`), [devServers.scan]);
+  // Every terminal a session owns sits under its row — its agent's, the
+  // shells opened in its tabs, and the ones kept running after their wall
+  // closed — and Home's under Home (key ""). One status vocabulary, from the
+  // one derivation TerminalTabs makes (`onStatesChange`); the hooks'
+  // attention stands in until the layer has mounted.
+  const wbOwners = useWorkbench(wb, (st) => st.owners);
+  const wbStowed = useWorkbench(wb, (st) => st.stowed);
   const sidebarTerminals = useMemo(() => {
-    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited" }[]> = {};
-    for (const [sessionId, terminalId] of sessionTerminals) {
+    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean }[]> = {};
+    const listed = new Set<string>();
+    const push = (row: string, terminalId: string, fallback: string) => {
+      if (listed.has(terminalId)) return;
+      listed.add(terminalId);
+      const known = termStatuses.get(terminalId);
       const attention = terminalAttention.get(terminalId);
       const status = liveTermIds && !liveTermIds.includes(terminalId)
         ? "exited" as const
+        : known ? paneStatusOf(known.state)
         : attention?.kind === "needs-you" || attention?.kind === "your-turn" ? "needs" as const
         : attention?.kind === "working" ? "working" as const
         : "idle" as const;
-      (out[sessionId] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || "claude", status });
+      const kept = wbStowed.includes(terminalId);
+      (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}) });
+    };
+    for (const [sessionId, terminalId] of sessionTerminals) push(sessionId, terminalId, "claude");
+    for (const [terminalId, owner] of Object.entries(wbOwners)) {
+      if (liveTermIds && !liveTermIds.includes(terminalId)) continue;
+      const sessionId = sessionIdOf(owner);
+      if (sessionId) push(sessionId, terminalId, "terminal");
+      else if (owner === HOME_KEY) push("", terminalId, "terminal");
     }
     return out;
-  }, [sessionTerminals, terminalAttention, terminalTitles, liveTermIds]);
+  }, [sessionTerminals, terminalAttention, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -9573,6 +9634,7 @@ function App() {
               runsLive={sidebarRunsLive}
               localhostPorts={sidebarPorts}
               terminals={sidebarTerminals}
+              homeTerminals={sidebarTerminals[""]}
             />
             </Suspense>
           ) : (
@@ -10504,6 +10566,7 @@ function App() {
                     describePane={describePane}
                     onSplitDragging={setSplitDragging}
                     onNewTab={openDoorTab}
+                    onCloseTab={closeTabRequest}
                     right={stageActions}
                   />
                 </Suspense>
@@ -11166,6 +11229,7 @@ function App() {
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
             onNeedsYouChange={setTermNeedYou}
+            onStatesChange={setTermStatuses}
             cli={cliView}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
@@ -11645,6 +11709,17 @@ function App() {
           </Suspense>
         )}
       {setupReviewInTerminal && <div className="rl-setup-return" role="status"><span>Sign in if Codex asks, then open <code>/hooks</code> to review Redline’s hooks. Your work stays here.</span><button type="button" onClick={() => { setSetupReviewInTerminal(false); void installIntegration(true, "codex"); }}>Verify and continue</button><button type="button" onClick={() => { setSetupReviewInTerminal(false); dismissSetup(); }}>Later</button></div>}
+      {wallClose && (
+        <Suspense fallback={null}>
+          <CloseWallDialog
+            running={wallClose.running}
+            total={wallClose.tiles.length}
+            onKeep={() => { finishWallClose(wallClose, true); setWallClose(null); }}
+            onTerminate={() => { finishWallClose(wallClose, false); setWallClose(null); }}
+            onCancel={() => setWallClose(null)}
+          />
+        </Suspense>
+      )}
       {/* ⌘K palette. Registers with the menu-overlay contract while open, so
           the native browser webview hides beneath it. */}
       {paletteOpen && (
