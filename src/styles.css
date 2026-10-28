@@ -3364,9 +3364,9 @@ html[data-rl-tile-drag] * {
    build pill's place in the centre (MonochatIsland centres its pill on this
    row), the bridge right. The lazy bar's placeholder holds the same row. */
 .rl-statusbar { position: relative; flex: none; height: 28px; box-sizing: border-box; display: flex; align-items: center; gap: 14px; padding: 0 12px; border-top: 1px solid var(--color-rule); background: var(--color-canvas); color: var(--color-ink-muted); font-size: 12px; white-space: nowrap; user-select: none; }
-.rl-statusbar .rl-footer-status, .rl-statusbar .rl-footer-meta { display: flex; align-items: center; gap: 7px; }
+.rl-statusbar .rl-footer-status, .rl-statusbar .rl-footer-meta { flex: 1 1 0; display: flex; align-items: center; gap: 7px; }
 .rl-statusbar .rl-footer-meta { justify-content: flex-end; }
-.rl-statusbar-pill { flex: 1; align-self: stretch; min-width: 160px; }
+.rl-statusbar-pill { flex: none; align-self: stretch; width: 160px; }
 .rl-statusbar-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .rl-statusbar-press { color: inherit; font: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 .rl-statusbar-press:hover span:last-child { color: var(--color-ink); text-decoration: underline; }

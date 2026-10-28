@@ -116,6 +116,14 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
 
   const tabs: TabStripItem[] = useMemo(() => {
     if (!set) return [];
+    // The tour's anchors: the first Agent and terminals tab.
+    const toured = new Set<string>();
+    const tourOf = (pane: AnyPane): string | undefined => {
+      const id = pane.kind === "terminals" ? "terminals-tab" : pane.kind === "chat" && pane.data.source === "agent" ? "agent-tab" : undefined;
+      if (!id || toured.has(id)) return undefined;
+      toured.add(id);
+      return id;
+    };
     return set.order.flatMap((id) => {
       const tab = set.tabs[id];
       if (!tab) return [];
@@ -128,7 +136,7 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
       const statuses = described.map((d) => d.status).filter((s): s is PaneStatus => Boolean(s));
       const status: PaneStatus | undefined = statuses.includes("needs") ? "needs" : statuses.includes("working") ? "working" : statuses.length && statuses.every((s) => s === "exited") ? "exited" : undefined;
       const leadIndex = Math.max(0, panes.indexOf(lead));
-      const item: TabStripItem = { id, kind: lead.kind, title: described[leadIndex]?.title ?? paneTitle(lead), status, preview: lead.preview, count: described[leadIndex]?.count };
+      const item: TabStripItem = { id, kind: lead.kind, title: described[leadIndex]?.title ?? paneTitle(lead), status, preview: lead.preview, count: described[leadIndex]?.count, tour: tourOf(lead) };
       return [item];
     });
   }, [set, describePane]);

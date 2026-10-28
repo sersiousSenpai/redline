@@ -8,6 +8,9 @@
 //!
 //!   node scripts/app-visual-qa.mjs [--scene home,door-tab,plan,agent,agent-cli,browser,sidebar]
 //!       [--theme aurora,basic,studio] [--size 1440x900,1100x720,900x640]
+//!   (W6 adds: tour — the first-run tour walked card by card, each
+//!   anchored step lighting its region; tile — the plan beside Localhost,
+//!   the one split; drafter — the door's Draft destination in place)
 //!       [--out docs/app-qa] [--probes fixtures/app-qa/probes.json]
 //!       [--keep-going] [--motion on] [--clock live]
 //!
@@ -53,7 +56,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -82,6 +85,9 @@ const SCENE = {
   browser: { board: "workbench" },
   "browser-newtab": { board: "workbench" },
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  tour: { board: "workbench" },
+  tile: { board: "workbench" },
+  drafter: { board: "workbench" },
   "rail-plan-discussion": { board: "workbench" },
   "rail-plan-talk": { board: "workbench" },
   "rail-plan-files": { board: "workbench" },
@@ -216,6 +222,41 @@ const DRIVES = {
     { do: "viewport", run: true, why: "back to the run's size" },
     { do: "click", css: [".rb-tab-rail [aria-label=\"New tab\"]"], why: "the pane's own New tab" },
     { do: "waitFor", expr: "!!document.querySelector('.rb-home[data-loaded]')", timeout: 15000, why: "the new-tab page, its history read" },
+  ],
+  // The first-run tour over a session with its Agent tab (W6): every step
+  // that points at a region must find it and light it.
+  tour: [
+    ...SELECT_PLAN,
+    { do: "emit", event: "menu-open-tutorial", payload: null, why: "Redline → Getting Started" },
+    { do: "waitFor", expr: "!!document.querySelector('[data-rl-tour-step]')", timeout: 8000, why: "the tour's first card" },
+    { do: "tour", shots: true, expectSteps: 12, why: "every anchored step lights its region" },
+  ],
+  // D24: the one split — the plan beside a surface — is the tab's own
+  // layout, its divider the tile's.
+  tile: [
+    ...SELECT_PLAN,
+    { do: "emit", event: "menu-new-tab", payload: null, why: "⌘T: a door tab in the session" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-fd-island')", timeout: 8000, why: "the door's composer" },
+    { do: "viewport", width: 1440, height: 900, why: "the door's Destination menu opens only wide" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
+    { do: "click", within: ".rl-composer-menu", text: "Open Localhost", up: "button", why: "pick Open Localhost" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-wb-strip [role=tab][aria-selected=true]')].some(t => /Localhost/.test(t.textContent))", timeout: 8000, why: "the door tab became Localhost" },
+    { do: "viewport", run: true, why: "back to the run's size" },
+    { do: "click", css: [".rl-wb-right-btn[aria-label='Tile the plan alongside']"], why: "the strip's tile: the plan beside Localhost" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-split .rl-split-divider') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=plan]') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=servers]')", timeout: 8000, why: "the tab is the plan beside Localhost, a divider between" },
+  ],
+  drafter: [
+    ...AT_HOME,
+    { do: "viewport", width: 1440, height: 900, why: "the door's Destination menu opens only wide" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
+    { do: "click", within: ".rl-composer-menu", textStarts: "Draft", up: "button", why: "pick the drafter" },
+    { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
+    { do: "type", text: "A brief for the durable jobs queue", why: "a sentence" },
+    { do: "key", key: "Enter", why: "⏎: the door tab becomes the drafter" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=drafter] .ProseMirror')", timeout: 20000, why: "the drafter's editor in its pane" },
+    { do: "viewport", run: true, why: "back to the run's size" },
   ],
   sidebar: [
     ...AT_HOME,
@@ -594,7 +635,7 @@ async function mouse(point, button = "left") {
   await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button, clickCount: 1, x: point.x, y: point.y });
 }
 
-const KEYS = { Enter: { code: "Enter", vk: 13, text: "\r" }, Escape: { code: "Escape", vk: 27 }, Backspace: { code: "Backspace", vk: 8 } };
+const KEYS = { Enter: { code: "Enter", vk: 13, text: "\r" }, Escape: { code: "Escape", vk: 27 }, Backspace: { code: "Backspace", vk: 8 }, ArrowRight: { code: "ArrowRight", vk: 39 } };
 
 async function key(name, modifiers = 0) {
   const k = KEYS[name] ?? { code: `Key${name.toUpperCase()}`, vk: name.toUpperCase().charCodeAt(0), text: modifiers ? undefined : name };
@@ -651,6 +692,31 @@ async function drive(scene) {
       const to = step.run ? run.size : { width: step.width, height: step.height };
       await cdp.call("Emulation.setDeviceMetricsOverride", { width: to.width, height: to.height, deviceScaleFactor: 1, mobile: false });
       rec.note = `${to.width}x${to.height}`;
+    } else if (step.do === "tour") {
+      // The first-run tour, step by step: each card says which region it
+      // points at (`data-rl-tour-anchor`) and whether it found and lit it
+      // (`data-rl-tour-lit`). Every anchored step must light its region in
+      // the real App (W6: the anchors follow the workbench's frame).
+      run.tour = [];
+      for (let i = 0; i < 40; i++) {
+        await quiesce(300, 4000);
+        await settle(300);
+        const card = await cdp.evaluate(`(() => { const d = document.querySelector('[data-rl-tour-step]'); if (!d) return null; const a = d.dataset.rlTourAnchor || null; const el = a ? document.querySelector('[data-tour="' + a + '"]') : null; const r = el ? el.getBoundingClientRect() : null; return { step: d.dataset.rlTourStep, anchor: a, lit: d.hasAttribute('data-rl-tour-lit'), found: a ? !!el : null, rect: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null }; })()`);
+        if (!card) break;
+        run.tour.push(card);
+        if (step.shots) {
+          const file = shotName(scene, run.theme, run.size, `${String(i + 1).padStart(2, "0")}-${card.step}`);
+          await screenshot(file);
+          run.extraShots.push(file);
+        }
+        const next = await tools(`window.__qaTools.centre(${JSON.stringify({ within: "[data-rl-tour-step]", text: "Next", up: "button" })}) ?? window.__qaTools.centre(${JSON.stringify({ within: "[data-rl-tour-step]", text: "Done", up: "button" })})`);
+        if (!next) throw new Error(`Drive ${scene}: the tour's card at ${card.step} has no Next`);
+        await mouse(next);
+      }
+      const dark = run.tour.filter((t) => t.anchor && !(t.lit && t.found));
+      rec.note = `${run.tour.length} steps, ${run.tour.filter((t) => t.lit).length} lit`;
+      if (step.expectSteps && run.tour.length !== step.expectSteps) throw new Error(`Drive ${scene}: the tour has ${run.tour.length} steps, expected ${step.expectSteps}`);
+      if (dark.length) throw new Error(`Drive ${scene}: ${step.why}: not lit: ${dark.map((t) => `${t.step} → [data-tour=${t.anchor}]${t.found ? "" : " (absent)"}`).join(", ")}`);
     } else if (step.do === "snapshot") {
       await quiesce(300, 4000);
       const file = shotName(scene, run.theme, run.size, step.name);

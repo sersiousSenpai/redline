@@ -118,7 +118,7 @@ function RightRailBase({ tabs, active, onSelect, counts, attention, talkKey, ful
   const away = useTalkAway(active === "talk" ? null : talkKey);
   return (
     <div className="rl-rail" data-rail-tab={active}>
-      <div className="rl-rail-strip" role="tablist" aria-label="Rail">
+      <div className="rl-rail-strip" role="tablist" aria-label="Rail" data-tour="rail">
         {tabs.map((tab) => {
           const Icon = RAIL_ICON[tab];
           const on = tab === active;

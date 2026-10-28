@@ -117,7 +117,7 @@ export function PlanPanelFooter(p: PlanPanelFooterProps) {
         <Status {...p} />
       </span>
       <span className="rl-plan-foot-spacer" />
-      <span className="rl-plan-foot-actions">
+      <span className="rl-plan-foot-actions" data-tour="plan-verbs">
         {p.approval ? <ApprovedActions {...p} approval={p.approval} /> : <ReviewActions {...p} />}
       </span>
     </footer>

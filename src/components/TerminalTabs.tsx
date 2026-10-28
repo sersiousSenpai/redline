@@ -1804,10 +1804,7 @@ export const TerminalTabs = memo(
   };
 
   return (
-    <div
-      data-tour="terminal"
-      className="flex flex-col h-full"
-    >
+    <div className="flex flex-col h-full">
       {(detached.some((pty) => !tabs.some((tab) => tab.id === pty.id)) || recoveryError) && (
         <div className="flex items-center gap-2 px-2 py-1 text-xs" role="status" data-recovery="">
           {recoveryError && <span>{recoveryError}</span>}

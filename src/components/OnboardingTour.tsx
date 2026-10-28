@@ -106,10 +106,18 @@ function KeyCap({ children }: { children: ReactNode }) {
 // short lead + optional structured bullets + a muted detail line, so nothing
 // reads as a wall of text. The shortcuts step reads the declarative keymap
 // registry (lib/keymap.ts), so a new global binding shows up here without a
-// second copy. Anchor hygiene: the theme/mode pickers live INSIDE the
-// Settings popover and only exist in the DOM while it's open — steps about
-// them anchor the always-present settings trigger (data-tour="settings")
-// instead.
+// second copy.
+//
+// The steps walk the workbench's frame (W6): the door tab's composer, the tab
+// strip, the sidebar's Places and project groups, the Agent tab, the
+// terminals tab, the plan, the right rail's tabs, the Plan pane's verbs, the
+// status bar's pill. Anchor hygiene: every `anchor` names a `data-tour` that a
+// real element carries (OnboardingTour.anchors.test.tsx pins each one, and the
+// app fixture's `tour` scene finds each on screen); the theme/mode pickers
+// live INSIDE the Settings popover and exist only while it's open, so steps
+// about them anchor the always-present settings trigger instead. A step whose
+// anchor is not on screen right now (an Agent tab before any session) shows
+// as a centred card.
 const STEPS: TourStep[] = [
   {
     id: "welcome",
@@ -122,17 +130,17 @@ const STEPS: TourStep[] = [
     ),
     body: (
       <>
-        Everything lives on one canvas: the plan in the middle, your terminal
-        below, the discussion beside it. Here's the quick tour — replay it
-        anytime from <strong>Redline → Getting Started</strong>.
+        Your sessions are on the left, each one's tabs in the middle — the
+        plan, its agent, its terminals — and a rail on the right. Here's the
+        quick tour; replay it anytime from <strong>Redline → Getting Started</strong>.
       </>
     ),
   },
   {
     id: "landing",
     anchor: "landing",
-    // The door's composer, resting on the plate or open: the coachmark
-    // sits below it, where the recents would be on a first run.
+    // The door tab's composer: the coachmark sits below it, where the
+    // recents would be on a first run.
     placement: "bottom",
     title: "Type what you want to build",
     lead: (
@@ -143,17 +151,54 @@ const STEPS: TourStep[] = [
     ),
     body: (
       <>
-        No terminal, no flags. Claude plans in the terminal below and the plan
-        lands back here for you to mark up. <strong>⌘⏎</strong> opens the
-        drafter first if you'd rather shape a longer brief.
+        This is a door tab. Its menu also opens a draft, a chat, the browser,
+        a code review, Localhost or Memory, right here in place.
+      </>
+    ),
+  },
+  {
+    id: "tabs",
+    anchor: "tabs",
+    placement: "bottom",
+    title: "Every session is a set of tabs",
+    lead: <>The plan, its agent, its terminals, and whatever you open beside them.</>,
+    shortcuts: () => [
+      { keys: ["⌘", "T"], text: "A new door tab" },
+      { keys: ["⌘", "W"], text: "Close the tab (never the window)" },
+      { keys: ["⌘", "1–9"], text: "Go to a tab" },
+    ],
+  },
+  {
+    id: "sessions",
+    anchor: "sessions",
+    placement: "right",
+    title: "Places, then your sessions",
+    lead: <>Home and Localhost first; then every plan, grouped by project.</>,
+    body: (
+      <>
+        A session's terminals sit under its row with what they are doing.
+        Click one to open it; expand a row to revisit earlier revisions.
+      </>
+    ),
+  },
+  {
+    id: "agent",
+    anchor: "agent-tab",
+    placement: "bottom",
+    title: "Talk to the agent in its own tab",
+    lead: <>The Agent tab is the session's conversation with Claude, as it happens.</>,
+    body: (
+      <>
+        Answer its questions there, queue the next message mid-turn, or switch
+        the tab to <strong>CLI</strong> for the same terminal underneath.
       </>
     ),
   },
   {
     id: "terminal",
-    anchor: "terminal",
-    placement: "top",
-    title: "Run Claude here",
+    anchor: "terminals-tab",
+    placement: "bottom",
+    title: "Terminals are a tab too",
     lead: (
       <>
         Run <code>claude</code>, then press <strong>Shift+Tab</strong> for plan
@@ -162,53 +207,8 @@ const STEPS: TourStep[] = [
     ),
     body: (
       <>
-        When Claude proposes a plan, Redline intercepts it instead of letting it
-        run — your cue to review.
-      </>
-    ),
-  },
-  {
-    id: "companion",
-    title: "Works with any terminal",
-    lead: (
-      <>
-        Redline captures plans from Claude Code <strong>anywhere</strong> — not
-        just this built-in terminal.
-      </>
-    ),
-    body: (
-      <>
-        Run Claude in your own terminal or editor; whenever it enters plan mode,
-        the plan still lands here for review.
-      </>
-    ),
-  },
-  {
-    id: "mode",
-    anchor: "settings",
-    placement: "bottom",
-    title: "Active, Ambient, or Paused",
-    lead: <>Choose how Redline handles incoming plans.</>,
-    bullets: [
-      { label: "Active", text: "Hold every plan for review.", color: "var(--color-info)" },
-      { label: "Ambient", text: "Countdown, then auto-approve.", color: "var(--color-warning)" },
-      { label: "Paused", text: "Let Claude run untouched.", color: "var(--color-ink-muted)" },
-    ],
-    body: (
-      <>
-        The mode switch lives here in <strong>Settings</strong>.
-      </>
-    ),
-  },
-  {
-    id: "sessions",
-    anchor: "sessions",
-    placement: "right",
-    title: "Plans land here",
-    lead: <>Every intercepted plan becomes a review session, newest first.</>,
-    body: (
-      <>
-        Click one to open it; expand a row to revisit earlier revisions.
+        When Claude proposes a plan — here or in any terminal of your own —
+        Redline holds it instead of letting it run. That's your cue to review.
       </>
     ),
   },
@@ -217,74 +217,71 @@ const STEPS: TourStep[] = [
     anchor: "editor",
     placement: "left",
     title: "Read & mark up the plan",
-    lead: <>The plan opens here like a document.</>,
-    body: (
+    lead: (
       <>
-        <strong>Select any text</strong> to mark it up — a menu pops up over your
-        selection.
+        <strong>Select any text</strong> in the plan and a menu offers four ways
+        to respond.
       </>
     ),
-  },
-  {
-    id: "comment-types",
-    title: "Four ways to respond",
     bullets: [
       { label: "Edit", text: "Rewrite the wording.", color: "var(--color-info)" },
       { label: "Feedback", text: "Leave a note to address.", color: "var(--color-warning)" },
       { label: "Question", text: "Ask without changing the plan.", color: "var(--color-success)" },
       { label: "Strike", text: "Propose a deletion.", color: "var(--color-ink-muted)" },
     ],
-    body: (
-      <>
-        Feedback can be tagged <strong>Local</strong> (tied to your selection) or{" "}
-        <strong>Structural</strong> (a plan-wide concern).
-      </>
-    ),
   },
   {
-    id: "discussion",
-    anchor: "discussion",
+    id: "rail",
+    anchor: "rail",
     placement: "left",
-    title: "Your comments collect here",
-    lead: <>Every comment shows up in this pane.</>,
+    title: "The rail follows the pane",
+    lead: <>Its tabs are whatever the pane in front needs.</>,
+    bullets: [
+      { label: "Discussion", text: "Your marks and Claude's answers." },
+      { label: "Talk", text: "Discuss it aloud or by typing." },
+      { label: "Files", text: "The project's tree." },
+      { label: "Changes", text: "What changed, ready to commit." },
+    ],
     body: (
       <>
-        Accept a resolution once Claude addresses it, or reopen it with a note.
+        <strong>⌘⌥B</strong> folds it to the edge.
       </>
     ),
   },
   {
-    id: "footer",
-    anchor: "footer",
+    id: "plan-verbs",
+    anchor: "plan-verbs",
     placement: "top",
     title: "Send back, or approve",
     bullets: [
       {
-        label: "Send to Claude Code",
-        text: "Ship your comments back for a revision.",
+        label: "Send to Claude",
+        text: "Ship your marks back for a revision.",
         color: "var(--color-info)",
       },
       {
-        label: "Approve plan",
-        text: "Accept as-is; Claude builds it.",
+        label: "Approve & build",
+        text: "Accept it; Claude builds it.",
         color: "var(--color-success)",
       },
     ],
-    body: <>Send while there's still feedback; Approve once it's right.</>,
-  },
-  {
-    id: "detach",
-    title: "If you step away",
-    lead: (
-      <>
-        Claude won't wait forever — a held plan can <strong>detach</strong> and
-        hand control back to the terminal.
-      </>
-    ),
     body: (
       <>
-        No work lost: reopen the session and hit <strong>Restore</strong> to send
-        the plan back into a terminal and pick up where you left off.
+        They live at the foot of the plan. If you step away, a held plan can
+        detach; <strong>Restore</strong> sends it back into a terminal.
+      </>
+    ),
+  },
+  {
+    id: "pill",
+    anchor: "pill",
+    placement: "top",
+    title: "Plan a build from anywhere",
+    lead: <>The pill in the status bar is always one sentence away.</>,
+    body: (
+      <>
+        Rest the pointer on it for a quick composer; click it for a new door
+        tab. <strong>Shift+Enter</strong> does the same from the keyboard.
       </>
     ),
   },
@@ -307,20 +304,24 @@ const STEPS: TourStep[] = [
     anchor: "settings",
     placement: "bottom",
     title: "Make it yours",
-    lead: (
-      <>
-        Themes and fonts live in <strong>Settings</strong> — there are
-        fourteen moods to pick from.
-      </>
-    ),
+    lead: <>Settings holds how Redline treats incoming plans, and how it looks.</>,
+    bullets: [
+      { label: "Active", text: "Hold every plan for review.", color: "var(--color-info)" },
+      { label: "Ambient", text: "Countdown, then auto-approve.", color: "var(--color-warning)" },
+      { label: "Paused", text: "Let Claude run untouched.", color: "var(--color-ink-muted)" },
+    ],
     body: (
       <>
-        That's the loop: draft → plan → review → send → approve. Replay
-        anytime from <strong>Redline → Getting Started</strong>.
+        Themes and fonts are there too. That's the loop: draft → plan → review
+        → send → approve.
       </>
     ),
   },
 ];
+
+/** Every region the tour points at, in step order: what the anchors test
+ *  and the fixture's tour scene check. */
+export const TOUR_ANCHORS: readonly string[] = STEPS.flatMap((s) => (s.anchor ? [s.anchor] : []));
 
 function measureAnchor(anchor: string | undefined): Rect | null {
   if (!anchor) return null;
@@ -520,12 +521,20 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
         ref={cardRef}
         role="dialog"
         aria-label={`Getting started: ${step.title}`}
+        // Which step, the region it points at and whether that region was
+        // found and lit: what the app fixture's tour scene reads.
+        data-rl-tour-step={step.id}
+        data-rl-tour-anchor={step.anchor}
+        data-rl-tour-lit={rect ? "" : undefined}
         className="fixed rounded-md shadow-xl border p-5 flex flex-col"
         style={{
           pointerEvents: "auto",
           top: pos?.top ?? -9999,
           left: pos?.left ?? -9999,
           width: `min(${CARD_W}px, calc(100vw - ${MARGIN * 2}px))`,
+          // A short window keeps the whole card on screen: its copy scrolls,
+          // its Back / Next row stays.
+          maxHeight: `calc(100vh - ${MARGIN * 2}px)`,
           borderColor: "var(--color-rule)",
           background: "var(--color-bg-elevated)",
           visibility: pos ? "visible" : "hidden",
@@ -537,7 +546,7 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
         >
           {step.title}
         </h2>
-        <div className="flex flex-col" style={{ gap: 10 }}>
+        <div className="flex flex-col rl-thin-scroll-y" style={{ gap: 10, minHeight: 0, overflowY: "auto" }}>
           {step.lead && (
             <p
               style={{

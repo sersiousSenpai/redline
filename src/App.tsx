@@ -3091,21 +3091,26 @@ function App() {
     (anchor: string | undefined) => {
       tourRevealRestore.current?.();
       tourRevealRestore.current = null;
-      if (anchor === "terminal") {
-        // The spotlight needs its target on screen: the set's wall comes
-        // forward, and the tab the user was on comes back when the step
-        // moves on.
-        const before = wb.getState();
-        const key = before.activeKey;
-        const tabId = before.sets[key]?.activeTabId ?? null;
+      // The tab the user was on comes back when the step moves on.
+      const before = wb.getState();
+      const key = before.activeKey;
+      const tabId = before.sets[key]?.activeTabId ?? null;
+      const backToTab = () => {
+        if (tabId) wb.dispatch({ type: "selectTab", key, tabId });
+      };
+      if (anchor === "terminals-tab") {
+        // The spotlight needs its target on screen: the set's wall (and so
+        // its tab) comes forward.
         revealTerm();
-        tourRevealRestore.current = () => {
-          if (tabId) wb.dispatch({ type: "selectTab", key, tabId });
-        };
+        tourRevealRestore.current = backToTab;
+      } else if ((anchor === "editor" || anchor === "plan-verbs") && activeId && findPane(before, "plan")) {
+        // The plan and its verbs are the Plan tab's.
+        wb.dispatch({ type: "openSurface", kind: "plan" });
+        tourRevealRestore.current = backToTab;
       } else if (anchor === "sessions" && sidebarCollapsed) {
         revealSidebar();
         tourRevealRestore.current = () => setSidebarFolded(true);
-      } else if (anchor === "discussion" && paneCollapsed) {
+      } else if (anchor === "rail" && paneCollapsed) {
         revealPane();
         tourRevealRestore.current = () => setRailFolded(true);
       } else if (anchor === "landing" && !doorVisible) {
@@ -3116,6 +3121,7 @@ function App() {
       }
     },
     [
+      activeId,
       doorVisible,
       sidebarCollapsed,
       paneCollapsed,
@@ -9758,7 +9764,6 @@ function App() {
               el;
             paneAsideRef.current = el;
           }}
-          data-tour="discussion"
           data-context={discussionContext}
           className={
             paneFullscreen

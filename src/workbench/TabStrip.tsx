@@ -66,6 +66,9 @@ export interface TabStripItem {
   preview?: boolean;
   /** A small muted number after the title (a wall's tile count). */
   count?: number;
+  /** The onboarding tour's anchor on this tab (`data-tour`), when it is the
+   *  tab a step points at: the first Agent and terminals tabs. */
+  tour?: string;
 }
 
 export interface TabStripProps {
@@ -140,6 +143,7 @@ function TabRowBase({
       role="tab"
       className="rl-wb-tab"
       data-tab-id={tab.id}
+      data-tour={tab.tour}
       data-status={status === "exited" ? "exited" : undefined}
       data-preview={tab.preview || undefined}
       data-dragging={dragging || undefined}
@@ -489,7 +493,7 @@ export function TabStrip(props: TabStripProps): JSX.Element {
   }, []);
 
   return (
-    <div className="rl-wb-strip">
+    <div className="rl-wb-strip" data-tour="tabs">
       <div ref={list} className="rl-wb-tablist rl-thin-scroll-x" role="tablist" aria-label="Tabs">
         {tabs.map((tab) => (
           <TabRow
