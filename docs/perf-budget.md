@@ -1033,44 +1033,6 @@ plus ~4.5 %, so the next unexplained megabyte fails again. Levers for a
 size session: MCP mounted only when enabled or without schema generation
 (~2.7 MB), the duplicate sha2 line, an audit of main's pre-program growth.
 
-## Restart budget
-
-The other kind of time the product asks for: [Build Redline](self-develop.md)
-prepares a replacement application in the background, and then asks to restart
-into it. Four numbers, measured separately because they fail differently:
-
-| Measure | What it is | Where it comes from |
-|---|---|---|
-| Preparation | Dependencies, checks, build, package, sign, probe | `release-manifest.json` — per-step `durationMs` |
-| Saving and draining | Flush, workspace snapshot, database snapshot, staging copy | The activation journal's timestamps, `Staged` → `HandedOff` |
-| **Downtime** | Old process exits → new workspace is interactive | The journal's `HandedOff` → the handshake's `Workspace` |
-| Recovery | A failed startup → the previous release is running again | `HandshakeFailed` → `RolledBack` |
-
-**Target: under 10 seconds from process exit to an interactive workspace** for
-a prepared release with unchanged persistent formats, on the reference Mac.
-A target to validate, not a guarantee — and the number the *user* is shown is
-not this one. It is the candidate probe's own measured time to interactive plus
-a bounded allowance for the exchange and launch, so a slow build says it is
-slow instead of promising ten seconds. With nothing measured it says "not
-measured yet".
-
-What makes the target reachable is a rule rather than an optimisation: **no
-dependency installation, compilation, signing or bulk application copying
-happens after the process exits.** The staging copy — the expensive part, tens
-of megabytes — is made while Redline is still usable, and what remains after
-the exit is one atomic exchange and a launch. Anything that creeps back over
-that line will show up here as downtime, not as a slower build.
-
-The quit-time database snapshot is skipped when the restart path has already
-taken one; a second `VACUUM INTO` of the same bytes is pure downtime, and
-downtime after the user has clicked Restart is the kind that shows.
-
-Preparation concurrency is the other side of it: preparing a release must not
-degrade the foreground app. Two concurrent editing agents and one heavyweight
-build is the starting point, and the main-thread rules above apply to the
-window the whole time a build is running — the build is in another process, and
-under an OS sandbox, precisely so that stays true.
-
 ## Memory latency budget
 
 The memory system (Polis Memory, linked from

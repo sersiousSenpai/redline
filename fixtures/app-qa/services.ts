@@ -572,7 +572,7 @@ function startLaunch(pty: PtyState): void {
  *  `invoke<…[]>`), plus the obvious name shapes: unknown ones of these get
  *  `[]` rather than `null`, so a `.map` never throws on a fake's silence. */
 const LIST_COMMANDS = new Set(
-  "browse_list_reorder browser_organize_tabs browser_workspace_list classmem_proposals classmem_runs classmem_tree comment_offers_pending companion_changes companion_get_thread companion_list doc_lines draft_comment_list draft_source_list draft_suggestions_pending extensions_list get_seat_roster git_gui_commit_files git_gui_log git_gui_stash_files harness_agent_list ledger_list_events ledger_prompt_models ledger_query list_dir list_harnesses list_sessions list_share_returns list_shares mission_get_tabs mission_list mission_list_findings monochat_traces parse_markdown_sections pty_list pty_procs review_annotation_list review_commits review_diff review_list_viewed review_question_list review_sessions_list seat_preflight self_develop_list shots_list term_attention_snapshot thumbs_list voice_thread".split(" "),
+  "browse_list_reorder browser_organize_tabs browser_workspace_list classmem_proposals classmem_runs classmem_tree comment_offers_pending companion_changes companion_get_thread companion_list doc_lines draft_comment_list draft_source_list draft_suggestions_pending extensions_list get_seat_roster git_gui_commit_files git_gui_log git_gui_stash_files harness_agent_list ledger_list_events ledger_prompt_models ledger_query list_dir list_harnesses list_sessions list_share_returns list_shares mission_get_tabs mission_list mission_list_findings monochat_traces parse_markdown_sections pty_list pty_procs review_annotation_list review_commits review_diff review_list_viewed review_question_list review_sessions_list seat_preflight shots_list term_attention_snapshot thumbs_list voice_thread".split(" "),
 );
 
 function defaultFor(cmd: string): unknown {
@@ -841,7 +841,6 @@ const handlers: Record<string, Handler> = {
   }),
   watch_dir: () => null,
   unwatch_dir: () => null,
-  activation_status: () => ({ verifying: false, gated: false, gatedMessage: "", runningRelease: null, lastReport: null }),
   set_attention_badge: () => null,
   browser_workspace_write: (a) => ({ ...(a?.value as object), revision: Number(a?.expectedRevision ?? 0) + 1 }),
   // The review loop, enough of it to use by hand: each command changes the
@@ -898,7 +897,6 @@ for (const cmd of [
   "browser_workspace_read",
   "mission_list",
   "draft_source_list",
-  "self_develop_list",
   "classmem_tree",
 ]) {
   handlers[cmd] ??= () => defaultFor(cmd);

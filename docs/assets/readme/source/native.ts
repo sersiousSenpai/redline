@@ -42,7 +42,7 @@ export async function invoke(command:string,args:any={}){
  case 'get_hook_status':return {installed:true};
  case 'get_skill_status':return {installed:true,outdated:false};
  case 'get_version':return '0.1.0';
- case 'list_harnesses':case 'companion_list':case 'self_develop_list':case 'list_themes':case 'list_fonts':case 'get_agent_seats':case 'list_extensions':case 'list_dir':case 'get_mission_list':case 'mission_list':case 'bookshelf_folders':case 'review_sessions_list':case 'list_plan_runs':case 'list_orchestrations':return [];
+ case 'list_harnesses':case 'companion_list':case 'list_themes':case 'list_fonts':case 'get_agent_seats':case 'list_extensions':case 'list_dir':case 'get_mission_list':case 'mission_list':case 'bookshelf_folders':case 'review_sessions_list':case 'list_plan_runs':case 'list_orchestrations':return [];
  }
  if(/^(set_|save_|record_|watch_|unwatch_|show_|browser_set|browser_enable|browser_install|surface_|pty_resize)/.test(command))return null;
  // Unknown service calls cannot reach a real daemon, process, filesystem, or provider.

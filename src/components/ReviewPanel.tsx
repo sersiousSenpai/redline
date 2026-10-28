@@ -50,7 +50,6 @@ const SOURCE_LABEL: Record<DiffSource, string> = {
   lastCommit: "Last commit",
   vsBase: "Vs base branch…",
   commitSha: "A specific commit…",
-  runBranch: "Queued run branch…",
 };
 
 interface ReviewPanelProps {

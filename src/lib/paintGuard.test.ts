@@ -59,14 +59,7 @@ const ALLOWLIST: Record<string, { maxMs: number; reason: string }> = {
 /** Package stylesheets' endless paint animations, by @keyframes name: the
  *  rule isn't ours to edit, so it passes only while no file using the package
  *  sets the switch that starts it. */
-const PACKAGE_SWITCHES: Record<string, { pkg: string; on: RegExp; reason: string }> = {
-  dashdraw: {
-    pkg: "@xyflow/react",
-    on: /\banimated\b/,
-    reason:
-      "React Flow's `animated` edge marches its dash (stroke-dashoffset) forever; the Runs canvas tints a live edge instead",
-  },
-};
+const PACKAGE_SWITCHES: Record<string, { pkg: string; on: RegExp; reason: string }> = {};
 
 /** `.animate(` calls that are not the Web Animations API. */
 const NOT_WAAPI: Record<string, string> = {
@@ -515,8 +508,9 @@ describe("paint guard (perf rule 6)", () => {
     const endless = parseUsages(sheets, keyframes).filter(
       (u) => u.infinite && [...(keyframes.get(u.name) ?? [])].some((p) => !COMPOSITOR.has(p)),
     );
-    // React Flow's marching edge dash: proof the package scan sees anything.
-    expect(endless.map((u) => u.name)).toContain("dashdraw");
+    // The proof case left with @xyflow/react (the Runs canvas, cut in D16):
+    // no imported package sheet animates forever now, and any that starts to
+    // fails here until its switch is listed above.
     for (const { rel, name } of endless) {
       const sw = PACKAGE_SWITCHES[name];
       expect(sw, `${rel} animates ${name} forever — list the switch that starts it`).toBeDefined();

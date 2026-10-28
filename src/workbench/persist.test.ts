@@ -143,8 +143,10 @@ describe("the stored shape", () => {
 
   it("keeps a review on every DiffSource and drops one on none", () => {
     const review = (source: unknown) => parseWorkbench({ v: 1, sets: { home: { order: ["t"], tabs: { t: { id: "t", root: { pane: "r" } } }, panes: { r: { id: "r", kind: "review", data: { repo: "/r", source } } } } } })!.sets.home!.panes.r;
-    for (const source of ["uncommitted", "staged", "unstagedPlusUntracked", "lastCommit", "vsBase", "commitSha", "runBranch"]) expect(review(source)?.data).toEqual({ repo: "/r", source });
+    for (const source of ["uncommitted", "staged", "unstagedPlusUntracked", "lastCommit", "vsBase", "commitSha"]) expect(review(source)?.data).toEqual({ repo: "/r", source });
     expect(review("nope")).toBeUndefined();
+    // The queued run branch left with the run feature (D16).
+    expect(review("runBranch")).toBeUndefined();
   });
 
   it("clamps a wall's tiles, focus, zoom and pins to what exists", () => {

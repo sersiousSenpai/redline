@@ -53,7 +53,7 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter(str) : []
 
 const DOOR_DESTINATIONS: readonly DoorDestination[] = ["plan", "chat", "drafter", "browser", "review", "memory", "servers"];
 /** Every DiffSource, as a record so a new member is a type error here. */
-const DIFF_SOURCE_SET: Record<DiffSource, true> = { uncommitted: true, staged: true, unstagedPlusUntracked: true, lastCommit: true, vsBase: true, commitSha: true, runBranch: true };
+const DIFF_SOURCE_SET: Record<DiffSource, true> = { uncommitted: true, staged: true, unstagedPlusUntracked: true, lastCommit: true, vsBase: true, commitSha: true };
 const isDiffSource = (v: unknown): v is DiffSource => typeof v === "string" && Object.prototype.hasOwnProperty.call(DIFF_SOURCE_SET, v);
 
 function parsePane(raw: unknown): AnyPane | null {

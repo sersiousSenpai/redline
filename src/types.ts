@@ -937,8 +937,7 @@ export type DiffSource =
   | "unstagedPlusUntracked"
   | "lastCommit"
   | "vsBase"
-  | "commitSha"
-  | "runBranch";
+  | "commitSha";
 
 export type DiffLineKind = "context" | "add" | "del";
 

@@ -127,8 +127,6 @@ describe("toast call sites", () => {
   it("no call site schedules its own setToast(null) — the toast owns its timer", () => {
     for (const rel of [
       "src/App.tsx",
-      "src/components/ActivationBar.tsx",
-      "src/components/BuildRedlinePanel.tsx",
     ]) {
       const src = readFileSync(join(process.cwd(), rel), "utf8");
       expect(src, rel).not.toMatch(/setTimeout\(\s*\(\)\s*=>\s*(setToast|onToast)\(null\)/);

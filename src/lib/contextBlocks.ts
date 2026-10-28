@@ -48,7 +48,6 @@ const SOURCE_LABEL: Record<DiffSource, string> = {
   lastCommit: "The last commit",
   vsBase: "Changes against the base branch",
   commitSha: "One commit",
-  runBranch: "A run branch's changes",
 };
 
 /** The review's shape — which files, how much, and what the user said about

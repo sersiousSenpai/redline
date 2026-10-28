@@ -235,14 +235,6 @@ const loadMemorySurface = () => import("./components/MemorySurface");
 const MemorySurface = lazy(() =>
   loadMemorySurface().then((m) => ({ default: m.MemorySurface })),
 );
-// Build Redline's readiness indicator, the restart
-// confirmation, and the cover that goes up while Redline is saving its work or
-// checking a version it just installed. Lazy, and it stays unfetched on a
-// machine that never prepares a release — the boot path has single-digit KB of
-// headroom and this has no business on it.
-const ActivationBar = lazy(() =>
-  import("./components/ActivationBar").then((m) => ({ default: m.ActivationBar })),
-);
 
 // Off the boot path for the same reason as MemorySurface: the Localhost
 // surface is a pure function of one scan, opened on demand, and static only
@@ -11054,13 +11046,6 @@ function App() {
         />
         </Suspense>
       )}
-      {/* Persistent and unobtrusive: it announces a ready release once per
-          candidate, and "Later" means indefinitely. It also owns the two short
-          windows where the backend is refusing writes, because an editor that
-          silently drops what you type is worse than one that says why. */}
-      <Suspense fallback={null}>
-        <ActivationBar onToast={setToast} />
-      </Suspense>
       {toast && <RedlineToast key={toast.id} toast={toast} onDismiss={dismissToast} />}
       {inviteOpen && (
         <Suspense fallback={null}>
