@@ -10708,7 +10708,7 @@ function App() {
                   case "file":
                     return (
                       <Suspense fallback={null}>
-                        <FileViewer path={pane.data.path} onClose={handleCloseFile} onSaved={toastSaved} onEdit={pane.preview ? () => wb.dispatch({ type: "pinPane", paneId: pane.id }) : undefined} />
+                        <FileViewer path={pane.data.path} line={pane.data.line} lineAt={pane.data.at} onClose={handleCloseFile} onSaved={toastSaved} onEdit={pane.preview ? () => wb.dispatch({ type: "pinPane", paneId: pane.id }) : undefined} />
                       </Suspense>
                     );
                   case "browser":

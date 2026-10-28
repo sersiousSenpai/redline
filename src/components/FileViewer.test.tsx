@@ -191,3 +191,20 @@ describe("CodeBody prepared overlay swap", () => {
     act(() => root.unmount());
   });
 });
+
+describe("the file pane (W4)", () => {
+  it("marks a requested line, and an edit start reports in (a preview pins)", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onEdit = vi.fn();
+    act(() => {
+      root.render(createElement(FileViewer, { path: "/repo/main.rs", onClose: () => {}, line: 2, lineAt: 1, onEdit }));
+    });
+    await until(() => !!container.querySelector("[data-marked]"));
+    expect(container.querySelector("[data-marked]")?.textContent).toContain("2");
+    await until(() => !editBtn(container).disabled);
+    act(() => editBtn(container).click());
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+});

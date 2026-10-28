@@ -22,6 +22,7 @@ import {
 } from "../lib/editSwap";
 import { MarkdownView } from "./MarkdownView";
 import { codeViewImport } from "./codeViewWarm";
+import { DiskChangeBanner, DiskCompare, type DiskChange } from "./DiskChangeBanner";
 // Type-only: erased at build, so the main bundle stays CodeMirror-free.
 import type { PreparedEdit } from "./CodeEditor";
 
@@ -83,6 +84,10 @@ interface FileViewerProps {
   onSaved?: (path: string) => void;
   /** The user started editing: a preview pane pins (the Files rail's rule). */
   onEdit?: () => void;
+  /** A line to scroll to and mark (1-based): a `file:line` link. `lineAt`
+   *  asks again for the same line. */
+  line?: number;
+  lineAt?: number;
 }
 
 function basename(path: string): string {
@@ -98,7 +103,7 @@ function isMarkdown(path: string): boolean {
 // Read-only viewer for a single file picked from the FileTree. Images render
 // inline; markdown renders rich; everything else shows syntax-highlighted
 // source. Oversized files report why they weren't loaded.
-function FileViewerBase({ path, onClose, onSaved, onEdit }: FileViewerProps) {
+function FileViewerBase({ path, onClose, onSaved, onEdit, line, lineAt }: FileViewerProps) {
   const mime = imageMime(path);
 
   return (
@@ -137,7 +142,7 @@ function FileViewerBase({ path, onClose, onSaved, onEdit }: FileViewerProps) {
         {mime ? (
           <ImageBody path={path} mime={mime} />
         ) : (
-          <TextBody path={path} onSaved={onSaved} onEdit={onEdit} />
+          <TextBody path={path} onSaved={onSaved} onEdit={onEdit} reveal={line ? { line, at: lineAt } : null} />
         )}
       </div>
     </div>
@@ -188,20 +193,134 @@ function ImageBody({ path, mime }: { path: string; mime: string }) {
       </Notice>
     );
   }
+  return <ImageStage src={`data:${mime};base64,${file.data}`} alt={basename(path)} />;
+}
+
+const ZOOM_MIN = 0.05;
+const ZOOM_MAX = 16;
+const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+/** An image you can look into (W4): it opens fitted; pinch or ⌘-scroll zooms
+ *  about the pointer, scrolling or dragging pans, a double-click toggles
+ *  fitted and actual size, and the corner control steps the zoom. */
+function ImageStage({ src, alt }: { src: string; alt: string }) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
+  // `fit` re-centres on every resize; any zoom or pan leaves it.
+  const [view, setView] = useState<{ fit: boolean; scale: number; x: number; y: number }>({ fit: true, scale: 1, x: 0, y: 0 });
+  const fitView = useCallback(() => {
+    const box = boxRef.current;
+    if (!box || !natural) return;
+    const pad = 24;
+    const scale = Math.min(1, (box.clientWidth - pad * 2) / natural.w, (box.clientHeight - pad * 2) / natural.h);
+    const s = Math.max(ZOOM_MIN, scale);
+    setView({ fit: true, scale: s, x: (box.clientWidth - natural.w * s) / 2, y: (box.clientHeight - natural.h * s) / 2 });
+  }, [natural]);
+  useEffect(() => {
+    if (!view.fit) return;
+    fitView();
+    const box = boxRef.current;
+    if (!box) return;
+    const ro = new ResizeObserver(() => fitView());
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [view.fit, fitView]);
+  const zoomAt = useCallback((factor: number, px?: number, py?: number) => {
+    const box = boxRef.current;
+    setView((v) => {
+      const scale = clampZoom(v.scale * factor);
+      const cx = px ?? (box ? box.clientWidth / 2 : 0);
+      const cy = py ?? (box ? box.clientHeight / 2 : 0);
+      const k = scale / v.scale;
+      return { fit: false, scale, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+    });
+  }, []);
+  // Wheel: non-passive, so a pinch never zooms the whole webview.
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = box.getBoundingClientRect();
+      if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
+      else setView((v) => ({ ...v, fit: false, x: v.x - e.deltaX, y: v.y - e.deltaY }));
+    };
+    box.addEventListener("wheel", onWheel, { passive: false });
+    return () => box.removeEventListener("wheel", onWheel);
+  }, [zoomAt]);
+  const drag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const btn: React.CSSProperties = { width: "24px", height: "24px", border: "none", background: "transparent", color: "var(--color-ink-muted)", cursor: "pointer", fontSize: "13px" };
   return (
-    <div className="flex items-start justify-center p-6">
+    <div
+      ref={boxRef}
+      className="relative h-full w-full overflow-hidden"
+      style={{ cursor: drag.current ? "grabbing" : "grab", touchAction: "none", minHeight: "200px" }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        setView((v) => ({ ...v, fit: false, x: d.vx + e.clientX - d.x, y: d.vy + e.clientY - d.y }));
+      }}
+      onPointerUp={() => {
+        drag.current = null;
+      }}
+      onDoubleClick={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        if (view.fit && view.scale < 1) zoomAt(1 / view.scale, e.clientX - r.left, e.clientY - r.top);
+        else setView((v) => ({ ...v, fit: true }));
+      }}
+    >
       <img
-        src={`data:${mime};base64,${file.data}`}
-        alt={basename(path)}
+        src={src}
+        alt={alt}
+        draggable={false}
+        onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth || 1, h: e.currentTarget.naturalHeight || 1 })}
         style={{
-          maxWidth: "100%",
-          height: "auto",
+          position: "absolute",
+          left: 0,
+          top: 0,
+          maxWidth: "none",
+          transformOrigin: "0 0",
+          transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+          visibility: natural ? "visible" : "hidden",
           // Checkerboard so transparent PNGs are legible on any theme.
           background:
             "repeating-conic-gradient(var(--color-bg-elevated) 0% 25%, transparent 0% 50%) 50% / 16px 16px",
           boxShadow: "0 1px 6px rgba(0,0,0,0.25)",
+          imageRendering: view.scale >= 4 ? "pixelated" : undefined,
         }}
       />
+      <div
+        className="absolute flex items-center gap-1 rounded-full"
+        style={{ right: "12px", bottom: "12px", padding: "2px 4px", background: "var(--color-bg-elevated)", border: "1px solid var(--color-rule)" }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <button type="button" style={btn} title="Zoom out" aria-label="Zoom out" onClick={() => zoomAt(1 / 1.25)}>
+          −
+        </button>
+        <span className="font-mono" style={{ fontSize: "10.5px", minWidth: "38px", textAlign: "center", color: "var(--color-ink-muted)" }}>
+          {Math.round(view.scale * 100)}%
+        </span>
+        <button type="button" style={btn} title="Zoom in" aria-label="Zoom in" onClick={() => zoomAt(1.25)}>
+          +
+        </button>
+        <button type="button" style={{ ...btn, width: "auto", padding: "0 6px", fontSize: "11px" }} title="Fit the pane" onClick={() => setView((v) => ({ ...v, fit: true }))}>
+          Fit
+        </button>
+        <button
+          type="button"
+          style={{ ...btn, width: "auto", padding: "0 6px", fontSize: "11px" }}
+          title="Actual size"
+          onClick={() => zoomAt(1 / view.scale)}
+        >
+          1:1
+        </button>
+      </div>
     </div>
   );
 }
@@ -212,13 +331,15 @@ function TextBody({
   path,
   onSaved,
   onEdit,
+  reveal,
 }: {
   path: string;
   onSaved?: (path: string) => void;
   onEdit?: () => void;
+  reveal: { line: number; at?: number } | null;
 }) {
   if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} onEdit={onEdit} />;
-  return <CodeBody path={path} onSaved={onSaved} onEdit={onEdit} />;
+  return <CodeBody path={path} onSaved={onSaved} onEdit={onEdit} reveal={reveal} />;
 }
 
 // `save_text_file` matches `read_text_file`'s guard: a file is editable iff
@@ -246,10 +367,12 @@ function CodeBody({
   path,
   onSaved,
   onEdit,
+  reveal = null,
 }: {
   path: string;
   onSaved?: (path: string) => void;
   onEdit?: () => void;
+  reveal?: { line: number; at?: number } | null;
 }) {
   const [swap, dispatch] = useReducer(
     (s: EditSwapState<EditPayload>, e: EditSwapEvent<EditPayload>) =>
@@ -358,7 +481,7 @@ function CodeBody({
               <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
             }
           >
-            <CodeView path={path} onMeta={setMeta} scrollPosRef={scrollPosRef} />
+            <CodeView path={path} onMeta={setMeta} scrollPosRef={scrollPosRef} reveal={reveal} />
           </Suspense>
         </div>
       </div>
@@ -403,12 +526,23 @@ function MarkdownBody({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const latestPath = useRef(path);
+  // The disk moving under an open edit: what the edit started from, and the
+  // newer disk text behind the banner (W4).
+  const editingRef = useRef(false);
+  editingRef.current = editing;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const editBaseRef = useRef<string | null>(null);
+  const [conflict, setConflict] = useState<DiskChange | null>(null);
+  const [comparing, setComparing] = useState(false);
 
   useEffect(() => {
     latestPath.current = path;
     setError(null);
     // Switching files leaves edit mode — the draft belongs to the old file.
     setEditing(false);
+    setConflict(null);
+    setComparing(false);
   }, [path]);
 
   const load = useCallback(() => {
@@ -419,6 +553,10 @@ function MarkdownBody({
         if (cancelled || latestPath.current !== path) return;
         setDisplayed({ path, file: result });
         setError(null);
+        const disk = result.content;
+        if (editingRef.current && disk != null && disk !== editBaseRef.current && disk !== draftRef.current) {
+          setConflict({ content: disk, at: Date.now() });
+        }
       } catch (e) {
         if (!cancelled && latestPath.current === path) setError(String(e));
       }
@@ -464,7 +602,9 @@ function MarkdownBody({
 
   const beginEdit = () => {
     onEdit?.();
+    editBaseRef.current = file.content ?? "";
     setDraft(file.content ?? "");
+    setConflict(null);
     setEditing(true);
   };
 
@@ -478,6 +618,9 @@ function MarkdownBody({
       // Reflect the save immediately; the fswatch echo will re-read the same
       // bytes a moment later, which is a no-op.
       setDisplayed({ path, file: { ...file, content: draft } });
+      editBaseRef.current = draft;
+      setConflict(null);
+      setComparing(false);
       setEditing(false);
       onSaved?.(saved);
     } catch (e) {
@@ -506,6 +649,29 @@ function MarkdownBody({
           <EditBtn onClick={beginEdit}>Edit</EditBtn>
         )}
       </div>
+      {editing && conflict && (
+        <div className="mx-6 mt-2" style={{ border: "1px solid var(--color-rule)", borderRadius: "6px", overflow: "hidden" }}>
+          <DiskChangeBanner
+            change={conflict}
+            comparing={comparing}
+            busy={saving}
+            onCompare={() => setComparing((c) => !c)}
+            onKeep={() => {
+              editBaseRef.current = conflict.content;
+              setConflict(null);
+              setComparing(false);
+            }}
+            onReload={() => {
+              editBaseRef.current = conflict.content;
+              setDraft(conflict.content);
+              setConflict(null);
+              setComparing(false);
+            }}
+            onOverwrite={() => void save()}
+          />
+          {comparing && <DiskCompare disk={conflict.content} buffer={draft} />}
+        </div>
+      )}
       {editing ? (
         <textarea
           value={draft}

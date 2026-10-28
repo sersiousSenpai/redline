@@ -31,6 +31,7 @@ import {
   saveKeyBinding,
 } from "../lib/codeEditor";
 import { redlineCmTheme } from "./cmTheme";
+import { DiskChangeBanner, DiskCompare, type DiskChange } from "./DiskChangeBanner";
 
 /** Everything the editor needs to mount already-highlighted: raw text and the
  *  resolved grammar (null = no grammar / grammar chunk failed → plain). */
@@ -90,7 +91,9 @@ function CodeEditor({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   /** Disk content waiting behind the conflict banner (dirty buffer). */
-  const [conflict, setConflict] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<DiskChange | null>(null);
+  /** Compare: the buffer as it was when Compare was pressed, against disk. */
+  const [comparing, setComparing] = useState<string | null>(null);
 
   const isDirty = useCallback(() => {
     const view = viewRef.current;
@@ -107,6 +110,7 @@ function CodeEditor({
         savedRef.current = content;
         setDirty(false);
         setConflict(null);
+        setComparing(null);
         setError(null);
         onSaved?.(saved);
       })
@@ -125,6 +129,7 @@ function CodeEditor({
     setError(null);
     setDirty(false);
     setConflict(null);
+    setComparing(null);
     if (!hostRef.current) return;
     savedRef.current = prepared.content;
     // Kept as a Compartment so a future live-reconfigure (e.g. retrying a
@@ -196,7 +201,7 @@ function CodeEditor({
           });
           setDirty(false);
         } else {
-          setConflict(f.content);
+          setConflict({ content: f.content, at: Date.now() });
         }
       })
       .catch(() => {});
@@ -206,12 +211,13 @@ function CodeEditor({
   const takeDisk = useCallback(() => {
     const view = viewRef.current;
     if (!view || conflict == null) return;
-    savedRef.current = conflict;
+    savedRef.current = conflict.content;
     view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: conflict },
+      changes: { from: 0, to: view.state.doc.length, insert: conflict.content },
     });
     setDirty(false);
     setConflict(null);
+    setComparing(null);
   }, [conflict]);
 
   const btn = (primary?: boolean): React.CSSProperties => ({
@@ -270,31 +276,20 @@ function CodeEditor({
         </button>
       </div>
       {conflict != null && (
-        <div
-          className="flex items-center gap-2 px-6 py-1.5 shrink-0"
-          style={{
-            fontSize: "12px",
-            color: "var(--color-ink)",
-            background: "color-mix(in srgb, var(--color-warning) 12%, transparent)",
-            borderBottom: "1px solid var(--color-rule)",
+        <DiskChangeBanner
+          change={conflict}
+          comparing={comparing != null}
+          busy={saving}
+          onCompare={() => setComparing((c) => (c != null ? null : viewRef.current?.state.doc.toString() ?? ""))}
+          onKeep={() => {
+            setConflict(null);
+            setComparing(null);
           }}
-        >
-          <span style={{ flex: 1 }}>
-            File changed on disk while you were editing.
-          </span>
-          <button type="button" onClick={takeDisk} style={btn()}>
-            Reload
-          </button>
-          <button
-            type="button"
-            onClick={() => setConflict(null)}
-            title="Keep your buffer — Save overwrites the disk version"
-            style={btn()}
-          >
-            Keep editing
-          </button>
-        </div>
+          onReload={takeDisk}
+          onOverwrite={save}
+        />
       )}
+      {conflict != null && comparing != null && <DiskCompare disk={conflict.content} buffer={comparing} />}
       <div
         ref={hostRef}
         className="flex-1 min-h-0 overflow-hidden"

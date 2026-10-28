@@ -44,6 +44,9 @@ interface CodeViewProps {
    *  lets the host seed the editor with the same position on an Edit swap
    *  without subscribing to scroll state. */
   scrollPosRef?: React.MutableRefObject<number>;
+  /** A line to bring into view and mark (1-based; a `file:line` link, ⌘P).
+   *  `at` asks again for the same line. */
+  reveal?: { line: number; at?: number } | null;
 }
 
 /** The currently-displayed document. `inlineLines` is present for normal-sized
@@ -57,7 +60,7 @@ interface LoadedDoc {
   inlineLines?: DocLine[];
 }
 
-function CodeView({ path, onMeta, scrollPosRef }: CodeViewProps) {
+function CodeView({ path, onMeta, scrollPosRef, reveal = null }: CodeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Ref-mirrored so `reload` (keyed on path alone) always reports through the
   // latest callback without re-running on handler identity churn.
@@ -165,6 +168,28 @@ function CodeView({ path, onMeta, scrollPosRef }: CodeViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.path]);
 
+  // A requested line: scrolled to a third of the way down, and marked until
+  // another is asked for. After the file's own reset to the top above.
+  const [marked, setMarked] = useState<number | null>(null);
+  const revealLine = reveal?.line ?? null;
+  const revealAt = reveal?.at;
+  useEffect(() => {
+    if (!fresh || revealLine == null || lineCount === 0) {
+      if (revealLine == null) setMarked(null);
+      return;
+    }
+    const index = Math.min(lineCount, Math.max(1, revealLine)) - 1;
+    setMarked(index);
+    const el = scrollRef.current;
+    if (!el) return;
+    const top = Math.max(0, index * LINE_HEIGHT - el.clientHeight / 3);
+    el.scrollTop = top;
+    setScrollTop(top);
+    if (scrollPosRef) scrollPosRef.current = top;
+    // scrollPosRef is a stable ref container.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fresh, doc?.path, revealLine, revealAt, lineCount]);
+
   // A body (scroll container) is rendered for any non-notice doc; the measure
   // effect re-runs when that flips so it always observes the live element.
   const rendersBody = !!doc && !(fresh && (doc.meta.tooLarge || doc.meta.isBinary));
@@ -270,7 +295,7 @@ function CodeView({ path, onMeta, scrollPosRef }: CodeViewProps) {
   const gutterWidth = `calc(${gutterWidthCss(lineCount)} + 1px)`;
   const rows: React.ReactNode[] = [];
   for (let i = start; i < end; i++) {
-    rows.push(<Line key={i} line={lineAt(i)} num={i} gutterWidth={gutterWidth} />);
+    rows.push(<Line key={i} line={lineAt(i)} num={i} gutterWidth={gutterWidth} marked={i === marked} />);
   }
 
   return (
@@ -342,14 +367,18 @@ function Line({
   line,
   num,
   gutterWidth,
+  marked = false,
 }: {
   line: DocLine | undefined;
   num: number;
   gutterWidth: string;
+  marked?: boolean;
 }) {
   return (
     <div
+      data-marked={marked ? "" : undefined}
       style={{
+        background: marked ? "color-mix(in srgb, var(--color-info) 16%, transparent)" : undefined,
         height: LINE_HEIGHT,
         lineHeight: `${LINE_HEIGHT}px`,
         whiteSpace: "pre",
