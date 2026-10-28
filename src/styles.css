@@ -3478,6 +3478,7 @@ html[data-rl-tile-drag] * {
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-btn { display: none !important; }
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-rail { top: 62px !important; bottom: 44px !important; }
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-doc-zoom { bottom: 60px !important; }
+.rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-discuss-pill { bottom: 60px !important; }
 .rl-wb-pane-fallback { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-ink-muted); font-size: 13px; }
 
 html[data-rl-dock-caps] .rl-term-dock.rl-plate {
