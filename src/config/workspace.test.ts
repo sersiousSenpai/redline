@@ -305,7 +305,8 @@ describe("layout overrides (snap-back canonical shape)", () => {
     );
     const c = canonicalLayout(1440, 900, workspaceLayout(ws));
     expect(c.sidebarWidth).toBe(300);
-    expect(c.termHeight).toBe(320);
+    // The bottom dock's height is gone with the dock: the key is ignored.
+    expect(workspaceLayout(ws)).toEqual({ sidebar: 300 });
     expect(c.paneWidth).toBe(320); // untouched field keeps its default
   });
 

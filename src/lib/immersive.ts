@@ -3,8 +3,8 @@
 
 // Immersive surfaces: the browser, Localhost, Memory, Runs, the Drafter and
 // Code Review are full-bleed destinations that want the whole window, and the
-// periphery around the main pane (sessions sidebar, discussion pane, terminal
-// dock, doc pin, header, footer) letterboxes them. Entering one hides the
+// periphery around the main pane (sessions sidebar, discussion pane, doc
+// pin, header, footer) letterboxes them. Entering one hides the
 // periphery; leaving it puts back exactly what was there.
 //
 // The obvious build — snapshot the pane flags on entry, write them back on
@@ -65,22 +65,18 @@ export interface ShapeFlags {
   sidebarCollapsed: boolean;
   paneCollapsed: boolean;
   paneFullscreen: boolean;
-  termCollapsed: boolean;
-  termFullscreen: boolean;
   docPinned: boolean;
 }
 
 /** What immersive masks the flags to. Every field is the HIDING value:
  *  collapsed panes are hidden, and a fullscreen pane is the opposite of
- *  hidden, so both fullscreens go false alongside their collapse. Immersive
+ *  hidden, so its fullscreen goes false alongside its collapse. Immersive
  *  never opens anything and never writes — the persisted flags keep their own
  *  values underneath. */
 const HIDDEN: ShapeFlags = {
   sidebarCollapsed: true,
   paneCollapsed: true,
   paneFullscreen: false,
-  termCollapsed: true,
-  termFullscreen: false,
   docPinned: false,
 };
 
@@ -92,8 +88,8 @@ export function effectiveShape(pref: ShapeFlags, immersive: boolean): ShapeFlags
 
 // ---- The narrow mask: the two side panels, and nothing else -----------------
 //
-// `isImmersiveSurface` takes the whole periphery — the chrome and the terminal
-// dock included — and that is what was rejected (see its note). The two side
+// `isImmersiveSurface` takes the whole periphery — the chrome included — and
+// that is what was rejected (see its note). The two side
 // panels earned it on their own, though, and for a reason that has nothing to
 // do with screen real estate: the sessions sidebar is a DOCUMENT INDEX and the
 // discussion pane is a PLAN'S MARGIN. On a surface with no document, one is a
@@ -184,9 +180,8 @@ export function panelsMasked(m: PanelMask): boolean {
  *
  *  Only ever hides: collapse is OR'd (false → true, never the reverse), and a
  *  masked pane's fullscreen goes false because fullscreen is the opposite of
- *  hidden. `termCollapsed` / `termFullscreen` / `docPinned` pass through
- *  untouched — the dock and the doc tile are precisely what this does NOT
- *  take. */
+ *  hidden. `docPinned` passes through untouched — the doc tile is precisely
+ *  what this does NOT take. */
 export function maskPanels(shape: ShapeFlags, mask: PanelMask): ShapeFlags {
   if (!mask.sidebar && !mask.pane) return shape;
   return {

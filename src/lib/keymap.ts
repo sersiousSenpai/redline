@@ -65,7 +65,6 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
-  { id: "pane-terminal", keys: ["⇧", "↓"], label: "Show / hide the terminal", group: "Layout", wired: false },
   { id: "sidebar-tabs", keys: ["⇧", "↑"], label: "Switch sidebar tabs", group: "Layout", wired: false },
   // Not a chord: on an immersive surface the periphery is hidden and the way
   // back is the top-edge hull rail (or ⌘⇧0, which lands on the document).

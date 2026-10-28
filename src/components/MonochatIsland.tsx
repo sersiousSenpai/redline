@@ -196,8 +196,8 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   // never holds anything open — the draft is kept either way.
   const draft = useHasSharedDraft(FRONT_DOOR_TEXT_KEY);
   // How much of the door the plate's free area can hold at rest. The door
-  // lands in the space BETWEEN the header and the terminal dock — never on top
-  // of the terminals — and sheds its furniture rather than overflow: headline
+  // lands in the space BETWEEN the header and the footer and sheds its
+  // furniture rather than overflow: headline
   // first, then the recents, and below a bare composer it does not land at
   // all (the pill in the footer is still the way in).
   const [fit, setFit] = useState<LandingFit>("full");
@@ -345,9 +345,8 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   useLayoutEffect(() => {
     const footer = document.querySelector<HTMLElement>(".rl-app-footer");
     const header = document.querySelector<HTMLElement>(".rl-app-header");
-    const termDock = document.querySelector<HTMLElement>(".rl-term-dock");
     // The plate's column. Its horizontal edges bound the resting door the way
-    // the header and dock bound it vertically — without them the layer spans
+    // the header and footer bound it vertically — without them the layer spans
     // the whole window and the composer lands across the sessions sidebar.
     // The flow shell's stage names its own rect (`data-rl-door-plate`), and
     // that rect is the whole of the free area: its stage already sits between
@@ -371,14 +370,13 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       const roomTop = room.current ? (layer.current?.getBoundingClientRect().top ?? 0) + room.current.offsetTop : 0;
       const top = Math.max(SHELL_EDGE, Math.min(header?.getBoundingClientRect().bottom || 28, roomTop || 28));
       layer.current?.style.setProperty("--portal-drag-top", `${top}px`);
-      // The plate's free area: header bottom down to the dock's top (or the
-      // footer's, with the dock folded). Published as the insets the door
+      // The plate's free area: header bottom down to the footer's top.
+      // Published as the insets the door
       // keeps at rest on the empty plate, and as where its paper spreads from
       // and its box glides from when it is engaged there.
-      const dockRect = termDock?.getBoundingClientRect();
       const stageRect = stage?.getBoundingClientRect();
       const areaTop = stageRect ? stageRect.top : header?.getBoundingClientRect().bottom ?? 0;
-      const areaBottom = stageRect ? stageRect.bottom : dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
+      const areaBottom = stageRect ? stageRect.bottom : rect && rect.height > 0 ? rect.top : window.innerHeight;
       layer.current?.style.setProperty("--fd-rest-top", `${Math.max(0, areaTop)}px`);
       layer.current?.style.setProperty("--fd-rest-bottom", `${Math.max(0, window.innerHeight - areaBottom)}px`);
       const plateRect = plate?.getBoundingClientRect();
@@ -397,7 +395,6 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     if (footer) observer?.observe(footer);
     if (header) observer?.observe(header);
-    if (termDock) observer?.observe(termDock);
     if (plate) observer?.observe(plate);
     window.addEventListener("resize", position);
     return () => { observer?.disconnect(); window.removeEventListener("resize", position); };

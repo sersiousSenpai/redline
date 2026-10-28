@@ -110,13 +110,13 @@ export interface Workspace {
     { landing?: string; kind?: string; [key: string]: unknown }
   >;
   /** Optional snap-back target overrides in px, plus the immersive opt-out,
-   *  e.g. `{"layout": {"sidebar": 280, "discussion": 360, "terminal": 300,
-   *  "immersive": false}}`. Read leniently field-by-field — see
-   *  workspaceLayout and workspaceImmersive. */
+   *  e.g. `{"layout": {"sidebar": 280, "discussion": 360, "immersive":
+   *  false}}`. Read leniently field-by-field — see workspaceLayout and
+   *  workspaceImmersive. A `terminal` height from before the bottom dock went
+   *  is ignored: terminals are centre tabs now. */
   layout?: {
     sidebar?: number;
     discussion?: number;
-    terminal?: number;
     immersive?: boolean;
   };
   [key: string]: unknown;
@@ -286,10 +286,8 @@ export function workspaceLayout(ws: Workspace): CanonicalOverrides {
   const out: CanonicalOverrides = {};
   const sidebar = num(r.sidebar);
   const discussion = num(r.discussion);
-  const terminal = num(r.terminal);
   if (sidebar !== undefined) out.sidebar = sidebar;
   if (discussion !== undefined) out.discussion = discussion;
-  if (terminal !== undefined) out.terminal = terminal;
   return out;
 }
 

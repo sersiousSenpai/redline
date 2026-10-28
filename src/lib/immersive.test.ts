@@ -30,8 +30,6 @@ const open: ShapeFlags = {
   sidebarCollapsed: false,
   paneCollapsed: false,
   paneFullscreen: false,
-  termCollapsed: false,
-  termFullscreen: false,
   docPinned: true,
 };
 
@@ -86,42 +84,31 @@ describe("effectiveShape", () => {
     expect(effectiveShape(open, false)).toBe(open);
   });
 
-  it("hides both side panes, the dock and the doc tile when immersive", () => {
+  it("hides both side panes and the doc tile when immersive", () => {
     expect(effectiveShape(open, true)).toEqual({
       sidebarCollapsed: true,
       paneCollapsed: true,
       paneFullscreen: false,
-      termCollapsed: true,
-      termFullscreen: false,
       docPinned: false,
     });
   });
 
-  it("masks a fullscreen pane and a fullscreen dock — fullscreen is the opposite of hidden", () => {
-    const full: ShapeFlags = {
-      ...open,
-      paneFullscreen: true,
-      termFullscreen: true,
-    };
-    const eff = effectiveShape(full, true);
+  it("masks a fullscreen pane — fullscreen is the opposite of hidden", () => {
+    const eff = effectiveShape({ ...open, paneFullscreen: true }, true);
     expect(eff.paneFullscreen).toBe(false);
-    expect(eff.termFullscreen).toBe(false);
     expect(eff.paneCollapsed).toBe(true);
-    expect(eff.termCollapsed).toBe(true);
   });
 
   // The law the whole design rests on: the overlay can only ever take things
   // OFF the screen. If it could open something, entering a surface would
   // change the user's layout rather than just veil it.
   it("only ever hides — no input shape makes a hidden thing visible", () => {
-    for (const bits of Array.from({ length: 64 }, (_, n) => n)) {
+    for (const bits of Array.from({ length: 16 }, (_, n) => n)) {
       const pref: ShapeFlags = {
         sidebarCollapsed: !!(bits & 1),
         paneCollapsed: !!(bits & 2),
         paneFullscreen: !!(bits & 4),
-        termCollapsed: !!(bits & 8),
-        termFullscreen: !!(bits & 16),
-        docPinned: !!(bits & 32),
+        docPinned: !!(bits & 8),
       };
       const eff = effectiveShape(pref, true);
       // Collapsed can only go from false → true; fullscreen and the doc pin
@@ -129,9 +116,7 @@ describe("effectiveShape", () => {
       expect(eff.sidebarCollapsed || !pref.sidebarCollapsed).toBe(true);
       expect(eff.sidebarCollapsed).toBe(true);
       expect(eff.paneCollapsed).toBe(true);
-      expect(eff.termCollapsed).toBe(true);
       expect(eff.paneFullscreen && !pref.paneFullscreen).toBe(false);
-      expect(eff.termFullscreen && !pref.termFullscreen).toBe(false);
       expect(eff.docPinned && !pref.docPinned).toBe(false);
     }
   });
@@ -229,16 +214,11 @@ describe("maskPanels", () => {
     });
   });
 
-  it("leaves the dock and the doc tile completely alone", () => {
-    // This is the whole difference from `effectiveShape`: the header, the
-    // footer and the terminal dock stay put. That is what was rejected as
-    // re-layout jank, and it must not come back through this door.
-    const eff = maskPanels(
-      { ...open, termFullscreen: true },
-      { sidebar: true, pane: true },
-    );
-    expect(eff.termCollapsed).toBe(false);
-    expect(eff.termFullscreen).toBe(true);
+  it("leaves the doc tile completely alone", () => {
+    // This is the whole difference from `effectiveShape`: the header and the
+    // footer stay put. That is what was rejected as re-layout jank, and it
+    // must not come back through this door.
+    const eff = maskPanels(open, { sidebar: true, pane: true });
     expect(eff.docPinned).toBe(true);
   });
 
@@ -252,14 +232,12 @@ describe("maskPanels", () => {
   // only ever take things OFF the screen. If it could open something, entering
   // a surface would change the user's layout rather than veil part of it.
   it("only ever hides — no shape and no mask makes a hidden thing visible", () => {
-    for (const bits of Array.from({ length: 64 }, (_, n) => n)) {
+    for (const bits of Array.from({ length: 16 }, (_, n) => n)) {
       const pref: ShapeFlags = {
         sidebarCollapsed: !!(bits & 1),
         paneCollapsed: !!(bits & 2),
         paneFullscreen: !!(bits & 4),
-        termCollapsed: !!(bits & 8),
-        termFullscreen: !!(bits & 16),
-        docPinned: !!(bits & 32),
+        docPinned: !!(bits & 8),
       };
       for (const mask of [
         { sidebar: false, pane: false },
@@ -272,8 +250,6 @@ describe("maskPanels", () => {
         expect(eff.paneCollapsed || !pref.paneCollapsed).toBe(true);
         expect(eff.paneFullscreen && !pref.paneFullscreen).toBe(false);
         // Untouched, always.
-        expect(eff.termCollapsed).toBe(pref.termCollapsed);
-        expect(eff.termFullscreen).toBe(pref.termFullscreen);
         expect(eff.docPinned).toBe(pref.docPinned);
       }
     }

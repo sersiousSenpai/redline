@@ -178,15 +178,15 @@ describe("content-visibility", () => {
   it("nowhere else: comment cards and transcripts scroll to and pin rows it would misplace", () => {
     const users = css("src").filter((path) => /content-visibility/.test(read(path)));
     expect(users).toEqual([join("src", "styles.css")]);
-    // Three declarations: the rows' `auto` above, `hidden` on the folded
-    // terminal dock — a 0px fold nothing scrolls to, whose xterm layers would
-    // otherwise be kept warm behind it (perf-budget "Idle heat") — and
-    // `hidden` on a workbench tab that is kept mounted but not showing (W1):
-    // its webview, editor and terminal state survive the switch, it is
-    // `inert`, and nothing scrolls to a row inside a hidden tab.
+    // Two declarations: the rows' `auto` above, and `hidden` on a workbench
+    // tab that is kept mounted but not showing (W1): its webview, editor and
+    // terminal state survive the switch, it is `inert`, and nothing scrolls
+    // to a row inside a hidden tab. The folded bottom dock's `hidden` went
+    // with the dock (W3): terminals are centre tabs, and the one terminal
+    // layer is `display: none` off screen, which skips layout and paint
+    // outright — nothing about it needs content-visibility's kept state.
     const styles = read("src/styles.css");
-    expect(styles.match(/content-visibility:/g)).toHaveLength(3);
-    expect(styles).toMatch(/\.rl-term-dock\[data-collapsed\]\s*\{\s*content-visibility:\s*hidden;\s*\}/);
+    expect(styles.match(/content-visibility:/g)).toHaveLength(2);
     expect(styles).toMatch(/\.rl-wb-tab-body\[data-hidden\]\s*\{\s*content-visibility:\s*hidden;/);
   });
 });

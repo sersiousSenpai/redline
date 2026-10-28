@@ -294,9 +294,8 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       },
       {
         id: "toggle-terminal",
-        title: "Show / hide the terminal",
+        title: "Show the terminals",
         group: "Layout",
-        keys: keysFor("pane-terminal"),
         run: actions.toggleTerminal,
       },
       {

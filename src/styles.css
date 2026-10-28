@@ -2289,65 +2289,8 @@ p.rl-block-modified {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 80%, transparent);
 }
 
-/* The shelf (TerminalShelf): one chip per terminal that has no tile. Loud
-   chips glow — a terminal that needs you is never pulled onto the wall on
-   its own, so the glow is how it asks. */
-.rl-shelf-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 18px;
-  max-width: 240px;
-  padding: 0 7px;
-  flex-shrink: 0;
-  border: 1px solid var(--color-rule);
-  border-radius: 9px;
-  background: var(--color-paper);
-  color: var(--color-ink);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-}
-.rl-shelf-chip:hover {
-  background: color-mix(in srgb, var(--color-ink) 7%, var(--color-paper));
-}
-/* The glow breathes between a soft and a strong amber halo: the soft one is
-   static on the chip, the strong one is painted once on ::after and only its
-   opacity moves (perf rule 6). */
-.rl-shelf-chip[data-term-state="needs-you"] {
-  position: relative;
-  border-color: color-mix(in srgb, var(--color-warning) 70%, var(--color-rule));
-  box-shadow: 0 0 3px color-mix(in srgb, var(--color-warning) 30%, transparent);
-}
-.rl-shelf-chip[data-term-state="needs-you"]::after {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  box-shadow: 0 0 9px color-mix(in srgb, var(--color-warning) 55%, transparent);
-  opacity: 0;
-  pointer-events: none;
-  animation: rl-shelf-glow 1.6s ease-in-out infinite;
-}
-.rl-shelf-chip[data-term-state="your-turn"] {
-  border-color: color-mix(in srgb, var(--color-info) 65%, var(--color-rule));
-  box-shadow: 0 0 6px color-mix(in srgb, var(--color-info) 35%, transparent);
-}
-@keyframes rl-shelf-glow {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 1; }
-}
-.rl-shelf-strip {
-  scrollbar-width: none;
-}
-.rl-shelf-strip::-webkit-scrollbar {
-  display: none;
-}
-
 /* Drag-to-arrange: the label that follows the pointer. Fixed and measured
-   (never absolute inside the dock, whose overflow would clip it), and
+   (never absolute inside the wall, whose overflow would clip it), and
    pointer-events none so the hit test sees the tile under it. */
 .rl-tile-drag-ghost {
   position: fixed;
@@ -3434,16 +3377,6 @@ html[data-rl-tile-drag] * {
   );
 }
 
-/* WebGL escape hatch: if the rounded clip misdraws the xterm WebGL canvas
-   on-device, stamp data-rl-dock-caps on <html> — the dock keeps a square clip
-   and the glow overlay restores the plate read with an inset hairline ring
-   plus four canvas-colored corner caps (visual rounding, no clip change). */
-/* Folded to height 0, the dock's terminals would still be laid out and their
-   layers kept; content-visibility skips both until it opens again. */
-.rl-term-dock[data-collapsed] {
-  content-visibility: hidden;
-}
-
 /* ── The workbench (W1): the stage, its kept tabs and its panes ─────────────
    A hidden kept tab stays mounted (its webview, editor and terminal state
    survive the switch) but is `inert` and skips layout and paint. The strip's
@@ -3472,23 +3405,6 @@ html[data-rl-tile-drag] * {
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-doc-zoom { bottom: 60px !important; }
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-discuss-pill { bottom: 60px !important; }
 .rl-wb-pane-fallback { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-ink-muted); font-size: 13px; }
-
-html[data-rl-dock-caps] .rl-term-dock.rl-plate {
-  border-radius: 0;
-}
-html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
-  border-radius: 0;
-  box-shadow: inset 0 0 0 1px var(--color-plate-border);
-  background:
-    radial-gradient(circle at 100% 100%, transparent 9px, var(--color-canvas) 10px)
-      top left / 10px 10px no-repeat,
-    radial-gradient(circle at 0% 100%, transparent 9px, var(--color-canvas) 10px)
-      top right / 10px 10px no-repeat,
-    radial-gradient(circle at 100% 0%, transparent 9px, var(--color-canvas) 10px)
-      bottom left / 10px 10px no-repeat,
-    radial-gradient(circle at 0% 0%, transparent 9px, var(--color-canvas) 10px)
-      bottom right / 10px 10px no-repeat;
-}
 
 /* ── Doors-open boot (A2) ──────────────────────────────────────────────────
    The plates ARE the doors. main.tsx stamps <html data-rl-boot="closed">
@@ -3522,9 +3438,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   html[data-rl-boot="closed"] .rl-pane-clip {
     transform: translateX(-48px);
   }
-  html[data-rl-boot="closed"] .rl-term-dock {
-    transform: translateY(-32px);
-  }
   html[data-rl-boot="closed"] .rl-doc-column {
     opacity: 0;
     transform: scale(0.985);
@@ -3533,7 +3446,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   html[data-rl-boot="opening"] .rl-app-footer,
   html[data-rl-boot="opening"] .rl-sidebar-clip,
   html[data-rl-boot="opening"] .rl-pane-clip,
-  html[data-rl-boot="opening"] .rl-term-dock,
   html[data-rl-boot="opening"] .rl-doc-column {
     opacity: 1;
     transform: none;
@@ -3541,14 +3453,11 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
       transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
       opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-  /* The stagger: bars first, the side plates part together, the dock rises,
-     and the document resolves last — revealed between the doors. */
+  /* The stagger: bars first, the side plates part together, and the
+     document resolves last — revealed between the doors. */
   html[data-rl-boot="opening"] .rl-sidebar-clip,
   html[data-rl-boot="opening"] .rl-pane-clip {
     transition-delay: 30ms;
-  }
-  html[data-rl-boot="opening"] .rl-term-dock {
-    transition-delay: 55ms;
   }
   html[data-rl-boot="opening"] .rl-doc-column {
     transition-delay: 80ms;
@@ -3566,8 +3475,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    ResizeObserver mid-flight and at rest). */
 @media (prefers-reduced-motion: no-preference) {
   html[data-rl-snapback] .rl-sidebar-clip,
-  html[data-rl-snapback] .rl-pane-clip,
-  html[data-rl-snapback] .rl-term-dock {
+  html[data-rl-snapback] .rl-pane-clip {
     transition:
       width 280ms cubic-bezier(0.22, 1, 0.36, 1),
       height 280ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -5394,25 +5302,15 @@ html[data-rl-resizing] [data-rl-pane] {
 .rl-thread-heading .rl-fd-model-chip { display: inline-flex; min-width: 0; white-space: nowrap; }
 .rl-thread-heading .rl-fd-model-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* The terminal dock over a pane, showing one PTY alone (lib/stageDock pins
-   the insets; TerminalTabs' `solo`): flow's ⌘J stage view, and the Agent
-   pane's CLI view in the workbench. The height `applyLiveLayout` writes is
-   the one thing this overrides. */
-.rl-term-dock--stage {
-  position: absolute;
-  z-index: 30;
-  height: auto !important;
-  overflow: hidden;
-  background: var(--color-paper);
-}
-
 /* ── The terminal wall in a centre tab (W3) ──────────────────────────────────
    One layer holds every terminal; a terminals pane is an empty slot the
    layer is pinned over (workbench/TerminalLayer), so xterm never moves. */
 .rl-wb-wall-slot { flex: 1; min-height: 0; min-width: 0; }
+/* Above whatever the pane under it positions (the Agent pane's CLI box,
+   a wall's empty slot); menus portal to the body and stay above it. */
 .rl-wb-terminal-layer {
   position: absolute;
-  z-index: 1;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   min-height: 0;

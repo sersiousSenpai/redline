@@ -473,7 +473,6 @@ import {
   VOICE_PANE_MIN,
   VOICE_PANE_W,
   canonicalLayout,
-  clampDockHeight,
   computePaneLayout,
   isLayoutAtRest,
   paneCollapseOnMask,
@@ -2831,23 +2830,6 @@ function App() {
       cancelAnimationFrame(raf2);
     };
   }, []);
-  const [termHeight, setTermHeight] = usePersistedState(
-    "redline.terminalPane.height",
-    260,
-    { debounceMs: 250 },
-  );
-  const [termCollapsedPref, setTermCollapsed] = usePersistedState(
-    "redline.terminalPane.collapsed",
-    false,
-  );
-  const [termFullscreenPref, setTermFullscreen] = usePersistedState(
-    "redline.terminalPane.fullscreen",
-    false,
-  );
-  // Flow's wall (Tools ▸ Terminals) is a place you visit, never where the
-  // app opens.
-  useLayoutEffect(() => {
-  }, [setTermFullscreen]);
 
   // Project-folder explorer: open folders (sidebar tabs), the active tab, the
   // file shown in the center pane, and the linked-nav toggle.
@@ -3015,9 +2997,6 @@ function App() {
       <Columns2 size={16} aria-hidden />
     </button>
   ) : null;
-  // An Agent pane's CLI view takes the dock off the bottom of the window
-  // (W3 moves terminals into the centre for good).
-  const paneCli = cliView && !termFullscreenPref ? cliView : null;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
@@ -3039,19 +3018,17 @@ function App() {
     enabled: workspaceImmersive(workspace),
   });
   const baseShape = effectiveShape(
-      {
-        sidebarCollapsed: sidebarCollapsedPref,
-        paneCollapsed: paneCollapsedPref,
-        paneFullscreen: paneFullscreenPref,
-        termCollapsed: termCollapsedPref,
-        termFullscreen: termFullscreenPref,
-        // Structural under the workbench: a document face shares the tab
-        // with a surface. The preference still says what the NEXT surface
-        // does (tile beside the document, or take a tab of its own).
-        docPinned: classicWb ? wbView.docPinned : docPinnedPref,
-      },
-      immersive,
-    );
+    {
+      sidebarCollapsed: sidebarCollapsedPref,
+      paneCollapsed: paneCollapsedPref,
+      paneFullscreen: paneFullscreenPref,
+      // Structural under the workbench: a document face shares the tab
+      // with a surface. The preference still says what the NEXT surface
+      // does (tile beside the document, or take a tab of its own).
+      docPinned: classicWb ? wbView.docPinned : docPinnedPref,
+    },
+    immersive,
+  );
   // The second, NARROWER overlay: just the two side panels, leaving the header,
   // the footer and the terminal dock exactly where they are. The sessions list
   // is a document index and the discussion pane is a plan's margin, so on a
@@ -3088,8 +3065,6 @@ function App() {
     sidebarCollapsed,
     paneCollapsed,
     paneFullscreen,
-    termCollapsed,
-    termFullscreen,
     docPinned,
   } = maskPanels(baseShape, { ...pMask, pane: combinedPaneMask });
   const panelsAreMasked = panelsMasked(pMask);
@@ -3108,13 +3083,22 @@ function App() {
     setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(false);
   }, [setPaneCollapsed]);
+  // "Show me the terminals": this set's wall comes forward, or — with none —
+  // a terminal opens in the session's project, on a wall of its own. The
+  // intent to use them mounts the layer now rather than at the next idle
+  // callback.
+  const openTerminalRef = useRef<(cwd: string | null) => Promise<string | null>>(async () => null);
+  const sessionCwdRef = useRef<string | null>(null);
+  sessionCwdRef.current = session?.projectPath || null;
   const revealTerm = useCallback(() => {
     setImmersiveBroken(true);
-    // Opening the dock IS the intent to use it — mount now rather than at the
-    // next idle callback.
     setTerminalMounted(true);
-    setTermCollapsed(false);
-  }, [setTermCollapsed]);
+    if (!classicWb) return;
+    const state = wb.getState();
+    const set = state.sets[state.activeKey];
+    if (set && Object.values(set.panes).some((p) => p.kind === "terminals")) wb.dispatch({ type: "openSurface", kind: "terminals" });
+    else void openTerminalRef.current(sessionCwdRef.current);
+  }, []);
   // The user-driven toggles read the EFFECTIVE value to pick their direction:
   // masked, the pane reads as closed, so the gesture means "open" — which is
   // what the user pressing ⇧← at a hidden sidebar is asking for.
@@ -3126,21 +3110,6 @@ function App() {
     setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(!paneCollapsed);
   }, [paneCollapsed, setPaneCollapsed]);
-  const toggleTerm = useCallback(() => {
-    setImmersiveBroken(true);
-    setTerminalMounted(true);
-    setTermCollapsed(!termCollapsed);
-  }, [termCollapsed, setTermCollapsed]);
-  // Entering dock fullscreen. Extracted from the inline handler that used to
-  // sit on TerminalTabs' `onFullscreenChange` (the per-tile `⤢`, now retired)
-  // so the terminal divider's centre pill can drive it. Going fullscreen is an
-  // open gesture and must still break the immersive mask; leaving it never
-  // needs to, which is why the two exit paths below just set the flag.
-  const enterTermFullscreen = useCallback(() => {
-    setImmersiveBroken(true);
-    setTerminalMounted(true);
-    setTermFullscreen(true);
-  }, [setTermFullscreen]);
 
   // The chrome's hover reveal. The header can't simply vanish — it is the
   // window-drag region and the traffic lights float over it — so immersive
@@ -3217,8 +3186,6 @@ function App() {
           sidebarCollapsed: sidebarCollapsedPref,
           paneCollapsed: paneCollapsedPref,
           paneFullscreen: paneFullscreenPref,
-          termCollapsed: termCollapsedPref,
-          termFullscreen: termFullscreenPref,
           docPinned: docPinnedPref,
           surface: mainSurface,
         },
@@ -3233,7 +3200,6 @@ function App() {
       // at-rest, so the next press snaps back and the cycle completes.
       setSidebarCollapsed(true);
       setPaneCollapsed(true);
-      setTermCollapsed(true);
       return;
     }
     if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -3250,9 +3216,6 @@ function App() {
     setPaneWidth(target.paneWidth);
     setPaneCollapsed(false);
     setPaneFullscreen(false);
-    setTermHeight(target.termHeight);
-    setTermCollapsed(target.termCollapsed);
-    setTermFullscreen(false);
     setDocPinned(false);
     selectSurface(target.surface);
   }, [
@@ -3263,17 +3226,12 @@ function App() {
     setPaneWidth,
     setPaneCollapsed,
     setPaneFullscreen,
-    setTermHeight,
-    setTermCollapsed,
-    setTermFullscreen,
     setDocPinned,
     // The at-rest check reads the live persisted flags; snapBackRef exists
     // precisely so the mount-once ⌘⇧0 listener sees this fresh closure.
     sidebarCollapsedPref,
     paneCollapsedPref,
     paneFullscreenPref,
-    termCollapsedPref,
-    termFullscreenPref,
     docPinnedPref,
     mainSurface,
   ]);
@@ -3339,30 +3297,18 @@ function App() {
     (anchor: string | undefined) => {
       tourRevealRestore.current?.();
       tourRevealRestore.current = null;
-      if (anchor === "terminal") {
-        // Open the terminal partway for the tour — never its full saved height
-        // (which can be near full-screen) and never fullscreen, both of which
-        // swamp the window and look funky mid-tutorial. Restore the real size
-        // when the step moves on.
-        const prevCollapsed = termCollapsed;
-        const prevFullscreen = termFullscreen;
-        const prevHeight = termHeight;
-        const partial = Math.max(
-          180,
-          Math.min(prevHeight, Math.round(window.innerHeight * 0.32)),
-        );
-        if (termCollapsed || termFullscreen || termHeight !== partial) {
-          if (termFullscreen) setTermFullscreen(false);
-          // The spotlight needs its target on screen, so a tour step pointing
-          // at a pane breaks the immersive mask like any other reveal.
-          if (termCollapsed) revealTerm();
-          if (termHeight !== partial) setTermHeight(partial);
-          tourRevealRestore.current = () => {
-            setTermCollapsed(prevCollapsed);
-            setTermFullscreen(prevFullscreen);
-            setTermHeight(prevHeight);
-          };
-        }
+      if (anchor === "terminal" && classicWb) {
+        // The spotlight needs its target on screen: the set's wall comes
+        // forward (a reveal, so it breaks the immersive mask like any
+        // other), and the tab the user was on comes back when the step
+        // moves on.
+        const before = wb.getState();
+        const key = before.activeKey;
+        const tabId = before.sets[key]?.activeTabId ?? null;
+        revealTerm();
+        tourRevealRestore.current = () => {
+          if (tabId) wb.dispatch({ type: "selectTab", key, tabId });
+        };
       } else if (anchor === "sessions" && sidebarCollapsed) {
         revealSidebar();
         tourRevealRestore.current = () => setSidebarCollapsed(true);
@@ -3378,14 +3324,8 @@ function App() {
     },
     [
       doorVisible,
-      termCollapsed,
-      termFullscreen,
-      termHeight,
       sidebarCollapsed,
       paneCollapsed,
-      setTermCollapsed,
-      setTermFullscreen,
-      setTermHeight,
       setSidebarCollapsed,
       setPaneCollapsed,
       revealSidebar,
@@ -3506,6 +3446,13 @@ function App() {
     if (id && !background) showTerminal(id);
     return id;
   }, [ensureTerminalReady, showTerminal]);
+  openTerminalRef.current = openTerminal;
+  /** The open session's agent terminal, shown (the footer's working line). */
+  const showSessionTerminal = () => {
+    const id = session ? sessionTerminals.get(session.sessionId) : undefined;
+    if (id) showTerminal(id);
+    else revealTerm();
+  };
 
   // Mount the terminal dock once the shell is actionable and the main thread
   // is free. Idle, not immediate: xterm's chunk plus a PTY spawn plus the cwd
@@ -3612,8 +3559,8 @@ function App() {
     [activateFolder, setFrontDoorProject, showTerminal],
   );
 
-  // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane,
-  // ↓ terminal dock) and cycle the sidebar tab (↑). A capture-phase window
+  // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane)
+  // and cycle the sidebar tab (↑). A capture-phase window
   // listener so the keystroke is caught — and swallowed — even when the xterm
   // terminal has focus (its handler sits on a bubble-phase helper textarea, so
   // capture runs first and stopPropagation keeps the shell from seeing the
@@ -3623,11 +3570,11 @@ function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      // ⇧↓ went with the bottom dock: in a terminal it is the shell's again.
       if (
         e.key !== "ArrowLeft" &&
         e.key !== "ArrowRight" &&
-        e.key !== "ArrowUp" &&
-        e.key !== "ArrowDown"
+        e.key !== "ArrowUp"
       )
         return;
 
@@ -3649,9 +3596,6 @@ function App() {
           break;
         case "ArrowRight":
           togglePane();
-          break;
-        case "ArrowDown":
-          toggleTerm();
           break;
         case "ArrowUp": {
           // Ordered tabs: index 0 = sessions, 1..n = open folders. Wrap forward.
@@ -3675,7 +3619,6 @@ function App() {
     // has for the sidebar tabs below.
     toggleSidebar,
     togglePane,
-    toggleTerm,
     openFolders,
     sidebarTab,
     selectSessions,
@@ -3854,7 +3797,6 @@ function App() {
   const paneClipRef = useRef<HTMLDivElement | null>(null);
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
-  const termDockRef = useRef<HTMLDivElement | null>(null);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
   // inside the document column — but it follows the same rule: its width is
   // written straight to the element, never rendered from JSX.
@@ -3863,20 +3805,16 @@ function App() {
   // Kept in a ref, not state, so a drag frame stays render-free — `recomputeLatch`
   // reads it the same way it reads the live app-row geometry.
   const voiceFlowRef = useRef(0);
-  const liveSizeRef = useRef({ sidebarWidth, paneWidth, termHeight, winWidth });
+  const liveSizeRef = useRef({ sidebarWidth, paneWidth, winWidth });
   const layoutFlagsRef = useRef({
     sidebarCollapsed,
     paneCollapsed,
     paneFullscreen,
-    termCollapsed,
-    termFullscreen,
   });
   layoutFlagsRef.current = {
     sidebarCollapsed,
     paneCollapsed,
     paneFullscreen,
-    termCollapsed,
-    termFullscreen,
   };
   // The freshest layout, live during a drag. Consumers that must compute real
   // geometry mid-drag (the latch's position) read this instead of the
@@ -3893,7 +3831,6 @@ function App() {
     (over?: Partial<{
       sidebarWidth: number;
       paneWidth: number;
-      termHeight: number;
       winWidth: number;
     }>) => {
       const sizes = liveSizeRef.current;
@@ -3940,13 +3877,6 @@ function App() {
         "left",
         `${-(l.paneOverlayPx + SHELL_GUTTER)}px`,
       );
-      setGeom(
-        termDockRef.current,
-        "height",
-        f.termFullscreen
-          ? ""
-          : `${f.termCollapsed ? 0 : clampDockHeight(sizes.termHeight, window.innerHeight)}px`,
-      );
       // Discrete curtain styling (overflow / stacking / the drop shadow that
       // reads as "painted over the doc") is a CSS rule keyed on this attribute,
       // so crossing the threshold re-styles without a render. Set on the clips
@@ -3984,7 +3914,7 @@ function App() {
   // back to where it was when the drag started.
   useLayoutEffect(() => {
     if (!isResizing()) {
-      liveSizeRef.current = { sidebarWidth, paneWidth, termHeight, winWidth };
+      liveSizeRef.current = { sidebarWidth, paneWidth, winWidth };
     }
     applyLiveLayout();
   });
@@ -4441,17 +4371,6 @@ function App() {
     planDiscussionAvailable,
     discussionPinned,
   );
-
-  const { isDragging: termDragging, startDrag: startTermDrag } =
-    useResizablePane({
-      // Start the drag from the height actually painted, not a saved one the
-      // window can no longer fit — or the first pixel of drag jumps.
-      width: clampDockHeight(termHeight, window.innerHeight),
-      onWidthChange: setTermHeight,
-      onLiveSize: (h) => applyLiveLayout({ termHeight: h }),
-      axis: "y",
-      min: 120,
-    });
 
   const [selection, clearSelection] = useTextSelection(
     documentRef,
@@ -6422,7 +6341,6 @@ function App() {
           effort: session.effort,
         }, projectPath)}\r`;
         suppressTerminalRevealFocus();
-        setTermFullscreen(false);
         const id = await openTerminal(projectPath, true);
         if (!id) {
           setToast("Couldn't open a terminal to build in", 6000);
@@ -6507,7 +6425,6 @@ function App() {
     const launchCmd = buildScaledLaunchCommand(launch.projectPath, launch.settingsPath, launch.leadModel, launch.effort);
     const prompt = buildScaledPrompt(sessionId, launch.runId);
     suppressTerminalRevealFocus();
-    setTermFullscreen(false);
     const id = await openTerminal(launch.projectPath);
     // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
     // claim links the lead under the plan and starts the Runs watcher.
@@ -7236,8 +7153,7 @@ function App() {
     const cmd = runCommand.trim();
     if (!cmd) return;
     suppressTerminalRevealFocus();
-    setTermFullscreen(false);
-    const id = await openTerminal(projectPath);
+        const id = await openTerminal(projectPath);
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
@@ -7896,22 +7812,20 @@ function App() {
   // while any curtain is up, exactly like under modals and drags.
   // And hidden while the boot doors are mid-flight: the native webview
   // ignores DOM transforms and would paint over the moving plates.
-  // Terminal fullscreen covers the whole work area in DOM (absolute inset-0)
-  // without changing the browser slot's rect, so the only fix is hiding the
-  // native webview — it would otherwise paint above the fullscreen terminal.
+  // Flow's terminal wall covers the plate in DOM without changing the
+  // browser slot's rect, so the only fix is hiding the native webview — it
+  // would otherwise paint above the wall.
   const browserVisible =
     browserOpen &&
     !bootAnimating &&
     !browserOverlayActive &&
     !sidebarDragging &&
     !isDragging &&
-    !termDragging &&
     !splitDragging &&
     // The conversation dock reflows the browser as it is dragged; the native
     // webview paints above React DOM and would otherwise smear across the
     // frames it is being resized through.
     !voiceDragging &&
-    !termFullscreen &&
     !liveFlags.curtain &&
     openMenuCount === 0;
 
@@ -8834,7 +8748,7 @@ function App() {
           snapBack,
           toggleSidebar,
           toggleDiscussion: togglePane,
-          toggleTerminal: toggleTerm,
+          toggleTerminal: revealTerm,
           // The palette's word for "give me the panels back on this surface"
           // (and, pressed again on the same visit, hide them again). It flips
           // the break-out bit only — the persisted layout is never touched.
@@ -8876,7 +8790,7 @@ function App() {
       selectSessions,
       toggleSidebar,
       togglePane,
-      toggleTerm,
+      revealTerm,
       setDocZoom,
     ],
   );
@@ -10209,7 +10123,7 @@ function App() {
                     review={codeReview}
                     projectOptions={projectOptions}
                     onOpenTerminal={(cwd, command) => {
-                      suppressTerminalRevealFocus(); setTermFullscreen(false);
+                      suppressTerminalRevealFocus();
                       void openTerminal(cwd).then(async id => {
                         if (!id) { setToast("Couldn't open a terminal", 6000); return; }
                         if (command) {
@@ -11236,85 +11150,13 @@ function App() {
         </div>
         </ErrorBoundary>
 
-        {!termFullscreen && !paneCli && (
-          <PaneDivider
-            orientation="horizontal"
-            label="terminal"
-            collapsed={termCollapsed}
-            dragging={termDragging}
-            // The top-edge caret IS the dock's fullscreen control now: centre
-            // pill ⤢ to fill the window, the same pill ⤡ to come back. A
-            // collapsed dock keeps the plain re-open caret, so `onToggle`
-            // still means "show me the terminal" in that state.
-            toggleMode="fullscreen"
-            onToggle={termCollapsed ? revealTerm : enterTermFullscreen}
-            onPointerDown={startTermDrag}
-            // Collapse loses the centre pill, so it gets its own — the drag
-            // has a 120px floor and can never close the dock.
-            action={{
-              glyph: "⌄",
-              label: "Collapse terminal",
-              onClick: toggleTerm,
-            }}
-            actionVisible="expanded"
-          />
-        )}
-        <div
-          ref={termDockRef}
-          className={
-            // An Agent pane's CLI view: the dock over the pane, showing the
-            // session's PTY alone (`solo` below).
-            paneCli
-              ? "rl-term-dock--stage"
-              : termFullscreen
-              ? "absolute inset-0 z-30"
-              : // Collapsed, the dock folds to height 0 — the plate class must
-                // go with it, or its top/bottom hairlines survive the fold as
-                // a 2px rounded sliver across the hull.
-                `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
-          }
-          data-rl-pane={termFullscreen || paneCli ? undefined : ""}
-          // Folded, the dock's terminals are not rendered at all (styles.css
-          // `.rl-term-dock[data-collapsed]`): their layers and layout would
-          // otherwise be kept warm behind a 0px fold.
-          data-collapsed={!termFullscreen && !paneCli && termCollapsed ? "" : undefined}
-          // Height is owned by `applyLiveLayout` (it folds in the collapsed
-          // state), so the dock tracks the divider without a render — and
-          // without touching style for anything else on the page.
-          style={termFullscreen ? { background: "var(--color-paper)" } : undefined}
-        >
-          {/* In fullscreen, an overlay divider at the top of the terminal
-              gives the user the same top-edge caret they use to collapse
-              the docked terminal — except here it exits fullscreen. */}
-          {termFullscreen && (
-            <div
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                zIndex: 40,
-              }}
-            >
-              <PaneDivider
-                orientation="horizontal"
-                label="terminal"
-                collapsed={false}
-                dragging={false}
-                // Same pill, mirrored glyph: ⤡ undoes the ⤢ that got here.
-                toggleMode="fullscreen"
-                onToggle={() => setTermFullscreen(false)}
-                onPointerDown={() => {}}
-                fullscreen
-                onExitFullscreen={() => setTermFullscreen(false)}
-              />
-            </div>
-          )}
-          {/* Mounted once and never unmounted: the dock's PTYs and their
-              scrollback die with it, so a surface change must never take it
-              away. Until then the enclosing div IS the dock — same plate, same
-              geometry, owned by `applyLiveLayout` — so nothing moves when the
-              tabs arrive. */}
+        {/* The terminal layer, inside <main> once and for good: absolutely
+            positioned against it, it pins itself over the terminals pane or
+            the Agent pane's CLI view on screen (workbench/TerminalLayer). */}
+        <div className="contents">
+          {/* Mounted once and never unmounted: the terminals' PTYs and their
+              scrollback die with it, so a tab or surface change must never
+              take it away. */}
           {terminalMounted && (
           <Suspense fallback={null}>
           <TerminalLayer
@@ -11324,7 +11166,7 @@ function App() {
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
             onNeedsYouChange={setTermNeedYou}
-            cli={paneCli}
+            cli={cliView}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}
@@ -11386,13 +11228,11 @@ function App() {
         buildTargets={buildTargets}
         onBuild={(id) => void buildApproved(id)}
         onReopen={() => void reopenApproved()}
-        termCollapsed={termCollapsed && !termFullscreen}
-        termTabCount={termTabCount}
         termNeedYou={termNeedYou}
         onJumpToNeedsYou={jumpToNeedsYou}
         reviewNews={reviewNews === "report" ? "Run report ready" : reviewNews === "review" ? "Review ready" : null}
         onOpenReviewNews={() => selectSurface("review")}
-        onExpandTerminal={revealTerm}
+        onShowTerminal={showSessionTerminal}
         backend={session?.backend ?? null}
         // A Plan pane on screen carries the verbs in its own footer; this
         // bar keeps the status (W6 slims it to that).
@@ -11654,7 +11494,7 @@ function App() {
         </Suspense>
       )}
       <MonochatIsland
-        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
+        clearanceKey={`${immersive}:${chromeRevealed}:${bootAnimating}`}
         // The door rests on a door pane that is on screen and focused.
         landing={plateAtRest && shellReady && !joinedActive && wbView.focusedKind === "door"}
         onPillClick={classicWb ? openDoorTab : undefined}
@@ -11761,7 +11601,7 @@ function App() {
                   // Immersive entry and every chrome reveal move the slot as
                   // surely as a pane toggle does, and the native webview only
                   // re-reads its rect when this key changes.
-                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${immersive}|${chromeRevealed}`}
+                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${immersive}|${chromeRevealed}`}
                   // The pane's four panels render into the app's one
                   // conversation column, through a portal — everything they
                   // need (tabs, missions, the linked thread) is the pane's own
@@ -11796,7 +11636,7 @@ function App() {
               if (!binary) return;
               const id = await openTerminal(setupProject);
               if (!id) { setInstallError("Could not open the setup terminal. Retry, or open /hooks in your Codex terminal."); return; }
-              setSetupReviewInTerminal(true); setSetupBackend("codex"); setTermFullscreen(false);
+              setSetupReviewInTerminal(true); setSetupBackend("codex");
               const quoted = "'" + binary.replace(/'/g, "'\\''") + "'";
               typeIntoTerminal(id, `${quoted}\r`, "Could not start Codex for hook review", null, true);
             })(); }}

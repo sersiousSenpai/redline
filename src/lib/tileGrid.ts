@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// Pure geometry for the terminal dock's tile grid: which rows/columns N tiles
+// Pure geometry for a terminal wall's tile grid: which rows/columns N tiles
 // arrange into for a given container, where every tile and gutter rests, and
 // how a gutter drag redistributes space. No React, no DOM — the component owns
 // the style writes, this owns the arithmetic, and everything here is testable
 // as data. The tile-slot algebra (which terminal occupies which tile) lives in
 // `tileSlots.ts`; this file never sees a terminal id.
 
-import { CANONICAL_TERM_FRAC, docMinHFor } from "./paneLayout";
-
-/** A pixel-sized container (the dock's pane area). */
+/** A pixel-sized container (the wall's pane area). */
 export interface SizePx {
   width: number;
   height: number;
@@ -103,9 +101,7 @@ const CELL_H = 18;
 /** Below this character grid a tile stops being a terminal at all. */
 const MIN_COLS = 40;
 const MIN_ROWS = 8;
-/** Full marks at a canonical 80×24 — past that, more chars stop mattering.
- *  Exported as the size automatic placement won't shrink a tile below
- *  (tilePolicy's `fitsAnotherTile`). */
+/** Full marks at a canonical 80×24 — past that, more chars stop mattering. */
 export const TARGET_COLS = 80;
 export const TARGET_ROWS = 24;
 /** Preferred tile aspect (w/h). Survives only as a tiebreaker once both
@@ -448,31 +444,6 @@ export function evenAt(
     .reduce((a, b) => a + b, 0);
   const span = f.cols[g.row][g.before] + f.cols[g.row][g.after];
   return resizeAt(shape, f, g, pairStart + span / 2);
-}
-
-/** The dock height `n` tiles ask for. Stepwise share so the dock doesn't
- *  creep (n≤2 keeps today's canonical dock untouched), raised to the row
- *  count's floor (two passes resolve the rows↔height circularity), capped so
- *  the document keeps its own floor — and it ONLY EVER GROWS: a dock dragged
- *  taller keeps its height, and removing a tile never yanks it shorter.
- *  Shrinking is the user's job; they have a divider and a collapse caret.
- *
- *  The 0.72 step serves the 8-14 range the tile cap now allows. It is still
- *  capped by the document's floor and still only ever grows, so 1-7 tiles are
- *  byte-identical to before it existed. A grid that dense genuinely wants
- *  fullscreen, which the terminal divider's ⤢ now makes a one-click move. */
-export function dockHeightForTiles(
-  n: number,
-  win: SizePx,
-  current: number,
-): number {
-  const frac =
-    n <= 2 ? CANONICAL_TERM_FRAC : n <= 4 ? 0.45 : n <= 7 ? 0.6 : 0.72;
-  let target = Math.round(win.height * frac);
-  const shape = gridShapeFor(n, { width: win.width, height: target });
-  target = Math.max(target, shape.rows * MIN_TILE_H);
-  target = Math.min(target, win.height - docMinHFor(win.height));
-  return Math.max(current, target);
 }
 
 /** One-time lazy migration of the legacy two-pane split ratio: seeds the

@@ -136,11 +136,6 @@ interface TerminalTabsProps {
   /** How many terminals need you (needs-you, or an unread your-turn) —
    *  the footer's "N need you" chip and the ⌘⇧J gate. */
   onNeedsYouChange?: (count: number) => void;
-  /** The terminals whose state is needs-you proper (an agent blocked on a
-   *  question or a permission; an unread your-turn is not one), oldest
-   *  first. The flow top bar's "N needs you" counts these, less the
-   *  session on screen. Called only when the set changes. */
-  onNeedsYouIdsChange?: (ids: string[]) => void;
   /** No wall is on screen, so no tile is really visible: the fleet poll
    *  and its `lsof` stop, and a terminal's output counts as unseen. */
   collapsed: boolean;
@@ -164,9 +159,9 @@ interface TerminalTabsProps {
   /** Recent repo directories for the tile menu's NEW TERMINAL IN section. The
    *  same list the drafter's launch picker uses. */
   projectOptions?: readonly ProjectOption[];
-  /** The flow shell's terminal view (⌘J): this one terminal alone, filling
-   *  the layer, with no tile header or gutters — the session's own PTY
-   *  at full stage. A view, like a zoom: no shell is spawned or killed, the
+  /** An Agent pane's CLI view: this one terminal alone, filling the
+   *  layer, with no tile header or gutters — the session's own PTY in its
+   *  pane. A view, like a zoom: no shell is spawned or killed, the
    *  wall's tiles are left exactly as they were, and every other terminal
    *  stays mounted underneath (display:none). An id that isn't open is
    *  ignored. */
@@ -326,7 +321,6 @@ export const TerminalTabs = memo(
       onTabsChange,
       onTabIdsChange,
       onNeedsYouChange,
-      onNeedsYouIdsChange,
       collapsed,
       onActiveTabChange,
       onFocusedCwd,
@@ -1048,12 +1042,6 @@ export const TerminalTabs = memo(
   useEffect(() => {
     onNeedsYouChange?.(loudTerminals.length);
   }, [loudTerminals.length, onNeedsYouChange]);
-  // Keyed by the ids themselves, so a repaint that moved no terminal in or
-  // out of needs-you never reaches the host.
-  const needsYouKey = loudTerminals.filter((t) => t.state === "needs-you").map((t) => t.id).join("\n");
-  useEffect(() => {
-    onNeedsYouIdsChange?.(needsYouKey ? needsYouKey.split("\n") : []);
-  }, [needsYouKey, onNeedsYouIdsChange]);
   useAttentionAlerts(loudTerminals, collapsed, attentionReady);
 
   // A your-turn is READ once its tile has been on screen and focused, in a

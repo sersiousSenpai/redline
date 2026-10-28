@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! The flow shell's terminal view (deviation 6): ⌘J shows the session's own
-//! PTY at full stage. The PTY belongs to the terminal dock, and the dock may
-//! never unmount or move to another parent — either one recreates xterm and
-//! replays its PTY, or kills it — so the stage cannot hold the terminal. The
-//! dock comes to the stage instead: it stays exactly where it is in the tree,
-//! goes absolutely positioned (`.rl-term-dock--stage`), and this pins its box
-//! to the stage's box, following every resize of either.
-//!
-//! Insets, not a height: `applyLiveLayout` owns the dock's inline height, and
-//! the stage class overrides that one property, so the two never write the
-//! same thing.
+//! A terminal pane's body. A terminal's view may never unmount or move to
+//! another parent — either one recreates xterm and replays its PTY, or kills
+//! it — so a centre pane cannot hold the terminal. The one terminal layer
+//! comes to the pane instead (workbench/TerminalLayer): it stays exactly
+//! where it is in the tree, absolutely positioned, and this pins its box to
+//! the pane's box — a wall's slot, or an Agent pane's CLI view — following
+//! every resize of either.
 
 import { useLayoutEffect, type RefObject } from "react";
 

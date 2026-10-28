@@ -678,7 +678,7 @@ describe("reach and notify", () => {
   });
 });
 
-describe("solo: the flow shell's terminal view", () => {
+describe("solo: an Agent pane's CLI view", () => {
   const view = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)!;
   const shown = () => [...host.querySelectorAll<HTMLElement>('[data-visible="true"]')].map((node) => node.dataset.terminalId!);
   async function render(solo: string | null, onActiveTabChange?: (id: string) => void) {

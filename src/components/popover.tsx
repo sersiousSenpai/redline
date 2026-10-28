@@ -55,7 +55,7 @@ export interface PanelProps {
  *  - `position: fixed`, because a 30px `overflow: hidden` bar (the terminal
  *    tab strip) would cut an absolutely positioned panel off at its edge.
  *  - a portal to `document.body`, because a wrapper carrying
- *    `contain: layout paint` (`.rl-term-dock`, styles.css) becomes the
+ *    `contain: layout paint` becomes the
  *    containing block for *fixed* descendants too, and paint containment then
  *    clips them — a panel left inside is positioned against the wrapper's box
  *    and clipped to it, i.e. invisible. Portalling out of the contained

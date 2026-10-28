@@ -51,18 +51,16 @@ interface FooterProps {
   onBuild?: (targetId: string) => void;
   /** Rescind the approval and bring the plan back held, in review. */
   onReopen?: () => void;
-  /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
-  termCollapsed: boolean;
-  termTabCount: number;
-  /** Dock terminals that need you (lib/termState's loud states). */
+  /** Terminals that need you (lib/termState's loud states). */
   termNeedYou?: number;
-  /** ⌘⇧J's action: reveal the dock on the next terminal that needs you. */
+  /** ⌘⇧J's action: show the next terminal that needs you, in its session. */
   onJumpToNeedsYou?: () => void;
   /** An agent's review request or a run's report, waiting for you on the
    *  review surface ("Review ready"), or null. */
   reviewNews?: string | null;
   onOpenReviewNews?: () => void;
-  onExpandTerminal: () => void;
+  /** The working line's click: show the terminal the agent is working in. */
+  onShowTerminal?: () => void;
   /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
   /** Draw Send and Approve & build. False while a Plan pane on screen draws
@@ -86,13 +84,11 @@ export function Footer({
   buildTargets = [],
   onBuild,
   onReopen,
-  termCollapsed,
-  termTabCount,
   termNeedYou = 0,
   onJumpToNeedsYou,
   reviewNews = null,
   onOpenReviewNews,
-  onExpandTerminal,
+  onShowTerminal,
   backend,
   planVerbs = true,
 }: FooterProps) {
@@ -193,7 +189,7 @@ export function Footer({
         {waiting ? (
           <button
             type="button"
-            onClick={onExpandTerminal}
+            onClick={onShowTerminal}
             title="Show terminal"
             className="italic flex items-center gap-1"
             style={{
@@ -247,26 +243,8 @@ export function Footer({
           </>
         )}
         {!approval && planState && !planState.held && onSetPlanState && <Suspense fallback={null}><PlanStateMenu session={planState} onState={onSetPlanState} onMove={onMoveProject}/></Suspense>}
-        {termCollapsed && (
-          <>
-            <span style={{ color: "var(--color-rule)" }}>·</span>
-            <button
-              type="button"
-              onClick={onExpandTerminal}
-              title="Show terminal"
-              className="flex items-center gap-1"
-              style={{
-                color: "var(--color-ink-muted)",
-                fontSize: "var(--rl-text-sm)",
-                cursor: "pointer",
-              }}
-            >
-              {termTabCount} terminal{termTabCount === 1 ? "" : "s"}
-            </button>
-          </>
-        )}
-        {/* The way to a blocked agent when the dock is out of sight — and a
-            standing hint at ⌘⇧J when it isn't. Present only while something
+        {/* The way to a blocked agent wherever you are — and a standing
+            hint at ⌘⇧J. Present only while something
             needs you; never a permanent control. */}
         {termNeedYou > 0 && onJumpToNeedsYou && (
           <>

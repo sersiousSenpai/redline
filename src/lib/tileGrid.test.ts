@@ -6,7 +6,6 @@ import {
   MAX_STORED_SHAPES,
   MIN_TILE_H,
   MIN_TILE_W,
-  dockHeightForTiles,
   evenAt,
   evenFractions,
   gridShapeFor,
@@ -376,40 +375,6 @@ describe("resizeAt / evenAt", () => {
     expect(out.cols[0][0]).toBeCloseTo(1 / 3, 12);
     expect(out.cols[0][1]).toBeCloseTo(1 / 3, 12);
     expect(out.cols[0][2]).toBe(f.cols[0][2]);
-  });
-});
-
-describe("dockHeightForTiles", () => {
-  const win: SizePx = { width: 1728, height: 970 };
-
-  it("n≤2 keeps today's canonical dock; more tiles step the share up", () => {
-    expect(dockHeightForTiles(2, win, 291)).toBe(291);
-    expect(dockHeightForTiles(4, win, 291)).toBe(Math.round(970 * 0.45));
-    expect(dockHeightForTiles(5, win, 291)).toBe(Math.round(970 * 0.6));
-  });
-
-  it("only ever grows: a dock dragged to 700 keeps 700, and dropping tiles never shrinks it", () => {
-    expect(dockHeightForTiles(7, win, 700)).toBe(700);
-    expect(dockHeightForTiles(1, win, 700)).toBe(700);
-  });
-
-  it("caps at the document's floor (docMinHFor)", () => {
-    // 400px window: doc floor 220 → dock can never exceed 180.
-    expect(dockHeightForTiles(7, { width: 1728, height: 400 }, 120)).toBe(180);
-  });
-
-  it("adds one step for the 8-14 range, leaving 1-7 byte-identical", () => {
-    // The 0.6 branch still ends at 7...
-    expect(dockHeightForTiles(7, win, 0)).toBe(dockHeightForTiles(5, win, 0));
-    // ...and 8 upward asks for more.
-    expect(dockHeightForTiles(8, win, 0)).toBeGreaterThan(
-      dockHeightForTiles(7, win, 0),
-    );
-    expect(dockHeightForTiles(8, win, 0)).toBe(Math.round(970 * 0.72));
-    // Still capped by the document's floor, however many tiles.
-    expect(
-      dockHeightForTiles(14, { width: 1728, height: 400 }, 120),
-    ).toBeLessThanOrEqual(400 - 220);
   });
 });
 

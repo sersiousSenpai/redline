@@ -3,12 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  clampDockHeight,
-  docMinHFor,
   CANONICAL_PANE_W,
   CANONICAL_SIDEBAR_W,
-  CANONICAL_TERM_COLLAPSE_H,
-  CANONICAL_TERM_MIN_H,
   DIVIDER_W,
   DOC_MIN,
   DOC_MIN_FRAC,
@@ -210,53 +206,30 @@ describe("canonicalLayout", () => {
     const c = canonicalLayout(1440, 900);
     expect(c.sidebarWidth).toBe(CANONICAL_SIDEBAR_W);
     expect(c.paneWidth).toBe(CANONICAL_PANE_W);
-    expect(c.termHeight).toBe(270); // 30% of 900 beats the floor
-    expect(c.termCollapsed).toBe(false);
     expect(c.surface).toBe("document");
     expect(c.docPinned).toBe(false);
     expect(c.splitRatio).toBe(0.5);
     expect(c.sidebarCollapsed).toBe(false);
     expect(c.paneCollapsed).toBe(false);
     expect(c.paneFullscreen).toBe(false);
-    expect(c.termFullscreen).toBe(false);
-  });
-
-  it("floors the terminal where 30% gets too short", () => {
-    expect(canonicalLayout(1440, 800).termHeight).toBe(CANONICAL_TERM_MIN_H);
-  });
-
-  it("folds the dock only under the collapse height", () => {
-    expect(canonicalLayout(1440, CANONICAL_TERM_COLLAPSE_H).termCollapsed).toBe(
-      false,
-    );
-    expect(
-      canonicalLayout(1440, CANONICAL_TERM_COLLAPSE_H - 1).termCollapsed,
-    ).toBe(true);
-    // Folded, the height is still derived — expanding the dock later lands
-    // on a sane size, not zero.
-    expect(canonicalLayout(1440, 700).termHeight).toBe(CANONICAL_TERM_MIN_H);
   });
 
   it("honors in-range manifest overrides, rounded to px", () => {
     const c = canonicalLayout(1440, 900, {
       sidebar: 280.4,
       discussion: 360,
-      terminal: 300,
     });
     expect(c.sidebarWidth).toBe(280);
     expect(c.paneWidth).toBe(360);
-    expect(c.termHeight).toBe(300);
   });
 
   it("off-range overrides fall back to defaults — leniency, not clamping", () => {
     const c = canonicalLayout(1440, 900, {
       sidebar: 5000, // typo-sized: > 60% of the window
       discussion: 40, // below any usable pane
-      terminal: Number.NaN,
     });
     expect(c.sidebarWidth).toBe(CANONICAL_SIDEBAR_W);
     expect(c.paneWidth).toBe(CANONICAL_PANE_W);
-    expect(c.termHeight).toBe(270);
   });
 
   it("override range scales with the window it must fit", () => {
@@ -278,8 +251,6 @@ describe("isLayoutAtRest", () => {
       sidebarCollapsed: c.sidebarCollapsed,
       paneCollapsed: c.paneCollapsed,
       paneFullscreen: c.paneFullscreen,
-      termCollapsed: c.termCollapsed,
-      termFullscreen: c.termFullscreen,
       docPinned: c.docPinned,
       surface: c.surface,
     };
@@ -295,35 +266,11 @@ describe("isLayoutAtRest", () => {
       { sidebarCollapsed: true },
       { paneCollapsed: true },
       { paneFullscreen: true },
-      { termCollapsed: true },
-      { termFullscreen: true },
       { docPinned: true },
       { surface: "browser" },
     ];
     for (const flip of flips) {
       expect(isLayoutAtRest({ ...atRest(), ...flip }, canonical)).toBe(false);
     }
-  });
-
-  it("tracks the short-window canonical, where the dock folds", () => {
-    const winH = CANONICAL_TERM_COLLAPSE_H - 1;
-    const canonical = canonicalLayout(1440, winH);
-    // Canonical itself folds the terminal here, so a collapsed dock IS rest…
-    expect(isLayoutAtRest(atRest(winH), canonical)).toBe(true);
-    expect(atRest(winH).termCollapsed).toBe(true);
-    // …and an open one is not.
-    expect(
-      isLayoutAtRest({ ...atRest(winH), termCollapsed: false }, canonical),
-    ).toBe(false);
-  });
-});
-
-describe("clampDockHeight", () => {
-  it("leaves the document its floor when a saved height outgrows the window", () => {
-    // 1037px saved on a taller display, relaunched in a ~1000px window.
-    expect(clampDockHeight(1037, 1000)).toBe(1000 - docMinHFor(1000));
-  });
-  it("passes a height that fits through untouched", () => {
-    expect(clampDockHeight(260, 1000)).toBe(260);
   });
 });

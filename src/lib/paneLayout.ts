@@ -14,25 +14,6 @@ export const DOC_MIN_FRAC = 0.2;
 export function docMinFor(winWidth: number): number {
   return Math.max(DOC_MIN, Math.round(winWidth * DOC_MIN_FRAC));
 }
-/** Minimum useful document-strip HEIGHT above the terminal dock — the vertical
- *  twin of DOC_MIN/docMinFor, for the dock's tile-driven growth. `docMinFor`
- *  is a *width* rule and the wrong instrument for a vertical cap. */
-const DOC_MIN_H = 220;
-/** On tall windows the absolute floor reads squeezed shut; scale it. */
-const DOC_MIN_H_FRAC = 0.2;
-/** The effective document floor above the dock for a window: the larger of
- *  the absolute minimum and the window fraction. */
-export function docMinHFor(winHeight: number): number {
-  return Math.max(DOC_MIN_H, Math.round(winHeight * DOC_MIN_H_FRAC));
-}
-/** The tallest the terminal dock may PAINT in a window this tall: whatever
- *  leaves the document its floor. Applied at read time, never written back —
- *  a height saved on a taller display (or grown past the window) must not
- *  squeeze the document to nothing on a shorter one, and must come back when
- *  the window does. */
-export function clampDockHeight(height: number, winHeight: number): number {
-  return Math.max(0, Math.min(height, winHeight - docMinHFor(winHeight)));
-}
 /** Width of one pane gutter — the strip of hull canvas between two plates.
  *  The gutter IS the divider: PaneDivider's layout box spans it, transparent at
  *  rest so the canvas shows through, painting a slim bar only on hover/drag. */
@@ -79,20 +60,11 @@ export function voicePaneMaxW(docColW: number): number {
 
 export const CANONICAL_SIDEBAR_W = 240;
 export const CANONICAL_PANE_W = 320;
-/** The terminal rests at 30% of the window, floored where a shorter dock
- *  stops being a usable terminal. */
-export const CANONICAL_TERM_MIN_H = 260;
-export const CANONICAL_TERM_FRAC = 0.3;
-/** Below this window height even the floored terminal crowds the document,
- *  so the canonical shape folds the dock. */
-export const CANONICAL_TERM_COLLAPSE_H = 760;
-
 /** Hand-edited overrides from the workspace manifest's `layout` block (see
  *  workspaceLayout in config/workspace.ts — GUI–file duality). */
 export interface CanonicalOverrides {
   sidebar?: number;
   discussion?: number;
-  terminal?: number;
 }
 
 export interface CanonicalLayout {
@@ -101,9 +73,6 @@ export interface CanonicalLayout {
   paneWidth: number;
   paneCollapsed: boolean;
   paneFullscreen: boolean;
-  termHeight: number;
-  termCollapsed: boolean;
-  termFullscreen: boolean;
   surface: "document";
   docPinned: boolean;
   splitRatio: number;
@@ -128,7 +97,9 @@ function overrideOr(
  *  what a fresh install boots into anyway. */
 export function canonicalLayout(
   winWidth: number,
-  winHeight: number,
+  // Kept for its callers: the height only ever sized the bottom dock, which
+  // is gone (terminals are centre tabs).
+  _winHeight: number,
   overrides: CanonicalOverrides = {},
 ): CanonicalLayout {
   return {
@@ -137,16 +108,6 @@ export function canonicalLayout(
     paneWidth: overrideOr(overrides.discussion, winWidth, CANONICAL_PANE_W),
     paneCollapsed: false,
     paneFullscreen: false,
-    termHeight: overrideOr(
-      overrides.terminal,
-      winHeight,
-      Math.max(
-        CANONICAL_TERM_MIN_H,
-        Math.round(winHeight * CANONICAL_TERM_FRAC),
-      ),
-    ),
-    termCollapsed: winHeight < CANONICAL_TERM_COLLAPSE_H,
-    termFullscreen: false,
     surface: "document",
     docPinned: false,
     splitRatio: 0.5,
@@ -160,8 +121,6 @@ export interface RestingShapeInput {
   sidebarCollapsed: boolean;
   paneCollapsed: boolean;
   paneFullscreen: boolean;
-  termCollapsed: boolean;
-  termFullscreen: boolean;
   docPinned: boolean;
   surface: string;
 }
@@ -180,8 +139,7 @@ export function paneCollapseOnMask(previous: boolean, next: boolean): boolean {
  *  open (starting a comment reveals the discussion so its composer shows).
  *
  *  Shape flags ONLY, compared against the `canonical` object's fields (not
- *  literals, so this can never drift from canonicalLayout — including the
- *  short-window case where canonical itself folds the terminal). Widths are
+ *  literals, so this can never drift from canonicalLayout). Widths are
  *  deliberately excluded: a 5px divider nudge must not flip the button's
  *  meaning from "snap back" to "close everything". A width-drifted layout
  *  gets one "free" re-snap before the close — which is the right UX. */
@@ -193,8 +151,6 @@ export function isLayoutAtRest(
     current.sidebarCollapsed === canonical.sidebarCollapsed &&
     current.paneCollapsed === canonical.paneCollapsed &&
     current.paneFullscreen === canonical.paneFullscreen &&
-    current.termCollapsed === canonical.termCollapsed &&
-    current.termFullscreen === canonical.termFullscreen &&
     current.docPinned === canonical.docPinned &&
     current.surface === canonical.surface
   );
