@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   createContext,
+  Fragment,
   useContext,
   useEffect,
   useRef,
@@ -76,6 +77,14 @@ export interface TileActions {
    *  TerminalTabs owns the gesture: under its threshold it is a plain click
    *  and nothing happens here. */
   onDragStart: (id: string, e: React.PointerEvent<HTMLElement>) => void;
+  /** Give a terminal a name of its own (empty clears it). */
+  onRename?: (id: string, name: string) => void;
+  /** Copy a terminal's ids (its PTY's, and its session's when it is one's
+   *  agent) to the clipboard. */
+  onCopyIds?: (id: string) => void;
+  /** A session's agent terminal: fork its conversation into a new
+   *  terminal, or resume it where the agent is no longer running. */
+  onSessionAction?: (kind: "fork" | "resume", id: string) => void;
 }
 
 /** Everything high-churn the menu renders (work lines, held, unseen, repo
@@ -88,6 +97,9 @@ export interface TerminalMenuData {
   rows: readonly AttributedTerminal[];
   repos: readonly RepoChoice[];
   homePath: string | null;
+  /** Agent terminals and the session each one runs: fork and resume are
+   *  offered for these. */
+  agents?: ReadonlyMap<string, string>;
 }
 
 export const TerminalMenuDataContext = createContext<TerminalMenuData>({
@@ -106,6 +118,9 @@ function tildeify(path: string, homePath: string | null): string {
 
 interface TerminalTileMenuProps {
   tile: number;
+  /** The terminal this tile shows: what Rename, Copy ids, Fork and Resume
+   *  act on. */
+  terminalId?: string;
   /** This tile's terminal's live cwd — the panel header and the "New
    *  terminal here" caption. */
   dir: string | null;
@@ -123,14 +138,22 @@ interface MenuItem {
 
 export function TerminalTileMenu({
   tile,
+  terminalId,
   dir,
   zoomed,
   actions,
   panelProps,
   onClose,
 }: TerminalTileMenuProps) {
-  const { rows, repos, homePath } = useContext(TerminalMenuDataContext);
+  const { rows, repos, homePath, agents } = useContext(TerminalMenuDataContext);
   const [query, setQuery] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const self = terminalId ? rows.find((r) => r.id === terminalId) : undefined;
+  const agentSession = terminalId ? agents?.get(terminalId) : undefined;
+  // Resume only where the agent is no longer running: a second claude on
+  // the same conversation would race the first.
+  const resumable = !!agentSession && (self?.state === "exited" || self?.state === "idle" || self?.state === undefined);
+  const forkable = !!agentSession && !resumable;
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
@@ -184,6 +207,13 @@ export function TerminalTileMenu({
         actions.onNewHome(tile);
       },
     },
+    ...(terminalId && actions.onRename ? [{ key: "rename", run: () => setRenaming(true) }] : []),
+    ...(terminalId && actions.onCopyIds
+      ? [{ key: "copy", run: () => { onClose(); actions.onCopyIds!(terminalId); } }]
+      : []),
+    ...(terminalId && actions.onSessionAction && (forkable || resumable)
+      ? [{ key: "session", run: () => { onClose(); actions.onSessionAction!(resumable ? "resume" : "fork", terminalId); } }]
+      : []),
     {
       key: "zoom",
       run: () => {
@@ -212,6 +242,7 @@ export function TerminalTileMenu({
   useEffect(() => () => actions.onHintTile(null), [actions]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (renaming) return; // the name field owns its keys
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((a) => Math.min(a + 1, items.length - 1));
@@ -267,8 +298,11 @@ export function TerminalTileMenu({
             />
           </div>
         )}
-        {visibleRows.length > 0 && heading("Open")}
-        {visibleRows.map((r) => (
+        {visibleRows.length > 0 && !visibleRows.some((r) => r.owner) && heading("Open")}
+        {visibleRows.length > 0 && visibleRows.some((r) => r.owner) && !visibleRows[0].owner && heading("This session")}
+        {visibleRows.map((r, i) => (
+          <Fragment key={r.id}>
+          {r.owner && !visibleRows[i - 1]?.owner && heading("Other sessions")}
           <OpenRow
             key={r.id}
             row={r}
@@ -282,6 +316,7 @@ export function TerminalTileMenu({
             onCloseTerminal={() => actions.onCloseTerminal(r.id)}
             onHintTile={actions.onHintTile}
           />
+          </Fragment>
         ))}
         {visibleRepos.length > 0 && (
           <>
@@ -337,6 +372,61 @@ export function TerminalTileMenu({
         >
           ＋ New terminal in home
         </FooterRow>
+        {terminalId && (actions.onRename || actions.onCopyIds || actions.onSessionAction) && (
+          <>
+            {sep}
+            {heading("This terminal")}
+            {renaming ? (
+              <div className="px-3 py-1.5">
+                <input
+                  autoFocus
+                  defaultValue={self?.label ?? ""}
+                  aria-label="Terminal name"
+                  className="w-full rounded-sm px-2 py-1 font-sans"
+                  style={{ fontSize: "12px", border: "1px solid var(--color-rule)", background: "var(--color-paper)", color: "var(--color-ink)" }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      actions.onRename?.(terminalId, e.currentTarget.value.trim());
+                      onClose();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setRenaming(false);
+                    }
+                  }}
+                />
+              </div>
+            ) : actions.onRename && (
+              <FooterRow selected={activeKey === "rename"} onClick={() => setRenaming(true)}>
+                Rename…
+              </FooterRow>
+            )}
+            {actions.onCopyIds && (
+              <FooterRow
+                selected={activeKey === "copy"}
+                caption={agentSession ? "terminal + session" : undefined}
+                onClick={() => {
+                  onClose();
+                  actions.onCopyIds!(terminalId);
+                }}
+              >
+                Copy ids
+              </FooterRow>
+            )}
+            {actions.onSessionAction && (forkable || resumable) && (
+              <FooterRow
+                selected={activeKey === "session"}
+                onClick={() => {
+                  onClose();
+                  actions.onSessionAction!(resumable ? "resume" : "fork", terminalId);
+                }}
+              >
+                {resumable ? "Resume the session in a new terminal" : "Fork the session into a new terminal"}
+              </FooterRow>
+            )}
+          </>
+        )}
         <FooterRow
           selected={activeKey === "zoom"}
           onClick={() => {
@@ -395,9 +485,11 @@ function OpenRow({
   };
   // The location line says "on screen" rather than an unverifiable "tile 3" —
   // "which tile?" is answered by the hover outlining the tile itself.
+  // Another session's terminal names that session first: picking it moves
+  // it here (and off whatever wall had it).
   const where = row.repo
-    ? [row.repo.name, row.subPath || null, tiled ? "on screen" : null]
-    : [row.dir ? tildeify(row.dir, homePath) : "~", tiled ? "on screen" : null];
+    ? [row.owner ?? null, row.repo.name, row.subPath || null, tiled ? "on screen" : null]
+    : [row.owner ?? null, row.dir ? tildeify(row.dir, homePath) : "~", tiled ? "on screen" : null];
 
   return (
     <div

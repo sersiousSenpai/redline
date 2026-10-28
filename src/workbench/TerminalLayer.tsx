@@ -68,18 +68,36 @@ export function selectVisibleWall(state: WorkbenchState): Pane<"terminals"> | nu
 
 // ── The layer ──────────────────────────────────────────────────────────────
 
-type PassThrough = Omit<ComponentProps<typeof TerminalTabs>, "ref" | "wallKey" | "wall" | "onWallChange" | "onPlaceTerminal" | "collapsed" | "solo">;
+type PassThrough = Omit<ComponentProps<typeof TerminalTabs>, "ref" | "wallKey" | "wall" | "onWallChange" | "onPlaceTerminal" | "collapsed" | "solo" | "others">;
 
 export interface TerminalLayerProps extends PassThrough {
   store: WorkbenchStore;
   /** An Agent pane showing its PTY (its CLI view): the layer goes over that
    *  box and shows that one terminal alone. Wins over a wall. */
   cli?: { terminalId: string; el: HTMLElement } | null;
+  /** Each plan session's name, by its set key: the tile menu says whose a
+   *  terminal from another session is. */
+  sessionLabels?: ReadonlyMap<string, string>;
 }
 
+const selectOwners = (s: WorkbenchState) => s.owners;
+const selectActiveKey = (s: WorkbenchState) => s.activeKey;
+
 // Memoized: App renders often, and every prop it passes is stable.
-export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerProps>(function TerminalLayer({ store, cli = null, ...rest }, ref) {
+export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerProps>(function TerminalLayer({ store, cli = null, sessionLabels, ...rest }, ref) {
   const pane = useWorkbench(store, selectVisibleWall);
+  // The tile menu's two groups: this set's terminals, then every other
+  // session's, named (picking one moves it here, `setWall`).
+  const owners = useWorkbench(store, selectOwners);
+  const activeKey = useWorkbench(store, selectActiveKey);
+  const others = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const [id, key] of Object.entries(owners)) {
+      if (key === activeKey) continue;
+      out.set(id, sessionLabels?.get(key) ?? (key === "home" ? "Home" : key.startsWith("launch:") ? "A launch" : "Another session"));
+    }
+    return out;
+  }, [owners, activeKey, sessionLabels]);
   const paneId = pane?.id ?? null;
   const slot = useSyncExternalStore(subscribeSlots, () => (paneId ? (slots.get(paneId) ?? null) : null));
   const target = cli?.el ?? slot;
@@ -116,6 +134,7 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
         onWallChange={onWallChange}
         onPlaceTerminal={onPlaceTerminal}
         solo={cli?.terminalId ?? null}
+        others={others}
         collapsed={!onScreen}
       />
     </div>

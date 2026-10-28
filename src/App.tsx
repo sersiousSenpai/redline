@@ -3320,6 +3320,35 @@ function App() {
     }
     wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "agent", terminalId: id, sessionId: null } });
   };
+  // Resume (a tile's ▾, on an agent terminal whose CLI is no longer
+  // running): the same conversation in a fresh terminal, bound to the
+  // session before the CLI starts, as a restore is, and shown.
+  const resumeCliSession = async (sessionId: string, projectPath: string | null) => {
+    if (!/^[\w.-]+$/.test(sessionId)) return;
+    const id = await openTerminal(projectPath);
+    if (!id) {
+      setToast("Couldn't open a terminal to resume in", 6000);
+      return;
+    }
+    bindSessionTerminals([{ sessionId, terminalId: id }]);
+    const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: `claude --resume ${sessionId}\r` }]);
+    if (!delivery.ok) setToast(`Couldn't resume the session (${delivery.stage}): ${delivery.reason}`, 6000);
+  };
+  // The tile menu's names and session verbs, stable for the memoized layer.
+  const sessionLabels = useMemo(() => new Map(summaries.map((x) => [planKey(x.sessionId), x.titleOverride || x.planTitle || x.projectName || "Plan"])), [summaries]);
+  // Claude's sessions only: fork and resume are `claude --resume` verbs.
+  const agentSessions = useMemo(() => {
+    const codex = new Set(summaries.filter((x) => x.backend === "codex").map((x) => x.sessionId));
+    return new Map([...sessionTerminals].filter(([sessionId]) => !codex.has(sessionId)).map(([sessionId, terminalId]) => [terminalId, sessionId]));
+  }, [sessionTerminals, summaries]);
+  const terminalSessionActionRef = useRef<(kind: "fork" | "resume", terminalId: string) => void>(() => {});
+  terminalSessionActionRef.current = (kind, terminalId) => {
+    const sessionId = agentSessions.get(terminalId);
+    if (!sessionId) return;
+    const projectPath = summaries.find((x) => x.sessionId === sessionId)?.projectPath || null;
+    void (kind === "fork" ? forkCliSession(sessionId, projectPath) : resumeCliSession(sessionId, projectPath));
+  };
+  const terminalSessionAction = useCallback((kind: "fork" | "resume", terminalId: string) => terminalSessionActionRef.current(kind, terminalId), []);
   const liveTermIdsRef = useRef(liveTermIds);
   liveTermIdsRef.current = liveTermIds;
   // How many dock terminals need you (TerminalTabs owns which): the footer
@@ -11231,6 +11260,9 @@ function App() {
             onNeedsYouChange={setTermNeedYou}
             onStatesChange={setTermStatuses}
             cli={cliView}
+            sessionLabels={sessionLabels}
+            agentSessions={agentSessions}
+            onSessionAction={terminalSessionAction}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}

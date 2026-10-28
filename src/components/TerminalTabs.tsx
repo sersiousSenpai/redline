@@ -107,6 +107,8 @@ interface Tab {
   /** A convenience shell an older build auto-spawned into its dock; cleared
    *  the moment the user touches it. Nothing makes one any more. */
   placeholder?: boolean;
+  /** A name the user gave it (the tile menu's Rename). */
+  title?: string;
 }
 
 /** What the host shows about a terminal outside the wall: its state (one
@@ -170,6 +172,15 @@ interface TerminalTabsProps {
   /** Recent repo directories for the tile menu's NEW TERMINAL IN section. The
    *  same list the drafter's launch picker uses. */
   projectOptions?: readonly ProjectOption[];
+  /** Which session each terminal belongs to, as the tile menu groups them:
+   *  `others` names the session of every terminal that is not the set on
+   *  screen's ("Other sessions"; picking one moves it here). Absent, every
+   *  terminal is this session's. */
+  others?: ReadonlyMap<string, string>;
+  /** Agent terminals and the session each runs (fork / resume). */
+  agentSessions?: ReadonlyMap<string, string>;
+  /** The tile menu's Fork / Resume for an agent terminal. */
+  onSessionAction?: (kind: "fork" | "resume", terminalId: string) => void;
   /** An Agent pane's CLI view: this one terminal alone, filling the
    *  layer, with no tile header or gutters — the session's own PTY in its
    *  pane. A view, like a zoom: no shell is spawned or killed, the
@@ -342,6 +353,9 @@ export const TerminalTabs = memo(
       heldTerminalIds,
       heldPlanTitles,
       projectOptions,
+      others,
+      agentSessions,
+      onSessionAction,
       solo = null,
     }: TerminalTabsProps,
     ref,
@@ -533,6 +547,8 @@ export const TerminalTabs = memo(
   focusIdxRef.current = focusIdx;
   const onPlaceRef = useRef(onPlaceTerminal);
   onPlaceRef.current = onPlaceTerminal;
+  const sessionActionRef = useRef(onSessionAction);
+  sessionActionRef.current = onSessionAction;
 
   // ── Grid geometry ─────────────────────────────────────────────────────────
 
@@ -982,7 +998,7 @@ export const TerminalTabs = memo(
       const repoName = resolved?.name ?? "";
       return {
         id: t.id,
-        label: `${base} ${n}`,
+        label: t.title || `${base} ${n}`,
         icon: iconFor(resolved, base),
         repoRoot:
           resolved && repoName && repoName !== base
@@ -1121,6 +1137,7 @@ export const TerminalTabs = memo(
         // Same "really visible" test as the held strip: with the dock
         // collapsed a tile isn't on screen, so the menu shouldn't claim it is.
         tile: collapsed ? null : tileIndex === -1 ? null : tileIndex,
+        owner: others?.get(x.id) ?? null,
       };
     });
     const repos = orderRepos(
@@ -1133,6 +1150,7 @@ export const TerminalTabs = memo(
       rows: orderOpenRows(attachRepos(repos, terminalRefs, homePath), untiledMru),
       repos: repoChoices(repos, terminalRefs, homePath),
       homePath,
+      agents: agentSessions,
     };
   }, [
     identity,
@@ -1149,6 +1167,8 @@ export const TerminalTabs = memo(
     termStates,
     attention,
     procs,
+    others,
+    agentSessions,
   ]);
 
   // ── Tile + terminal operations (side effects live HERE, never in a
@@ -1286,6 +1306,22 @@ export const TerminalTabs = memo(
     setTiles(next);
     const focus = focusIdxRef.current;
     setFocusedTile(Math.max(0, Math.min(focus > at ? focus - 1 : focus, next.length - 1)));
+  };
+
+  const renameTab = (id: string, name: string) => {
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== id) return t;
+      const { title: _old, ...rest } = t;
+      return name ? { ...rest, title: name } : rest;
+    }));
+  };
+
+  // A terminal's ids, for a bug report or a script: its PTY's, and its
+  // session's when it is one's agent.
+  const copyIds = (id: string) => {
+    const session = agentSessions?.get(id);
+    const text = session ? `terminal ${id}\nsession ${session}` : id;
+    void navigator.clipboard?.writeText(text).catch(() => {});
   };
 
   const togglePin = (id: string) => {
@@ -1628,6 +1664,8 @@ export const TerminalTabs = memo(
     refreshAllCwds,
     togglePin,
     beginDrag,
+    renameTab,
+    copyIds,
   });
   handlersRef.current = {
     showInTile,
@@ -1641,6 +1679,8 @@ export const TerminalTabs = memo(
     refreshAllCwds,
     togglePin,
     beginDrag,
+    renameTab,
+    copyIds,
   };
   const tileActions = useMemo<TileActions>(
     () => ({
@@ -1656,6 +1696,9 @@ export const TerminalTabs = memo(
       onRefreshCwds: () => handlersRef.current.refreshAllCwds(),
       onTogglePin: (id) => handlersRef.current.togglePin(id),
       onDragStart: (id, e) => handlersRef.current.beginDrag(id, e),
+      onRename: (id, name) => handlersRef.current.renameTab(id, name),
+      onCopyIds: (id) => handlersRef.current.copyIds(id),
+      onSessionAction: (kind, id) => sessionActionRef.current?.(kind, id),
     }),
     [],
   );

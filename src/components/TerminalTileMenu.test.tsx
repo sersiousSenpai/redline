@@ -72,6 +72,9 @@ function makeActions(): TileActions {
     onRefreshCwds: vi.fn(),
     onTogglePin: vi.fn(),
     onDragStart: vi.fn(),
+    onRename: vi.fn(),
+    onCopyIds: vi.fn(),
+    onSessionAction: vi.fn(),
   };
 }
 
@@ -79,6 +82,7 @@ function mount(
   data: Partial<TerminalMenuData>,
   actions: TileActions,
   onClose: () => void = () => {},
+  terminalId?: string,
 ): { container: HTMLDivElement; root: Root } {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -96,6 +100,7 @@ function mount(
         { value },
         createElement(TerminalTileMenu, {
           tile: 0,
+          terminalId,
           dir: "/Users/dev/redline/src",
           zoomed: false,
           actions,
@@ -267,5 +272,53 @@ describe("terminal tile menu", () => {
     key("Enter");
     expect(actions.onPick).toHaveBeenCalledWith(0, "b");
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("the tile menu across sessions", () => {
+  const headings = () => [...document.body.querySelectorAll(".rl-menu-heading")].map((h) => h.textContent);
+  it("lists this session's terminals first, then Other sessions with the session named; picking one targets this tile", () => {
+    const actions = makeActions();
+    const onClose = vi.fn();
+    mount({ rows: [row("mine", { tile: 0 }), row("theirs", { owner: "Billing plan" })] }, actions, onClose);
+    expect(headings().slice(0, 2)).toEqual(["This session", "Other sessions"]);
+    const texts = rowsIn(menu()!);
+    expect(texts[0]).toContain("mine 1");
+    expect(texts[1]).toContain("theirs 1");
+    expect(texts[1]).toContain("Billing plan");
+    const pick = [...menu()!.querySelectorAll<HTMLButtonElement>("[role='menuitem']")][1];
+    act(() => pick.click());
+    expect(actions.onPick).toHaveBeenCalledWith(0, "theirs");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("a lone session keeps the plain Open heading", () => {
+    mount({ rows: [row("a"), row("b")] }, makeActions());
+    expect(headings()[0]).toBe("Open");
+  });
+
+  it("this terminal: rename inline, copy its ids, and fork a running agent or resume a stopped one", () => {
+    const actions = makeActions();
+    const agents = new Map([["t1", "sess-1"]]);
+    mount({ rows: [row("t1", { tile: 0, state: "working" })], agents }, actions, () => {}, "t1");
+    const item = (label: string) => [...menu()!.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find((b) => b.textContent?.startsWith(label))!;
+    expect(item("Fork the session")).toBeDefined();
+    act(() => item("Fork the session").click());
+    expect(actions.onSessionAction).toHaveBeenCalledWith("fork", "t1");
+    act(() => item("Copy ids").click());
+    expect(actions.onCopyIds).toHaveBeenCalledWith("t1");
+    act(() => item("Rename").click());
+    const input = document.body.querySelector<HTMLInputElement>("input[aria-label='Terminal name']")!;
+    input.value = "api server";
+    act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    expect(actions.onRename).toHaveBeenCalledWith("t1", "api server");
+  });
+
+  it("resume is offered only where the agent is no longer running", () => {
+    const actions = makeActions();
+    mount({ rows: [row("t1", { tile: 0, state: "exited" })], agents: new Map([["t1", "s"]]) }, actions, () => {}, "t1");
+    const texts = rowsIn(menu()!).join("\n");
+    expect(texts).toContain("Resume the session in a new terminal");
+    expect(texts).not.toContain("Fork the session");
   });
 });

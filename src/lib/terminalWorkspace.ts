@@ -14,6 +14,8 @@ export interface TerminalTabState {
   id: string;
   cwd: string | null;
   placeholder?: boolean;
+  /** A name the user gave the terminal. */
+  title?: string;
 }
 
 /** The terminals that outlive a reload, and what was read in them. Which
@@ -48,7 +50,12 @@ export function parseTerminalWorkspace(value: unknown): TerminalWorkspace | null
     if (!tab || typeof tab.id !== "string" || !tab.id || ids.has(tab.id)) continue;
     if (tab.cwd !== null && typeof tab.cwd !== "string") continue;
     ids.add(tab.id);
-    tabs.push({ id: tab.id, cwd: tab.cwd, ...(tab.placeholder === true ? { placeholder: true } : {}) });
+    tabs.push({
+      id: tab.id,
+      cwd: tab.cwd,
+      ...(tab.placeholder === true ? { placeholder: true } : {}),
+      ...(typeof tab.title === "string" && tab.title ? { title: tab.title.slice(0, 80) } : {}),
+    });
   }
   if (!tabs.length) return null;
   const acks: Record<string, AttentionAck> = {};

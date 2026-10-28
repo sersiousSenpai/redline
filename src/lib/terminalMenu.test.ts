@@ -206,6 +206,17 @@ describe("repoChoices", () => {
 });
 
 describe("orderOpenRows", () => {
+  it("leads with this session's terminals, then every other session's", () => {
+    const rows = [
+      { id: "o1", tile: null, owner: "Billing" },
+      { id: "m1", tile: null },
+      { id: "o2", tile: 0, owner: "Auth" },
+      { id: "m2", tile: 1 },
+    ];
+    expect(orderOpenRows(rows, ["m1"]).map((r) => r.id)).toEqual(["m2", "m1", "o2", "o1"]);
+  });
+
+
   it("tiled in tile order, then untiled most-recently-evicted first", () => {
     const rows = [
       term("a", null, { tile: 2 }),

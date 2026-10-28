@@ -317,6 +317,7 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
       {open && (
         <TerminalTileMenu
           tile={tile}
+          terminalId={identity.id}
           dir={identity.dir}
           zoomed={zoomed}
           actions={actions}

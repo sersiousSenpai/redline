@@ -38,6 +38,9 @@ export interface TerminalRef {
   /** What it is doing (lib/termState) and, when serving, its lowest port. */
   state?: TermState;
   port?: number | null;
+  /** The terminal belongs to another session than the one on screen: that
+   *  session's name. Absent (or null) for this session's own terminals. */
+  owner?: string | null;
 }
 
 /** A terminal with its repo attribution resolved. Unlike the old bubble
@@ -178,11 +181,21 @@ export function repoChoices(
   return repos.map((r, i) => ({ ...r, count: counts[i] }));
 }
 
-/** OPEN-section order: tiled terminals in tile order, then untiled ones
- *  most-recently-evicted first (`untiledMru`), then creation order. Eviction
- *  is silent, so the terminal that just left the screen must be the first
- *  reachable row — "put that back" is one click. */
-export function orderOpenRows<T extends { id: string; tile: number | null }>(
+/** OPEN-section order: this session's terminals first, then every other
+ *  session's (`owner` set) — picking one of those moves it here. Within each,
+ *  tiled terminals in tile order, then untiled ones most-recently-evicted
+ *  first (`untiledMru`), then creation order: the terminal that just left
+ *  the screen is the first reachable row, so "put that back" is one click. */
+export function orderOpenRows<T extends { id: string; tile: number | null; owner?: string | null }>(
+  rows: readonly T[],
+  untiledMru: readonly string[],
+): T[] {
+  const mine = rows.filter((r) => !r.owner);
+  const others = rows.filter((r) => !!r.owner);
+  return [...orderWithin(mine, untiledMru), ...orderWithin(others, untiledMru)];
+}
+
+function orderWithin<T extends { id: string; tile: number | null }>(
   rows: readonly T[],
   untiledMru: readonly string[],
 ): T[] {

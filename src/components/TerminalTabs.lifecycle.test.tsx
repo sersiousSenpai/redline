@@ -19,7 +19,7 @@ vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
   return { enqueuePtyOp, focusTerminalView: () => {}, TerminalView: ({ id, visible, onUserInput, onInterrupt }: { id: string; visible: boolean; onUserInput: (id: string) => void; onInterrupt: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button><button data-esc={id} onClick={() => { onUserInput(id); onInterrupt(id); }}>Esc</button></div> };
 });
-vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, pinned, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; pinned: boolean; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void; onTogglePin: (id: string) => void; onDragStart: (id: string, e: unknown) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""} data-pinned={pinned}><button data-pin={identity.id} onClick={() => actions.onTogglePin(identity.id)}>Pin</button><span data-drag={identity.id} onPointerDown={(e) => actions.onDragStart(identity.id, e)}>Drag</span><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
+vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, pinned, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; pinned: boolean; actions: { onPick: (tile: number, id: string) => void; onRename?: (id: string, name: string) => void; onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void; onTogglePin: (id: string) => void; onDragStart: (id: string, e: unknown) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""} data-pinned={pinned}><button data-pin={identity.id} onClick={() => actions.onTogglePin(identity.id)}>Pin</button><button data-pick={identity.id} onClick={() => actions.onPick(tile, (globalThis as { __pick?: string }).__pick!)}>Pick</button><button data-rename={identity.id} onClick={() => actions.onRename?.(identity.id, "api server")}>Rename</button><span data-label={identity.id}>{(identity as { label?: string }).label}</span><span data-drag={identity.id} onPointerDown={(e) => actions.onDragStart(identity.id, e)}>Drag</span><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
 import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
 import { TERMINAL_WORKSPACE_KEY } from "../lib/terminalWorkspace";
@@ -232,6 +232,33 @@ describe("walls: one fleet, many views", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: a });
     expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: b });
     expect(ids()).toEqual([]);
+  });
+
+  it("re-pointing a tile from the menu is a style change in the same frame: no attach, no spawn, the wall sent back", async () => {
+    await mount();
+    const a = await open();
+    const b = await open(true);
+    const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+    mocks.invoke.mockClear();
+    (globalThis as { __pick?: string }).__pick = b;
+    await click(`[data-pick="${a}"]`);
+    expect(tiled()).toEqual([b]);
+    expect([visible(a), visible(b)]).toEqual(["false", "true"]);
+    expect(ptyLifecycle()).toEqual([]);
+    expect(walls.w1.tiles).toEqual([b]);
+    await frame();
+    await frame();
+    expect(lastMeasure("wb:terminal-swap")).not.toBeNull();
+  });
+
+  it("a renamed terminal wears its name, across a reload", async () => {
+    await mount();
+    const a = await open();
+    await click(`[data-rename="${a}"]`);
+    expect(host.querySelector(`[data-label="${a}"]`)?.textContent).toBe("api server");
+    await act(async () => root.render(null));
+    await mount();
+    expect(host.querySelector(`[data-label="${a}"]`)?.textContent).toBe("api server");
   });
 
   it("a menu row's New terminal goes to the host's placement, never into a tile it takes from someone", async () => {
