@@ -298,9 +298,10 @@ impl Term {
         }
         let Some(input) = input else { return Some(Blocker::Unbound) };
         // The shell is in the foreground again: the CLI exited without a
-        // SessionEnd (experiment (m): a killed CLI sends none).
+        // SessionEnd (experiment (m): a killed CLI sends none). It was live
+        // (a hook fired), so it stopped — not one still starting.
         if !input.cli_foreground {
-            return Some(Blocker::Unbound);
+            return Some(Blocker::Exited);
         }
         if !input.paste_mode {
             return Some(Blocker::NoPasteMode);
@@ -316,6 +317,14 @@ impl Term {
 
     fn refresh(&mut self, input: Option<InputState>) {
         let blocker = self.blocker(input);
+        // The CLI just left a terminal that lives on (the last walk's killed
+        // build): whatever it had open is over. Its turn ends and its asks
+        // close, so the stage stops spinning and shows the stop instead.
+        if blocker == Some(Blocker::Exited) && !matches!(self.readiness, Some((_, Some(Blocker::Exited)))) {
+            self.close_asks("expired", |_| true);
+            self.dialog = false;
+            self.ended_by_host();
+        }
         let now = (blocker.is_none(), blocker);
         if self.readiness != Some(now) {
             self.readiness = Some(now);
@@ -962,6 +971,7 @@ impl Term {
         }
         let reason = match self.blocker(input)? {
             Blocker::Unbound | Blocker::NoPasteMode => "The session isn't ready yet.",
+            Blocker::Exited => "The session isn't running.",
             Blocker::NativeDialog => "A dialog is open in the terminal.",
             Blocker::DirtyInput => "There is unsent text in the terminal.",
         };

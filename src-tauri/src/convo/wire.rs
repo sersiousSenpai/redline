@@ -98,6 +98,10 @@ impl Body {
 #[serde(rename_all = "snake_case")]
 pub enum Blocker {
     Unbound,
+    /// The CLI ran here and is gone: the session was live (its hooks fired)
+    /// and the shell is back in front, with no SessionEnd (killed, crashed).
+    /// The PTY lives on, so nothing else says the agent stopped.
+    Exited,
     NoPasteMode,
     NativeDialog,
     DirtyInput,

@@ -389,7 +389,7 @@ fn readiness_names_the_first_thing_in_the_way() {
     assert_eq!(term.blocker(ready()), Some(Blocker::Unbound));
     term.apply_fire(fire("startup", "s", Path::new("/nope/s.jsonl")));
     assert_eq!(term.blocker(None), Some(Blocker::Unbound), "no PTY");
-    assert_eq!(term.blocker(input(true, false, false)), Some(Blocker::Unbound), "the shell is back in front");
+    assert_eq!(term.blocker(input(true, false, false)), Some(Blocker::Exited), "the shell is back in front of a live session");
     assert_eq!(term.blocker(input(false, false, true)), Some(Blocker::NoPasteMode));
     assert_eq!(term.blocker(input(true, true, true)), Some(Blocker::DirtyInput));
     term.dialog = true;
@@ -402,6 +402,43 @@ fn readiness_names_the_first_thing_in_the_way() {
     assert_eq!(term.blocker(ready()), Some(Blocker::Unbound), "/exit");
     term.hook(&json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "session_id": "s"}));
     assert!(term.dialog, "a dialog the hooks never saw");
+}
+
+#[test]
+fn a_cli_killed_in_a_living_terminal_ends_its_turn_and_reads_exited() {
+    // The last walk: the build's claude killed, its shell alive, the stage
+    // spinning "Waiting for Claude to start" for twenty minutes.
+    let mut term = Term::default();
+    let input = |cli_foreground| Some(InputState { paste_mode: true, dirty: false, cli_foreground });
+    // Prebound (a restore) and not running yet: still starting, not a stop.
+    term.apply_fire(fire("restore", "s", Path::new("/nope/s.jsonl")));
+    term.live = false;
+    assert_eq!(term.blocker(input(false)), Some(Blocker::Unbound));
+    // Its SessionStart: live, the CLI in front, a turn running with a card.
+    term.apply_fire(fire("resume", "s", Path::new("/nope/s.jsonl")));
+    let (channel, batches) = recorder();
+    term.subscribe(channel, input(true));
+    term.hook(&json!({"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "build it"}));
+    let _rx = term.open_ask("s", permission("k1", "Write", "notes.txt"), None, json!({})).unwrap();
+    term.refresh(input(true));
+    assert!(term.working);
+    // Killed: no SessionEnd, the shell back in front.
+    term.refresh(input(false));
+    assert_eq!(term.readiness, Some((false, Some(Blocker::Exited))));
+    assert!(!term.working && term.asks.is_empty() && !term.dialog);
+    flush_all(&mut term);
+    let got = delivered(&batches);
+    for kind in ["ask_closed", "turn_end", "readiness"] {
+        assert!(got.contains(&kind.to_string()), "{kind} in {got:?}");
+    }
+    // Said once: a second sample changes nothing.
+    let before = delivered(&batches).len();
+    term.refresh(input(false));
+    flush_all(&mut term);
+    assert_eq!(delivered(&batches).len(), before);
+    // A new claude in the same terminal is live again.
+    term.refresh(input(true));
+    assert_eq!(term.readiness, Some((true, None)));
 }
 
 fn permission(id: &str, tool: &str, summary: &str) -> ConvoAsk {

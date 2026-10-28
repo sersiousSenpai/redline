@@ -1365,7 +1365,10 @@ fn start_companion_turn(
             return Ok(());
         }
         crate::monochat::conversation_budget(&companion.db, &companion_id)?;
-        emit_companion_status(&app, &companion_id, "Preparing chat context");
+        // No status while the context is gathered, the model starts or the
+        // request waits (D28): only the wait, and the stage's shared Spinner
+        // says it ("Replying"). A real step — a page, a memory read, a tool —
+        // still names itself.
         // Read through the app handle rather than as command arguments: the
         // drain path has no `tauri::State` of its own, and both cells are
         // exactly the kind of "where are they NOW" fact that must not be
@@ -1606,7 +1609,6 @@ fn start_companion_turn(
         let cwd = resolve_cwd(companion.db.companion_project(&companion_id).or(cwd));
         let snapshot = if mode == TurnMode::Build { let root = cwd.clone(); Some(tokio::task::spawn_blocking(move || crate::companion_build::Snapshot::capture(&root)).await.map_err(|error| error.to_string())??) } else { None };
 
-        emit_companion_status(&app, &companion_id, "Starting the selected model");
         let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline).workspace_write(mode == TurnMode::Build));
         let binary = if codex { crate::codex_app_server::resolve_codex_bin() } else { companion.claude_bin().await? };
         let cold_args = if codex {
@@ -1674,7 +1676,6 @@ fn start_companion_turn(
             }
             return Ok(());
         }
-        emit_companion_status(&app, &companion_id, "Waiting for the model");
         tauri::async_runtime::spawn(read_companion(
             app,
             companion,

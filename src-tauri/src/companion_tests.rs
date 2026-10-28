@@ -1001,3 +1001,20 @@ fn handoff_seed_is_exact_idempotent_and_does_not_send_a_turn() {
     assert_eq!(first.id,again.id);assert_eq!(first.created_at,again.created_at);assert_eq!(again.body,body);assert_eq!(db.load_companion_thread("seed").unwrap().len(),1);assert_eq!(db.companion_project("seed").as_deref(),Some("/project"));
     assert!(db.seed_companion_handoff("seed","nonce","different",None,30).unwrap().is_none());assert!(db.seed_companion_handoff("missing","other",body,None,40).unwrap().is_none());
 }
+
+/// D28: before the first token a chat's reply row is the Spinner alone. The
+/// daemon's own wait words reached it as `companion-status` (the last walk's
+/// "Preparing chat context", then "Waiting for the model"); a status is for
+/// a step of work, never the wait.
+#[test]
+fn a_turn_sends_no_waiting_words_as_its_status() {
+    let source = include_str!("companion.rs");
+    for words in ["Preparing chat context", "Starting the selected model", "Waiting for the model", "Preparing your reply"] {
+        assert!(
+            !source.contains(&format!("emit_companion_status(&app, &companion_id, \"{words}\")")),
+            "{words} is a wait, not a step"
+        );
+    }
+    // A real step still names itself.
+    assert!(source.contains("\"Opening the requested page\""));
+}
