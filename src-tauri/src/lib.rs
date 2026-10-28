@@ -739,6 +739,45 @@ fn mark_session_detached(app: &AppHandle, store: &SessionStore, session_id: &str
     refresh_tray(app, store);
 }
 
+/// Does a plan session's agent exiting (the PTY it ran in is gone) reconcile
+/// it to `Detached` now? Only while it is in review, not already detached,
+/// and holding no POST — a held one's own drop-guard fires when the
+/// connection closes, so this is the revising agent the revise watchdog would
+/// otherwise take 90 s to call. The watchdog's liveness gate applies: a
+/// `claude` still alive (it was not in that PTY after all) is never declared
+/// dead; a pid never captured trusts the exit.
+fn agent_exit_detaches(in_review: bool, detached: bool, held: bool, liveness: Option<bool>) -> bool {
+    in_review && !detached && !held && liveness != Some(true)
+}
+
+/// The frontend saw the PTY a plan session runs in exit (and not because the
+/// reviewer closed it): reconcile now instead of on the watchdog's next probe.
+/// The `session-detached` it emits is what the automatic resume
+/// (`src/lib/useAutoResume.ts`) answers. Returns whether it detached.
+#[tauri::command]
+async fn report_agent_exit(app: AppHandle, session_id: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<SessionStore>();
+        let Some(session) = store.get(&session_id) else { return false };
+        let in_review = matches!(session.status, SessionStatus::InReview);
+        let detached = session.attach_state == AttachState::Detached;
+        let held = app.state::<PendingResponses>().has(&session_id);
+        let liveness = if in_review && !detached && !held {
+            app.state::<LastClaudePid>().get(&session_id).map(|p| p.is_alive())
+        } else {
+            None
+        };
+        if !agent_exit_detaches(in_review, detached, held, liveness) {
+            return false;
+        }
+        tracing::warn!(session_id = %session_id, "plan agent's terminal exited — marking detached");
+        mark_session_detached(&app, &store, &session_id);
+        true
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Records, per session, the submission mode of the most recent
 /// `submit_review` so the *next* inbound plan can be classified as an
 /// Ask round-trip (plan body unchanged + answers in resolutions) rather
@@ -11624,6 +11663,7 @@ pub fn run() {
             bootstrap_state,
             claim_review,
             arm_restore,
+            report_agent_exit,
             prepare_restore,
             show_main_window,
             get_hook_status,

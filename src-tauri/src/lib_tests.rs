@@ -1596,6 +1596,20 @@ fn watchdog_step_decision_table() {
 }
 
 #[test]
+fn agent_exit_detaches_only_a_live_review_whose_agent_is_gone() {
+    // A revising plan (in review, holding no POST) whose agent's PTY exited.
+    assert!(agent_exit_detaches(true, false, false, Some(false)), "dead → detach now");
+    assert!(agent_exit_detaches(true, false, false, None), "no pid captured → trust the exit");
+    // The liveness gate: a claude still alive was not in that PTY.
+    assert!(!agent_exit_detaches(true, false, false, Some(true)), "alive → never declared dead");
+    // A held POST's own drop-guard reports it when the connection closes.
+    assert!(!agent_exit_detaches(true, false, true, None), "held → the drop-guard's job");
+    // Already detached, or no longer in review: nothing to reconcile.
+    assert!(!agent_exit_detaches(true, true, false, None), "already detached");
+    assert!(!agent_exit_detaches(false, false, false, Some(false)), "approved / closed");
+}
+
+#[test]
 fn take_if_owned_only_removes_matching_token() {
     let pending = PendingResponses::new();
     let (_rx1, token1) = pending.register("s1", None).expect("first register");
