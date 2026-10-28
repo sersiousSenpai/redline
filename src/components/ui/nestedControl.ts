@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! A small control inside another control's `<button>`: the classic session
-//! row's project line, plan-state label and run chip all sit inside the row's
+//! row's project line and plan-state label sit inside the row's
 //! own button. Interactive content can't nest in a button (React warns on
 //! every render, and HTML says the inner one is invalid), so these are spans
 //! that keep a button's keys (Enter, Space), its focus stop, and the look a

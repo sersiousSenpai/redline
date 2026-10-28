@@ -72,10 +72,7 @@ export interface SeatRosterEntry {
 /** Compact token count: 950 → "950", 12400 → "12.4k", 2000000 → "2M".
  *
  *  Lives in `lib/turnMeter` now — the turn footer needed the same formatter,
- *  and a third copy is how the first two happened. (NOT the same function as
- *  `orchestration.ts`'s `formatTokens`, which rounds harder — `887k` where
- *  this reads `887.2k`. Two deliberately different formatters, not a
- *  duplicate; the Runs surface's tests pin its rounding.) */
+ *  and a third copy is how the first two happened. */
 export { formatTokens };
 
 /** "never ran" / "just now" / "12m ago" / "3h ago" / "5d ago". */
@@ -163,7 +160,6 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
       { name: "ai_review", label: "AI code review" },
       { name: "ai_commit", label: "Commit drafter" },
       { name: "browse_locator", label: "Browser list locator" },
-      { name: "orchestrator", label: "Plan orchestrator" },
       { name: "harness", label: "Shelf agents" },
     ],
   },

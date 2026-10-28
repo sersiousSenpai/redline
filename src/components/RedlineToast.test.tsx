@@ -129,7 +129,6 @@ describe("toast call sites", () => {
       "src/App.tsx",
       "src/components/ActivationBar.tsx",
       "src/components/BuildRedlinePanel.tsx",
-      "src/components/OrchestrationSurface.tsx",
     ]) {
       const src = readFileSync(join(process.cwd(), rel), "utf8");
       expect(src, rel).not.toMatch(/setTimeout\(\s*\(\)\s*=>\s*(setToast|onToast)\(null\)/);

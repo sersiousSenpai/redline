@@ -210,35 +210,3 @@ export function tomlString(value: string): string {
 /** Tools the launched plan session may use without prompting. Space-separated
  *  for the `--allowedTools` variadic flag, matching the agent-spawn convention. */
 const ALLOWED_TOOLS = "Read Grep Glob WebSearch WebFetch Bash";
-
-/** The bare launch for a SCALED build's lead (Track O). It deliberately
- *  carries no prompt: the multi-agent Workflow opt-in is gated on input
- *  *origin* (human-typed beats argv-positional), so `buildScaledPrompt` is
- *  typed once claude is up. `--settings` adds the
- *  run's own pre-flight and budget hooks for THIS session only; `--model` and
- *  `--effort` are hard limits every workflow agent inherits. Always `cd`s: a
- *  write-capable team must never start in the home directory. */
-export function buildScaledLaunchCommand(
-  projectPath: string,
-  settingsPath: string,
-  model: string,
-  effort: string | null,
-): string {
-  const effortFlag = effort ? ` --effort ${shq(effort)}` : "";
-  return (
-    `cd ${shq(projectPath)} && claude --settings ${shq(settingsPath)} ` +
-    `--permission-mode acceptEdits --model ${shq(model)}${effortFlag}`
-  );
-}
-
-/** The lead's typed prompt: ONE line (Enter submits typed input). The brief
- *  route carries the plan, the budget and the contract, so this stays short
- *  and the curl shape is the pre-authorized bridge GET. */
-export function buildScaledPrompt(sessionId: string, runId: string): string {
-  return (
-    `ultracode: build the approved plan for Redline session ${sessionId} as ONE ` +
-    `multi-agent workflow within its budget. First read your brief: ` +
-    `curl -s http://127.0.0.1:7676/v1/scaled/${runId}/brief — it has the plan, ` +
-    `the agent and model budget, and the reporting steps.`
-  );
-}

@@ -581,7 +581,6 @@ function defaultData(kind: PaneKind, paneId: string, key: SessionKey): PaneDataB
       return { tiles: [], focus: 0, zoomed: null, pinned: [] };
     case "servers":
     case "memory":
-    case "runs":
       return {};
     default:
       return undefined;

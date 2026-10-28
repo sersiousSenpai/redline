@@ -103,7 +103,7 @@ const restoreStamp = (now: Date) => {
 };
 
 /** Compact form of the rescission clause. The resumed session's context still
- *  holds the ORCHESTRATE_STAND_DOWN deny ("this session's work is done"), and
+ *  holds the build-later stand-down deny ("do not implement"), and
  *  without a sentence voiding it a resumed claude obeys the stale stand-down
  *  instead of the restore — so it stays in the VISIBLE trigger rather than
  *  riding only the hidden context. `restore_context.rs` carries the full

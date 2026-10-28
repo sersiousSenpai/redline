@@ -80,20 +80,9 @@ describe("one launch pipeline", () => {
     expect(hits, `built in ${hits} places`).toBe(1);
   });
 
-  it("a team build's lead is launched in exactly one place, with its own hooks and a cd", () => {
-    // The scaled build's lead runs acceptEdits with the run's pre-flight and
-    // budget hooks; a second construction site is how one would launch
-    // without them (unbudgeted) or without the cd (in the home directory).
-    expect(countIn("src", "buildScaledLaunchCommand(")).toBe(1);
-    expect(countIn("src", "buildScaledPrompt(")).toBe(1);
-    const builder = read("src/lib/planLaunchCommand.ts");
-    const body = builder.slice(builder.indexOf("export function buildScaledLaunchCommand("));
-    expect(body.slice(0, body.indexOf("\n}\n"))).toContain("cd ${shq(projectPath)} && claude --settings");
-  });
-
   it("the run launch command is built in exactly one place, and only runs skip the sandbox", () => {
-    // "Just run it" and the approved-plan hand-off launch through the same
-    // builder. The bypass flag is the user's explicit choice for a RUN; a
+    // The approved-plan hand-off and the chat/mission builds launch through
+    // the same builder. The bypass flag is the user's explicit choice for a RUN; a
     // second site writing it is how a plan session could lose its sandbox.
     expect(countIn("src", "buildRunLaunchCommand(")).toBe(1);
     // The literal lives only in its exported constant (`countIn` skips the
@@ -117,13 +106,13 @@ describe("one launch pipeline", () => {
   it("a run never claims a plan: it skips the intercept registry and the pending card", () => {
     const launch = app.slice(app.indexOf("const launchPlan ="), app.indexOf('// "Run" on a Localhost'));
     expect(launch).toContain("if (!run) launchedPlansRef.current.set(launchId, pending);");
-    const branch = launch.slice(launch.indexOf("    if (run) {\n      // Its own pill"));
+    const branch = launch.slice(launch.indexOf("    if (run) {\n      // A run sends no plan"));
     const body = branch.slice(0, branch.indexOf("\n    }\n"));
     expect(body.length).toBeGreaterThan(0);
     expect(body).not.toContain("setPendingLaunch(");
     expect(body).toContain("return { ok: true");
     // …and it returns before the plan card is ever set.
-    expect(launch.indexOf("    if (run) {\n      // Its own pill")).toBeLessThan(launch.indexOf("setPendingLaunch(pending)"));
+    expect(launch.indexOf("    if (run) {\n      // A run sends no plan")).toBeLessThan(launch.indexOf("setPendingLaunch(pending)"));
   });
 
   it("the ledger write is followed by a .catch — the missing one, as a guard", () => {
@@ -204,7 +193,7 @@ describe("one launch pipeline", () => {
     // `src-tauri/src/combine_contract.txt` — if any of them appear in src/,
     // someone has started composing the brief here again.
     for (const prose of [
-      "orchestration-ready plan",
+      "deliberately shaped for multi-agent execution",
       "Depends on: Track",
       "Verification per track",
     ]) {

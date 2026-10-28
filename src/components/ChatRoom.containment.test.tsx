@@ -104,7 +104,7 @@ describe("Home chat containment", () => {
     const base: FrontDoorProps = {
       floating: true, visible: true, choice: null, onChoiceChange() {}, projectOptions: [], openFolder: null, lastLaunchProject: null, onResolvedProjectChange() {},
       attachments: [], onAttachmentsChange() {}, readiness: [], onFix: async () => true, pending: null, onLaunch() {}, refusal: null,
-      onDrafter() {}, onRun() {}, onChat() {}, chatEnabled: true, destination: "chat", onDestinationChange() {},
+      onDrafter() {}, onChat() {}, chatEnabled: true, destination: "chat", onDestinationChange() {},
       backend: { backend: "codex", model: null, effort: null }, onBackendChange() {}, modelCatalogs: {}, onNeedModels() {},
       onCancelPending() {}, onRevealPending() {}, onCreateProject: async () => null, focusNonce: 0, consumeSeed: () => "",
     };

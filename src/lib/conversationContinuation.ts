@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 export type ConversationKind = "browse" | "companion" | "drafter";
-export type ContinueDestination = "drafter" | "plan" | "run" | "auto";
+export type ContinueDestination = "drafter" | "plan" | "run";
 export interface ContinuationMessage { id: string; role: string; body: string; status: string }
 export interface ConversationSource { conversationKind: ConversationKind; conversationId: string; messages: ContinuationMessage[] }
 export interface ContinueRequest { source: Omit<ConversationSource, "messages"> & { messageIds: string[]; idempotencyKey: string }; markdown: string; destination?: ContinueDestination }

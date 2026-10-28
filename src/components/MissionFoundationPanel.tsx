@@ -11,7 +11,7 @@ interface Props {
   tabIds?: string[];
   initialBrief?: string;
   onOpenDraft?: (draftId: string) => void;
-  onContinue?: (destination: "plan" | "auto", body: string, handoffId: string) => void;
+  onContinue?: (destination: "plan", body: string, handoffId: string) => void;
 }
 
 function Question({ question, disabled, resolve }: { question: MissionQuestion; disabled: boolean;
@@ -111,11 +111,11 @@ export function MissionFoundationPanel({ missionId, tabIds = [], initialBrief = 
       {state?.captures.slice(0, 20).map(capture => <article key={capture.id}><strong>{capture.frameCount ?? 1} frame{capture.frameCount === 1 ? "" : "s"} · {capture.status}</strong><small>{capture.startedAt ? new Date(capture.startedAt).toLocaleString() : "Saved capture"} · {Math.ceil(capture.byteSize / 1024)} KB</small>{capture.url && <small>{capture.url}</small>}<button type="button" aria-expanded={openCapture === capture.id} onClick={() => setOpenCapture(current => current === capture.id ? null : capture.id)}>{openCapture === capture.id ? "Close recording" : "Review recording"}</button>{openCapture === capture.id && <MissionCapturePlayer key={`${missionId}:${capture.id}`} missionId={missionId} captureId={capture.id}/>}</article>)}
     </div>}
     {section === "continue" && <div className="mission-foundation-body">
-      <label>Destination<select value={destination} onChange={e => { setDestination(e.target.value as HandoffDestination); setPrepared(null); }}><option value="drafter">Prompt Drafter</option><option value="plan">AI model plan</option><option value="auto">Auto session</option></select></label>
+      <label>Destination<select value={destination} onChange={e => { setDestination(e.target.value as HandoffDestination); setPrepared(null); }}><option value="drafter">Prompt Drafter</option><option value="plan">AI model plan</option></select></label>
       <label>Editable brief<textarea rows={10} value={brief} onChange={e => { setBrief(e.target.value); setPrepared(null); }} placeholder="Objective, confirmed decisions, constraints, requirements, evidence, open questions, and acceptance criteria…"/></label>
       <small>The source conversation, linked findings, and exact artifact revision stay attached. Model and project choices use the existing launch flow.</small>
       <button type="button" disabled={busy || !brief.trim()} onClick={() => void act<MissionHandoff>({ op: "prepareHandoff", destination, body: brief, messageIds: [], idempotencyKey: crypto.randomUUID() }).then(result => { if (result) setPrepared(result); })}>Prepare source-linked brief</button>
-      {prepared && <button type="button" disabled={busy || (prepared.destination === "drafter" ? !onOpenDraft : !onContinue)} onClick={() => void deliver(prepared)}>Continue to {prepared.destination === "drafter" ? "Drafter" : prepared.destination === "plan" ? "model plan" : "auto session"}</button>}
+      {prepared && <button type="button" disabled={busy || (prepared.destination === "drafter" ? !onOpenDraft : !onContinue)} onClick={() => void deliver(prepared)}>Continue to {prepared.destination === "drafter" ? "Drafter" : "model plan"}</button>}
       {state?.handoffs.map(handoff => <article key={handoff.id}><strong>{handoff.destination} · {handoff.status}</strong><small>{new Date(handoff.createdAt).toLocaleString()}</small><button type="button" disabled={handoff.destination === "drafter" ? !onOpenDraft : !onContinue} onClick={() => void deliver(handoff)}>{handoff.status === "delivered" ? "Open handoff" : "Continue prepared brief"}</button></article>)}
     </div>}
   </section>;

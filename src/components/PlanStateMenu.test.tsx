@@ -22,7 +22,7 @@ it("represents approved without a run as not built, and permits completion", () 
   act(() => choices[2].click()); expect(actions.onState).toHaveBeenCalledWith('completed');
   expect(document.activeElement).toBe(host.querySelector('button'));
 });
-it.each([{status:'in_review',held:true}, {status:'approved',runState:'running'}])("blocks manual state changes for live work", session => {
+it.each([{status:'in_review',held:true}])("blocks manual state changes for live work", session => {
   const actions = menu(session);
   const choices = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
   expect(choices.every(c => c.disabled && c.title)).toBe(true);

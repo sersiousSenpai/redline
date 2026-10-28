@@ -10,9 +10,8 @@
 //! Doc controls never hide: Contents lives here, and the floating zoom +
 //! width pill stands above the footer (styles.css seats it).
 
-import { useMemo, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
-import { useOrchestration } from "../../hooks/useOrchestration";
 import { feedbackSummary } from "../../lib/feedbackThreads";
 import { latestDisplayVersion } from "../../lib/revisionVersions";
 import type { Comment, ReviewSession } from "../../types";
@@ -21,16 +20,6 @@ import { PlanPanelFooter, footerTally, type PlanPanelFooterProps } from "./PlanP
 import { PlanPanelHeader, type PlanMenuItem } from "./PlanPanelHeader";
 import type { VersionPillProps } from "./VersionPill";
 import "./plan.css";
-
-/** "step 3 of 11" off a live run's totals: agents done, plus the one running. */
-export function buildProgress(
-  run: { totals: { plannedAgents: number | null; done: number; running: number } } | null,
-): { step: number; of: number } | null {
-  const of = run?.totals.plannedAgents ?? null;
-  if (!run || !of || of < 1) return null;
-  const step = Math.min(of, run.totals.done + (run.totals.running > 0 ? 1 : 0));
-  return step > 0 ? { step, of } : null;
-}
 
 /** The plan's own actions, each run on this session and the version shown. */
 export interface PlanMenuActions {
@@ -63,10 +52,6 @@ export interface PlanPaneProps {
 
 export default function PlanPane(p: PlanPaneProps) {
   const { sessionId, session, latestVersion } = p;
-  // "Building v4: step 3 of 11": an orchestrated build's own count, read
-  // here (off the boot path) while its run is live.
-  const run = useOrchestration(sessionId, !!p.footer.approval?.runLive);
-  const progress = useMemo(() => buildProgress(run), [run]);
   const marks = footerTally(p.comments, p.footer.waiting).marks;
   const shownVersion = p.viewing ? p.viewing.viewing : latestVersion;
   const shown = session?.revisions.find((r) => r.versionNumber === shownVersion)?.comments ?? [];
@@ -105,7 +90,6 @@ export default function PlanPane(p: PlanPaneProps) {
         {...p.footer}
         comments={p.comments}
         detached={p.notices.detached ? (p.notices.detached.restoring ? "restoring" : "ended") : null}
-        progress={p.footer.progress ?? progress}
       />
     </section>
   );

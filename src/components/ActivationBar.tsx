@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// The one piece of Build Redline that lives outside Runs.
+// The one piece of Build Redline that is mounted.
 //
 // Preparing a replacement takes as long as it takes, and the user is somewhere
 // else while it happens. When it finishes, something has to say so — once,
@@ -66,7 +66,9 @@ type Phase =
   | { kind: "report"; report: ActivationReport };
 
 interface ActivationBarProps {
-  onOpenBuildRedline: () => void;
+  /** Opens the Build Redline panel. Absent while that panel has no host
+   *  (its Runs home was cut); the bar then offers no way there. */
+  onOpenBuildRedline?: () => void;
   onToast: (message: string) => void;
 }
 
@@ -249,9 +251,11 @@ export function ActivationBar({ onOpenBuildRedline, onToast }: ActivationBarProp
                 keeps running until you say so.
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button type="button" style={ghost} onClick={onOpenBuildRedline}>
-                  Review changes
-                </button>
+                {onOpenBuildRedline && (
+                  <button type="button" style={ghost} onClick={onOpenBuildRedline}>
+                    Review changes
+                  </button>
+                )}
                 <button
                   type="button"
                   style={primary}
@@ -310,9 +314,11 @@ export function ActivationBar({ onOpenBuildRedline, onToast }: ActivationBarProp
                 <div style={{ color: "var(--color-ink-muted)" }}>{phase.report.message}</div>
               )}
               <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-                <button type="button" style={ghost} onClick={onOpenBuildRedline}>
-                  Open Build Redline
-                </button>
+                {onOpenBuildRedline && (
+                  <button type="button" style={ghost} onClick={onOpenBuildRedline}>
+                    Open Build Redline
+                  </button>
+                )}
                 <button type="button" style={ghost} onClick={() => setPhase({ kind: "idle" })}>
                   Dismiss
                 </button>

@@ -106,7 +106,9 @@ describe("the stored shape", () => {
             p1: { id: "p1", kind: "door", data: { draftKey: "" } },
             bad: { id: "bad", kind: "plan", data: {} },
             unused: { id: "unused", kind: "memory", data: {} },
-            wrong: { id: "other", kind: "runs", data: {} },
+            wrong: { id: "other", kind: "servers", data: {} },
+            // The Runs place was cut: a stored runs pane is dropped like any unknown kind.
+            runs: { id: "runs", kind: "runs", data: {} },
             t: { id: "t", kind: "terminals", data: { tiles: ["a", "a", 3, "b"], focus: 9, zoomed: "zz", pinned: ["b", "q"] } },
           },
           closed: [{ tab: { id: "c", root: { pane: "cp" } }, panes: [{ id: "cp", kind: "file", data: { path: "/f", line: -1 } }], index: 1.5 }, "junk"],
@@ -188,7 +190,7 @@ describe("persistWorkbench", () => {
     store.dispatch({ type: "openTab", pane: { kind: "memory", data: {} }, tabId: "m" });
     vi.advanceTimersByTime(200);
     expect(storage.getItem(WORKBENCH_KEY)).toBeNull();
-    store.dispatch({ type: "openTab", pane: { kind: "runs", data: {} }, tabId: "r" });
+    store.dispatch({ type: "openTab", pane: { kind: "servers", data: {} }, tabId: "r" });
     vi.advanceTimersByTime(200);
     expect(storage.getItem(WORKBENCH_KEY)).toBeNull();
     vi.advanceTimersByTime(60);

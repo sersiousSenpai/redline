@@ -282,7 +282,7 @@ export function MemoryStatusPill({
             <div style={row}>
               <span style={muted}>Ready work</span>
               <span>
-                {readyWork} item{readyWork === 1 ? "" : "s"} · Runs → Work
+                {readyWork} item{readyWork === 1 ? "" : "s"}
               </span>
             </div>
           )}

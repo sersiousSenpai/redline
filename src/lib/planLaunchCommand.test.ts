@@ -296,24 +296,3 @@ describe("buildRunLaunchCommand", () => {
     expect(() => buildRunLaunchCommand("go", null, [], { backend: "antigravity", model: null, effort: null })).toThrow();
   });
 });
-
-describe("scaled build launch (Track O)", () => {
-  it("cds, carries the run's settings and pins the model, effort optional", async () => {
-    const { buildScaledLaunchCommand } = await import("./planLaunchCommand");
-    expect(buildScaledLaunchCommand("/Users/me/redline", "/data/scaled/sb-1.json", "sonnet", null)).toBe(
-      "cd '/Users/me/redline' && claude --settings '/data/scaled/sb-1.json' --permission-mode acceptEdits --model 'sonnet'",
-    );
-    expect(buildScaledLaunchCommand("/tmp/o'brien", "/s.json", "opus", "high")).toContain(
-      "cd '/tmp/o'\\''brien' && claude --settings '/s.json' --permission-mode acceptEdits --model 'opus' --effort 'high'",
-    );
-  });
-
-  it("types one ultracode line that points at the brief", async () => {
-    const { buildScaledPrompt } = await import("./planLaunchCommand");
-    const prompt = buildScaledPrompt("plan-1", "sb-abc");
-    expect(prompt.startsWith("ultracode: ")).toBe(true);
-    expect(prompt).not.toContain("\n");
-    expect(prompt).toContain("curl -s http://127.0.0.1:7676/v1/scaled/sb-abc/brief");
-    expect(prompt).toContain("Redline session plan-1");
-  });
-});

@@ -13,7 +13,6 @@ export type MainSurface =
   | "review"
   | "servers"
   | "memory"
-  | "runs"
   // The chat room: the Front Door's third destination, springing into the
   // document plate exactly as the Drafter does. It earns NO header button —
   // its entries are the door's destination and the recent-chat pills.

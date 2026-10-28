@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 export const MISSION_CONTEXT_SCOPE = ["mandate", "artifact", "evidence", "judgments", "procedure", "runHistory"] as const;
 export const SECURITIES_DEV_HOSTS = ["www.rgrdlaw.com", "robbinsllp.com", "www.glancylaw.com", "pomlaw.com", "www.rosenlegal.com", "www.hbsslaw.com", "faruqilaw.com", "schallfirm.com", "www.bernlieb.com", "zlk.com", "www.blbglaw.com", "scott-scott.com"];
 export const SECURITIES_DEV_MANDATE = "Monitor these plaintiff-side firm websites daily for securities investigations, Rule 10b-5 and Section 11 announcements, filed actions, class periods, published lead-plaintiff deadlines, notices, press releases, and dated market observations. Explain relevance and cite dated sources. Distinguish investigation announcements from evidence of a filed action. Recheck time-sensitive dates, retain missing or conflicting dates, and report source failures as partial coverage. Deduplicate across publishers and runs; use confirmed examples when ranking opportunities. Propose additional sources and trends for user review, and distinguish observed publishing patterns from broader interpretations.";
-export type HandoffDestination = "drafter" | "plan" | "auto";
+export type HandoffDestination = "drafter" | "plan";
 export interface MissionHandoff {
   id: string; missionId: string; draftId: string; body: string;
   destination: HandoffDestination; status: "prepared" | "launching" | "uncertain" | "delivered";

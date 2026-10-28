@@ -52,22 +52,22 @@ describe("a plan row's mode, in the top bar's words", () => {
     expect(planRowMode(plan("p", over), busy)).toBe(mode);
   });
 
-  it("building is one agent or a run that has not landed", () => {
-    expect(["building", "orchestrating", "running"].every(isBuildingRunState)).toBe(true);
-    expect(["in_code_review", "awaiting_review", "landed", "stalled", "abandoned", null].some(isBuildingRunState)).toBe(false);
+  it("building is one agent at work in its terminal", () => {
+    expect(isBuildingRunState("building")).toBe(true);
+    // The cut run feature's states, and the done ones, are not building.
+    expect(["orchestrating", "running", "in_code_review", "awaiting_review", "landed", "stalled", "abandoned", null].some(isBuildingRunState)).toBe(false);
   });
 });
 
 describe("which section a row sorts into", () => {
   it.each([
     ["a held plan awaiting review (redlining)", plan("x", { status: "in_review", held: true, awaitingReview: true }), "din", null],
-    ["a run waiting on its code review", plan("x", { runState: "in_code_review" }), "Needs you", "Review"],
-    ["an overnight run parked for review", plan("x", { runState: "awaiting_review" }), "Needs you", "Review"],
-    ["a stalled run", plan("x", { runState: "stalled" }), "Needs you", "Stalled"],
+    // A stored state from the cut run feature needs nothing of you.
+    ["a stale run state", plan("x", { runState: "in_code_review" }), "din", null],
+    ["a stale stalled run", plan("x", { runState: "stalled" }), "din", null],
     // Where a plan is in its life is its status line, not a section: a stale
     // "building" (nothing moves a plan out of it) must not pin it to the top.
     ["a plan handed to an agent to build", plan("x", { runState: "building" }), "din", null],
-    ["an orchestrated run", plan("x", { runState: "running" }), "din", null],
     ["a plan in review, nothing held", plan("x", { status: "in_review" }), "din", null],
     ["an approved plan", plan("x"), "din", null],
     ["a landed run", plan("x", { runState: "landed" }), "din", null],
@@ -93,8 +93,8 @@ describe("which section a row sorts into", () => {
     ]);
   });
 
-  it("an engine ask outranks a run's own review", () => {
-    const [item] = sidebarItems({ sessions: [plan("p", { runState: "in_code_review" })], needs: { "plan:p": "Permission" } });
+  it("an engine ask is a plan's need", () => {
+    const [item] = sidebarItems({ sessions: [plan("p")], needs: { "plan:p": "Permission" } });
     expect(item.need).toBe("Permission");
   });
 });
@@ -121,12 +121,12 @@ describe("sections: Needs you while anything does, then projects", () => {
 
   it("Needs you leads; everything else keeps its project (5a)", () => {
     const sessions = [
-      plan("vehicle", { runState: "in_code_review", projectPath: "/code/dial", updatedAt: 90 }),
+      plan("vehicle", { status: "in_review", held: true, projectPath: "/code/dial", updatedAt: 90 }),
       plan("dial", { runState: "building", projectPath: "/code/dial", updatedAt: 80 }),
-      plan("sprint", { runState: "orchestrating", projectPath: "/code/mos", projectName: "machineos", updatedAt: 85 }),
+      plan("sprint", { projectPath: "/code/mos", projectName: "machineos", updatedAt: 85 }),
       plan("old", { updatedAt: 5, projectPath: "/code/mos", projectName: "machineos" }),
     ];
-    expect(shape({ sessions })).toEqual([
+    expect(shape({ sessions, needs: { "plan:vehicle": "Question" } })).toEqual([
       ["Needs you", ["plan:vehicle"], 0],
       ["machineos", ["plan:sprint", "plan:old"], 0],
       // Named by the plan's recorded project name (the helper's "din").
@@ -146,14 +146,10 @@ describe("a row's status line", () => {
     // A build handed to an agent never spins on its own: nothing says when it ends.
     ["handed to an agent", item({ runState: "building" }), "Approved", "build", "hammer"],
     ["that agent mid-turn", item({ runState: "building" }, { working: true }), "Building", "build", "spin"],
-    ["a run starting", item({ runState: "orchestrating" }), "Starting the run", "build", "spin"],
-    ["a run running", item({ runState: "running" }), "Running", "build", "spin"],
-    ["a run drafted", item({ runState: "ready" }), "Run ready", "build", "run"],
     ["built", item({ runState: "landed" }), "Built", "build", "built"],
-    ["stood down", item({ runState: "abandoned" }), "Stood down", "quiet", "file"],
+    // A state the cut run feature left behind reads as not built.
+    ["a stale run state", item({ runState: "running" }), "Approved · not built", "build", "check"],
     ["aborted", item({ status: "aborted" }), "Aborted", "quiet", "file"],
-    ["a run waiting on review", item({ runState: "in_code_review" }), "Ready for review", "redline", "dot"],
-    ["a stalled run", item({ runState: "stalled" }), "Stalled", "redline", "alert"],
   ] as const)("%s → %s", (_, row, word, tone, icon) => {
     expect(rowStatus(row)).toMatchObject({ word, tone, icon });
   });
@@ -192,8 +188,9 @@ describe("Show N more", () => {
   });
 
   it("never folds Needs you", () => {
-    const asks = Array.from({ length: 9 }, (_, i) => plan(`n${i}`, { runState: "stalled", updatedAt: 90 - i }));
-    const model = buildSidebar({ sessions: asks });
+    const asks = Array.from({ length: 9 }, (_, i) => plan(`n${i}`, { updatedAt: 90 - i }));
+    const needs = Object.fromEntries(asks.map((p) => [`plan:${p.sessionId}`, "Question" as const]));
+    const model = buildSidebar({ sessions: asks, needs });
     expect(model.sections.map((s) => [s.label, s.rows.length, s.hidden])).toEqual([["Needs you", 9, 0]]);
   });
 });

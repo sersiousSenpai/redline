@@ -251,15 +251,15 @@ describe("the grouped sidebar", () => {
 
   it("the Places render with onSelectPlace, mark the current one, and say what is live", async () => {
     const onSelectPlace = vi.fn();
-    await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: "runs", onSelectPlace, runsLive: 2, localhostPorts: [":5173", ":7676", ":3000", ":8080"] });
+    await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: "servers", onSelectPlace, localhostPorts: [":5173", ":7676", ":3000", ":8080"] });
     const places = [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-place")];
-    expect(places.map((b) => b.dataset.place)).toEqual(["home", "runs", "servers"]);
-    expect(places.map((b) => b.getAttribute("aria-current"))).toEqual([null, "page", null]);
-    expect(places[1].querySelector(".rl-sb-place-live")!.textContent).toBe("2 live");
-    expect(places[2].querySelector(".rl-sb-place-ports")!.textContent).toBe(":5173 · :7676 · :3000 +1");
+    // Home and Localhost: the Runs place went with the run feature.
+    expect(places.map((b) => b.dataset.place)).toEqual(["home", "servers"]);
+    expect(places.map((b) => b.getAttribute("aria-current"))).toEqual([null, "page"]);
+    expect(places[1].querySelector(".rl-sb-place-ports")!.textContent).toBe(":5173 · :7676 · :3000 +1");
     // Another Place owns the stage: no session row reads as open.
     expect(host.querySelector("li.rl-session-row button[aria-current]")).toBeNull();
-    await click(places[2]);
+    await click(places[1]);
     expect(onSelectPlace).toHaveBeenCalledWith("servers");
     await click(places[0]);
     expect(onSelectPlace).toHaveBeenCalledWith("home");

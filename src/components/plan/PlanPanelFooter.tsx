@@ -9,8 +9,8 @@
 //! 1. the plan's CLI session ended (detached) — the notice above the plan
 //!    carries the restore; this says why the verbs are off, or its progress;
 //! 2. the author is answering a Send — a press shows its terminal;
-//! 3. the plan is approved — "Building v4: step 3 of 11 · 1 terminal" while a
-//!    run is live, else its state (and PlanStateMenu, as classic wore it);
+//! 3. the plan is approved — "Building v4 · 1 terminal" while its agent builds
+//!    it, else its state (and PlanStateMenu, as classic wore it);
 //! 4. every resolution handled — "approve, or add another round";
 //! 5. "Select text to mark it." — the hint, and the manual state menu.
 //!
@@ -18,17 +18,16 @@
 //! send · 1 edit · 1 question — requests a revision"), as Send's tooltip does.
 //!
 //! On the right, the review's two verbs — "Send marks to Claude" and
-//! "🔨 Approve & build" (its ▾ keeps "build later" and the team builds one
-//! click away) — or, once approved, "Reopen plan" and "Build ▾".
+//! "🔨 Approve & build" (its ▾ keeps "build later" one click away) — or, once
+//! approved, "Reopen plan" and "Build ▾".
 //!
 //! Every handler is App's own (submitReview, approvePlan, approvePlanLater,
-//! startTeamBuild, buildApproved, reopenApproved, setPlanState): this decides
+//! buildApproved, reopenApproved, setPlanState): this decides
 //! what shows, never what happens.
 
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ChevronDown, Hammer } from "lucide-react";
 
-import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../../lib/teamBuildItems";
 import { ridesSubmit } from "../../lib/planSearch";
 import type { Comment } from "../../types";
 import type { ManualPlanState, PlanStateTarget } from "../PlanStateMenu";
@@ -46,10 +45,8 @@ export interface PlanFooterApproval {
   /** NULL is "approved · not built" — or being built by the agent that
    *  wrote it, which `building` says. */
   runState: string | null;
-  /** A live orchestrated run can't be reopened under itself. */
-  runLive: boolean;
-  /** Something is building it right now: a live run, or the plan's own
-   *  agent at work in its terminal after Approve & build. */
+  /** Something is building it right now: the plan's own agent at work in
+   *  its terminal after Approve & build. */
   building: boolean;
 }
 
@@ -75,7 +72,6 @@ export interface PlanPanelFooterProps {
   onSubmit: () => void;
   onApprove: () => void;
   onApproveLater: () => void;
-  onBuildTeam?: (scale: Scale) => void;
   approval: PlanFooterApproval | null;
   buildTargets: PlanFooterBuildTarget[];
   onBuild?: (targetId: string) => void;
@@ -83,8 +79,6 @@ export interface PlanPanelFooterProps {
   planState?: PlanStateTarget;
   onSetPlanState?: (state: ManualPlanState) => void;
   onMoveProject?: () => void;
-  /** A live build's step, when the run reports one. */
-  progress?: { step: number; of: number } | null;
   /** Terminals working on this plan — the faint "· 1 terminal". */
   terminals: number;
   onShowTerminal?: () => void;
@@ -166,7 +160,7 @@ function Status(p: PlanPanelFooterProps) {
   if (p.approval) {
     const a = p.approval;
     const text = a.building
-      ? `Building v${a.version}${p.progress ? `: step ${p.progress.step} of ${p.progress.of}` : ""}`
+      ? `Building v${a.version}`
       : `Approved v${a.version} · ${a.runState === null ? "not built" : a.runState.replace(/_/g, " ")}`;
     const line = (
       <>
@@ -241,13 +235,8 @@ function ReviewActions(p: PlanPanelFooterProps) {
         menuLabel="More approve options"
         items={[
           { id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" },
-          ...(p.onBuildTeam ? TEAM_BUILD_ITEMS.map((item) => ({ ...item, label: `Approve & build ${item.label}` })) : []),
         ]}
-        onItem={(id) => {
-          const scale = teamScaleOf(id);
-          if (scale) p.onBuildTeam?.(scale);
-          else p.onApproveLater();
-        }}
+        onItem={() => p.onApproveLater()}
       />
     </>
   );
@@ -258,7 +247,7 @@ function ApprovedActions(p: PlanPanelFooterProps & { approval: PlanFooterApprova
   const built = p.approval.runState !== null;
   return (
     <>
-      {!p.approval.runLive && p.onReopen && (confirming ? (
+      {p.onReopen && (confirming ? (
         <span className="rl-plan-foot-confirm" role="group" aria-label="Confirm reopen">
           <span className="rl-plan-foot-faint">The agent may already have made changes.</span>
           <button type="button" className="rl-plan-btn" onClick={() => { setConfirming(false); p.onReopen?.(); }}>Reopen anyway</button>

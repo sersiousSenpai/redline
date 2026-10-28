@@ -39,7 +39,6 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       ["drafter", "Prompt Drafter", "Draft a new prompt"],
       ["review", "Code Review", "Review code changes"],
       ["servers", "Localhost", "See your local dev servers"],
-      ["runs", "Runs", "Monitor runs and the work graph"],
     ]);
   });
 
@@ -71,24 +70,21 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       "browser",
       "drafter",
       "servers",
-      "runs",
     ]);
     expect(surfaceEnabled(ws, "servers")).toBe(true);
   });
 
   // Memory is deliberately NOT in the radio group — its entry is the header
   // pill. A manifest that still carries it in its order (written while memory
-  // was a radio button) must simply drop it, not crash or resurrect it.
-  // Runs, by contrast, was PROMOTED to the radio group (08/12, when the
-  // cross-project Work tab made it a daily destination) — a stale order that
-  // names it now keeps its slot.
-  it("drops the pill surface from a stale manifest order, keeps runs", () => {
+  // was a radio button) must simply drop it, not crash or resurrect it. Runs
+  // went with the run feature (10/28): a stale order that names it drops it
+  // the same way.
+  it("drops the pill surface and the cut runs surface from a stale manifest order", () => {
     const ws = parseWorkspace(
       '{"header":{"order":["document","memory","runs","review"]}}',
     );
     expect(headerSurfaces(ws).map((d) => d.id)).toEqual([
       "document",
-      "runs",
       "review",
       "browser",
       "drafter",
@@ -147,7 +143,6 @@ describe("surface disabling", () => {
       "drafter",
       "review",
       "servers",
-      "runs",
     ]);
   });
 
@@ -181,7 +176,6 @@ describe("header ordering", () => {
       "browser",
       "drafter",
       "servers",
-      "runs",
     ]);
   });
 
@@ -194,10 +188,9 @@ describe("header ordering", () => {
       "browser",
       "review",
       "servers",
-      "runs",
     ]);
     expect(moveHeaderSurface(ws, "document", -1)).toBe(ws);
-    expect(moveHeaderSurface(ws, "runs", 1)).toBe(ws);
+    expect(moveHeaderSurface(ws, "servers", 1)).toBe(ws);
   });
 
   it("a hidden surface keeps its slot for when it comes back", () => {
@@ -208,7 +201,6 @@ describe("header ordering", () => {
       "drafter",
       "review",
       "servers",
-      "runs",
     ]);
     ws = setSurfaceEnabled(ws, "browser", true);
     expect(headerSurfaces(ws).map((d) => d.id)).toEqual([
@@ -217,7 +209,6 @@ describe("header ordering", () => {
       "browser",
       "review",
       "servers",
-      "runs",
     ]);
   });
 });
@@ -260,7 +251,6 @@ describe("first-gesture materialization", () => {
       "drafter",
       "review",
       "servers",
-      "runs",
     ]);
     for (const s of TOGGLEABLE_SURFACES) {
       expect(ws.surfaces?.[s]).toBe(s !== "voice");

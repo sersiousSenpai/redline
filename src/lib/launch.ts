@@ -189,9 +189,6 @@ export type LaunchOrigin =
   // Companion's account of what you did, and "synthesised three plans" must
   // not collapse into "typed a sentence".
   | "combine"
-  // "Just run it": a direct, non-plan session from the Front Door. Its own
-  // origin so the lake never files an unreviewed run as a plan launch.
-  | "front-door-run"
   // An approved plan handed to a DIFFERENT agent to build (Build ▾ → with
   // Codex / Claude Code): a pointer to the plan file, launched as a run.
   | "plan-handoff";

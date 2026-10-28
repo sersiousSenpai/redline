@@ -261,7 +261,6 @@ function buildSession(seed: SeedSession) {
     heldTerminalId: null as string | null,
     attachState: seed.attachState ?? "idle",
     runState: seed.runState ?? null,
-    runMode: seed.runState ? "workflow" : null,
     backend: "claude-code",
     model: seed.model ?? null,
     effort: seed.effort ?? null,
@@ -573,7 +572,7 @@ function startLaunch(pty: PtyState): void {
  *  `invoke<…[]>`), plus the obvious name shapes: unknown ones of these get
  *  `[]` rather than `null`, so a `.map` never throws on a fake's silence. */
 const LIST_COMMANDS = new Set(
-  "browse_list_reorder browser_organize_tabs browser_workspace_list classmem_proposals classmem_runs classmem_tree comment_offers_pending companion_changes companion_get_thread companion_list doc_lines draft_comment_list draft_source_list draft_suggestions_pending extensions_list get_seat_roster git_gui_commit_files git_gui_log git_gui_stash_files harness_agent_list ledger_list_events ledger_prompt_models ledger_query list_dir list_harnesses list_orchestrations list_sessions list_share_returns list_shares mission_get_tabs mission_list mission_list_findings monochat_traces parse_markdown_sections pty_list pty_procs review_annotation_list review_commits review_diff review_list_viewed review_question_list review_sessions_list runner_list runner_node_diff scaled_pending seat_preflight self_develop_list shots_list term_attention_snapshot thumbs_list voice_thread".split(" "),
+  "browse_list_reorder browser_organize_tabs browser_workspace_list classmem_proposals classmem_runs classmem_tree comment_offers_pending companion_changes companion_get_thread companion_list doc_lines draft_comment_list draft_source_list draft_suggestions_pending extensions_list get_seat_roster git_gui_commit_files git_gui_log git_gui_stash_files harness_agent_list ledger_list_events ledger_prompt_models ledger_query list_dir list_harnesses list_sessions list_share_returns list_shares mission_get_tabs mission_list mission_list_findings monochat_traces parse_markdown_sections pty_list pty_procs review_annotation_list review_commits review_diff review_list_viewed review_question_list review_sessions_list seat_preflight self_develop_list shots_list term_attention_snapshot thumbs_list voice_thread".split(" "),
 );
 
 function defaultFor(cmd: string): unknown {
@@ -629,54 +628,6 @@ const CLAUDE_MODELS = [
   { slug: "haiku", displayName: "Haiku 4.5", description: "Fastest for quick answers", defaultEffort: null, efforts: [] },
 ];
 
-function runSnapshot() {
-  const run = state.scenario?.run;
-  if (!run) return null;
-  const started = clock.now - 40 * 60_000;
-  return {
-    planSessionId: run.sessionId,
-    claudeSessionId: `${run.sessionId}-build`,
-    runState: "running",
-    startedAt: started,
-    updatedAt: clock.now - 20_000,
-    seq: 42,
-    mode: "workflow",
-    runId: "run-qa-1",
-    workflowName: "Build v4",
-    workflowDescription: null,
-    phases: run.phases.map((title) => ({ title, detail: null })),
-    scriptPath: null,
-    transcriptDir: null,
-    totals: { plannedAgents: run.steps, running: 1, done: run.step - 1, failed: 0, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, toolCalls: 0, filesChanged: [] },
-    agents: run.phases.slice(0, run.step).map((title, i) => ({
-      agentId: `agent-${i + 1}`,
-      label: title,
-      labelSource: "manifest",
-      phase: title,
-      model: "opus",
-      effort: "high",
-      state: i + 1 < run.step ? "done" : "running",
-      startedAt: started + i * 600_000,
-      lastActivityAt: clock.now - 20_000,
-      durationMs: null,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      toolCalls: 0,
-      lastToolName: null,
-      promptPreview: null,
-      resultPreview: null,
-      filesChanged: [],
-      transcriptBytes: 0,
-    })),
-    manifest: null,
-    reportFiled: false,
-    dirsMissing: false,
-    notes: [],
-  };
-}
-
 const handlers: Record<string, Handler> = {
   // Boot: one snapshot decides the first frame (App's "Core bootstrap").
   bootstrap_state: () => ({
@@ -692,25 +643,6 @@ const handlers: Record<string, Handler> = {
   list_sessions: () => summaries(),
   get_session: (a) => state.sessions.get(String(a?.id ?? a?.sessionId))?.full ?? null,
   review_sessions_list: () => [],
-  get_run_state: (a) => state.sessions.get(String(a?.sessionId))?.summary.runState ?? null,
-  list_orchestrations: () => {
-    const run = state.scenario?.run;
-    if (!run) return [];
-    return [{
-      planSessionId: run.sessionId,
-      claudeSessionId: `${run.sessionId}-build`,
-      transcriptPath: `${HOME}/.claude/projects/build.jsonl`,
-      cwd: state.sessions.get(run.sessionId)?.full.projectPath ?? null,
-      startedAt: clock.now - 40 * 60_000,
-      runId: "run-qa-1",
-      transcriptDir: null,
-      scriptPath: null,
-      mode: "workflow",
-      terminalId: run.terminalId,
-      runState: "running",
-    }];
-  },
-  orchestration_snapshot: () => runSnapshot(),
   home_dir: () => HOME,
   resume_startup_cwd: () => HOME,
 
@@ -966,7 +898,6 @@ for (const cmd of [
   "browser_workspace_read",
   "mission_list",
   "draft_source_list",
-  "scaled_pending",
   "self_develop_list",
   "classmem_tree",
 ]) {

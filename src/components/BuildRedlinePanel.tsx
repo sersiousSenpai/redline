@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// Build Redline — the release panel inside Runs.
+// Build Redline — the release panel. Unmounted since the Runs surface it
+// lived in was cut (D16); kept, with its backend, until it is rehomed or cut.
 //
-// The run itself is ordinary agent work and renders as ordinary agent work.
+// The build itself is ordinary agent work and renders as ordinary agent work.
 // What this adds is the other half: a compact account of the *release* those
 // agents are producing, and the one decision only the user can make.
 //
@@ -126,9 +127,8 @@ function FileList({ title, files }: { title: string; files: string[] }) {
 
 interface BuildRedlinePanelProps {
   active: boolean;
-  /** The plan the user is looking at. Capturing a candidate decomposes it into
-   *  agent tasks rooted in the candidate workspace — the one substitution that
-   *  turns the ordinary run machinery into self-development. */
+  /** The plan the user is looking at; the release records it. Capturing no
+   *  longer decomposes it into run tasks — the run machinery is gone. */
   planSessionId?: string | null;
   planTitle?: string | null;
   /** Ask the surrounding app to show a message. */
@@ -173,9 +173,7 @@ export function BuildRedlinePanel({
       });
       setSelected(created.releaseId);
       onToast(
-        planSessionId
-          ? "Candidate captured and the plan decomposed against it. Your own checkout is untouched."
-          : "Candidate workspace captured. Your own checkout is untouched — agents work in the copy.",
+        "Candidate workspace captured. Your own checkout is untouched — agents work in the copy.",
       );
       refresh();
     } catch (e) {

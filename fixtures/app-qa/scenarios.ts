@@ -135,8 +135,6 @@ export interface Scenario {
   storage: Record<string, unknown>;
   /** sessionStorage values (the dock's live layout). */
   session: Record<string, unknown>;
-  /** The orchestrated run behind a Building session. */
-  run?: { sessionId: string; terminalId: string; step: number; steps: number; phases: string[] };
   /** Memory's last librarian run, for the Tools menu's "Memory 2h ago". */
   memoryAt?: number;
   /** Which session the drive opens first, if any. */
@@ -388,7 +386,6 @@ function dinScenario(id: BoardId, title: string, roadmap: boolean): Scenario {
     storage: baseStorage(),
     session: dock(terminals.map((t) => ({ id: t.id, cwd: t.cwd }))),
     memoryAt: NOW - 2 * HOUR,
-    run: undefined,
     openSessionId: roadmap ? DIN_ROADMAP.sessionId : null,
     ownerInitials: "IM",
     prompt: DIN_PROMPT,
@@ -501,7 +498,7 @@ const DIALCROWN_SESSION: SeedSession = {
   createdAt: oct(14, 22, 37, 3),
   updatedAt: oct(15, 18, 40),
   status: "approved",
-  runState: "running",
+  runState: "building",
   model: "opus",
   effort: "high",
   revisions: [
@@ -527,7 +524,7 @@ const MACHINE_OS_SESSION: SeedSession = {
   createdAt: oct(16, 9, 0),
   updatedAt: oct(17, 14, 30),
   status: "approved",
-  runState: "running",
+  runState: "building",
   revisions: [{ version: 1, receivedAt: oct(16, 9, 0), markdown: '# MachineOS "Full Bore" sprint\n\nEverything on the board, in one sprint.\n' }],
 };
 
@@ -607,13 +604,6 @@ function reviewScenario(): Scenario {
     heldSessionId: null,
     storage: baseStorage({ "redline.frontDoor.project": { path: DIALCROWN }, "redline.lastLaunchProject": DIALCROWN }),
     session: dock(terminals.map((t) => ({ id: t.id, cwd: t.cwd }))),
-    run: {
-      sessionId: DIALCROWN_SESSION.sessionId,
-      terminalId: BUILD_TERMINAL,
-      step: 3,
-      steps: 11,
-      phases: Array.from({ length: 11 }, (_, i) => `Step ${i + 1}`),
-    },
     memoryAt: NOW - 2 * HOUR,
     openSessionId: DIALCROWN_SESSION.sessionId,
     ownerInitials: "IM",

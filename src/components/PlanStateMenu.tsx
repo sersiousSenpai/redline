@@ -1,6 +1,5 @@
 import { useRef } from "react";
 import { Panel, useClickPopover } from "./popover";
-import { isLiveRunState } from "../lib/orchestration";
 import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 
 export type ManualPlanState = "in_review" | "approved" | "completed";
@@ -14,8 +13,7 @@ export function PlanStateMenu({ session, onState, onMove, children, nested }: {
   const trigger = useRef<HTMLElement>(null);
   const menu = useClickPopover(trigger, "left");
   const current = session.status === "approved" ? session.runState === "landed" ? "completed" : "approved" : "in_review";
-  const reason = session.held ? "Claude is waiting on this plan — use Approve in the footer"
-    : isLiveRunState(session.runState ?? null) ? "Stand the live run down before changing its state" : undefined;
+  const reason = session.held ? "Claude is waiting on this plan — use Approve in the footer" : undefined;
   const pick = (action: () => void) => { action(); menu.close(); trigger.current?.focus(); };
   return <span onClick={event => event.stopPropagation()}>
     {nested

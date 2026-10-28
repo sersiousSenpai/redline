@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { Comment } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
@@ -22,8 +21,6 @@ export interface BuildTarget {
 export interface FooterApproval {
   version: number;
   runState: string | null;
-  /** A live orchestrated run can't be reopened under itself. */
-  runLive: boolean;
 }
 
 interface FooterProps {
@@ -43,8 +40,6 @@ interface FooterProps {
   onApprove: () => void;
   /** "Approve, build later": approved, the agent stands down, nothing builds. */
   onApproveLater: () => void;
-  /** Approve and build with a team (Track O): Auto, or the Custom dialog. */
-  onBuildTeam?: (scale: Scale) => void;
   /** Present once the open plan is approved. */
   approval?: FooterApproval | null;
   buildTargets?: BuildTarget[];
@@ -55,7 +50,7 @@ interface FooterProps {
   termNeedYou?: number;
   /** ⌘⇧J's action: show the next terminal that needs you, in its session. */
   onJumpToNeedsYou?: () => void;
-  /** An agent's review request or a run's report, waiting for you on the
+  /** An agent's review request, waiting for you on the
    *  review surface ("Review ready"), or null. */
   reviewNews?: string | null;
   onOpenReviewNews?: () => void;
@@ -79,7 +74,6 @@ export function Footer({
   onSubmit,
   onApprove,
   onApproveLater,
-  onBuildTeam,
   approval = null,
   buildTargets = [],
   onBuild,
@@ -313,8 +307,8 @@ export function Footer({
             onReopen={onReopen}
           />
         ) : (
-          // Approving never routes through a run graph: Approve & build hands
-          // the plan to the agent that wrote it; build later parks it here.
+          // Approve & build hands the plan to the agent that wrote it, in its
+          // own terminal; build later parks it here.
           <SplitButton
             label="Approve & build"
             sublabel={`with ${author}`}
@@ -323,13 +317,8 @@ export function Footer({
             menuLabel="More approve options"
             items={[
               { id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" },
-              ...(onBuildTeam ? TEAM_BUILD_ITEMS.map((item) => ({ ...item, label: `Approve & build ${item.label}` })) : []),
             ]}
-            onItem={(id) => {
-              const scale = teamScaleOf(id);
-              if (scale) onBuildTeam?.(scale);
-              else onApproveLater();
-            }}
+            onItem={() => onApproveLater()}
           />
         )}
       </span>}
@@ -398,7 +387,7 @@ function ApprovedActions({
   const built = approval.runState !== null;
   return (
     <>
-      {!approval.runLive && onReopen && (confirming ? (
+      {onReopen && (confirming ? (
         <span className="flex items-center gap-2" role="group" aria-label="Confirm reopen">
           <span style={{ fontSize: "11px" }}>The agent may already have made changes.</span>
           <Button size="sm" onClick={() => { setConfirming(false); onReopen(); }}>Reopen anyway</Button>

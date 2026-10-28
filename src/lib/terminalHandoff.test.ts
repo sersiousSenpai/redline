@@ -2,43 +2,22 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 import {
-  CLAUDE_READY,
   SHELL_PROMPT,
   deliverToTerminal,
-  orchestrateHandoff,
-  type HandoffResult,
-  type OrchestrateDeps,
-  type OrchestrateTiming,
+  type HandoffDeps,
 } from "./terminalHandoff";
-
-/** Microsecond-scale timing so every path runs in-process. */
-const FAST: OrchestrateTiming = {
-  spawnTimeoutMs: 50,
-  readyTimeoutMs: 10,
-  readyFallbackMs: 1,
-  claimTimeoutMs: 4,
-  claimPollMs: 2,
-  maxPromptRetries: 2,
-};
 
 interface FakeOptions {
   spawn?: () => Promise<void>;
   live?: boolean;
   ready?: boolean;
-  /** Sequence of run states the poller sees (last value repeats). An
-   *  `Error` entry makes that probe REJECT — the "we couldn't ask" case,
-   *  which must never be read as an answer. */
-  runStates?: (string | null | Error)[];
   failWriteMatching?: RegExp;
 }
 
 function makeFake(opts: FakeOptions = {}) {
   const writes: string[] = [];
   const journal: string[] = [];
-  let rearms = 0;
-  let stateCursor = 0;
-  let probes = 0;
-  const deps: OrchestrateDeps = {
+  const deps: HandoffDeps = {
     whenSpawned: () => (opts.spawn ? opts.spawn() : Promise.resolve()),
     isLive: () => Promise.resolve(opts.live ?? false),
     writeChecked: (_id, data) => {
@@ -51,23 +30,8 @@ function makeFake(opts: FakeOptions = {}) {
     awaitOutput: (_id, _re, _t) => Promise.resolve(opts.ready ?? true),
     journal: (stage, detail) => journal.push(detail ? `${stage}:${detail}` : stage),
     sleep: () => Promise.resolve(),
-    getRunState: () => {
-      const states = opts.runStates ?? ["running"];
-      const s = states[Math.min(stateCursor, states.length - 1)];
-      stateCursor += 1;
-      probes += 1;
-      return s instanceof Error ? Promise.reject(s) : Promise.resolve(s);
-    },
-    rearm: () => {
-      rearms += 1;
-      return Promise.resolve();
-    },
   };
-  return { deps, writes, journal, rearms: () => rearms, probes: () => probes };
-}
-
-function run(deps: OrchestrateDeps): Promise<HandoffResult> {
-  return orchestrateHandoff(deps, "tab-1", "sid-1", "claude --model x", "ultracode: go", FAST);
+  return { deps, writes, journal };
 }
 
 describe("deliverToTerminal", () => {
@@ -123,7 +87,7 @@ describe("deliverToTerminal", () => {
       {
         stage: "prompt",
         data: "hello\r",
-        awaitBefore: CLAUDE_READY,
+        awaitBefore: SHELL_PROMPT,
         awaitTimeoutMs: 5,
         fallbackSettleMs: 1,
       },
@@ -144,145 +108,6 @@ describe("deliverToTerminal", () => {
       expect(r.reason).toContain("not running");
     }
     expect(fake.writes).toEqual(["claude\r"]);
-  });
-});
-
-describe("orchestrateHandoff", () => {
-  it("succeeds when the ingest claim advances the run state", async () => {
-    const fake = makeFake({ runStates: ["orchestrating", "running"] });
-    expect(await run(fake.deps)).toEqual({ ok: true });
-    // launch + one prompt write, no retries needed.
-    expect(fake.writes).toEqual(["claude --model x\r", "ultracode: go\r"]);
-    expect(fake.rearms()).toBe(0);
-  });
-
-  it("misses the readiness marker, falls back, and still delivers", async () => {
-    const fake = makeFake({ ready: false, runStates: ["running"] });
-    expect(await run(fake.deps)).toEqual({ ok: true });
-    expect(fake.writes).toEqual(["claude --model x\r", "ultracode: go\r"]);
-  });
-
-  it("retries the prompt (re-arming first) and fails at stage prompt when the claim never fires", async () => {
-    const fake = makeFake({ runStates: ["orchestrating"] });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.stage).toBe("prompt");
-      expect(r.reason).toContain("never left 'orchestrating'");
-    }
-    // 1 launch + 3 prompt attempts (initial + maxPromptRetries).
-    expect(fake.writes.filter((w) => w.startsWith("ultracode"))).toHaveLength(3);
-    // Every retry re-armed the consume-once, TTL-bounded guards.
-    expect(fake.rearms()).toBe(2);
-    expect(fake.journal).toContain("handoff_prompt_written:attempt 3");
-    expect(fake.journal.some((j) => j.startsWith("handoff_failed:prompt"))).toBe(true);
-  });
-
-  it("a retry that recovers reports success", async () => {
-    // First attempt's window sees only `orchestrating`; the claim lands
-    // during the second attempt.
-    const fake = makeFake({
-      runStates: ["orchestrating", "orchestrating", "running"],
-    });
-    expect(await run(fake.deps)).toEqual({ ok: true });
-    expect(fake.rearms()).toBe(1);
-  });
-
-  it("fails at stage prompt when the prompt write itself is refused", async () => {
-    const fake = makeFake({ failWriteMatching: /ultracode/ });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.stage).toBe("prompt");
-  });
-
-  it("fails at stage launch when the launch write is refused", async () => {
-    const fake = makeFake({ failWriteMatching: /claude --model/ });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.stage).toBe("launch");
-  });
-
-  it("a probe that throws is not evidence of delivery", async () => {
-    // The regression: the poll used to be `getRunState(...).catch(() => null)`
-    // followed by `state !== "orchestrating"`, so ONE flaky IPC call on the
-    // first poll reported the whole run delivered. Not knowing is not an
-    // observation — it has to keep asking and fail at the timeout.
-    const fake = makeFake({ runStates: [new Error("ipc channel closed")] });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.stage).toBe("prompt");
-      expect(r.reason).toContain("never left 'orchestrating'");
-    }
-    // It really did keep asking, across every retry.
-    expect(fake.probes()).toBeGreaterThan(1);
-    expect(fake.writes.filter((w) => w.startsWith("ultracode"))).toHaveLength(3);
-  });
-
-  it("recovers when a flaky probe is followed by a real claim", async () => {
-    const fake = makeFake({ runStates: [new Error("transient"), "running"] });
-    expect(await run(fake.deps)).toEqual({ ok: true });
-    expect(fake.rearms()).toBe(0);
-  });
-
-  it("fails immediately, with its own reason, when the run is reset mid-launch", async () => {
-    // `null` is a real run_state — the one `reset_run` writes. Observing it
-    // means something took the run away, which no prompt retry can undo.
-    const fake = makeFake({ runStates: ["orchestrating", null] });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.stage).toBe("prompt");
-      expect(r.reason).toContain("reset");
-      expect(r.reason).not.toContain("never left");
-    }
-    // No retry storm: one prompt write, then it stops.
-    expect(fake.writes.filter((w) => w.startsWith("ultracode"))).toHaveLength(1);
-    expect(fake.rearms()).toBe(0);
-  });
-
-  it("does not read a terminal run state as a claim landing", async () => {
-    // `landed` is not live, so it is not the ingest claim advancing the chip.
-    const fake = makeFake({ runStates: ["landed"] });
-    const r = await run(fake.deps);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("never left 'orchestrating'");
-  });
-});
-
-// The readiness marker, pinned against REAL boot output per CLI generation.
-// 2.1.222 printed none of the original hints, so every orchestrate burned the
-// full ready timeout before the fallback typed — a 30s stall the user read as
-// "it didn't work". A new CLI banner belongs HERE the day it appears.
-describe("CLAUDE_READY marker", () => {
-  it("matches the v2.x boot banner and the persistent mode bar", () => {
-    expect(CLAUDE_READY.test("Claude Code v2.1.222")).toBe(true);
-    expect(
-      CLAUDE_READY.test("accept edits on (shift+tab to cycle) · ← 1 agent"),
-    ).toBe(true);
-    expect(
-      CLAUDE_READY.test("plan mode on (shift+tab to cycle) · ← 1 agent"),
-    ).toBe(true);
-  });
-
-  it("still matches the older generation's hints", () => {
-    expect(CLAUDE_READY.test("? for shortcuts")).toBe(true);
-    expect(CLAUDE_READY.test("Welcome to Claude Code")).toBe(true);
-    expect(CLAUDE_READY.test("╭────────────╮")).toBe(true);
-  });
-
-  it("never matches the pre-TUI screen: echoed launch command or the zsh banner", () => {
-    expect(
-      CLAUDE_READY.test(
-        "cd '/Users/x/repo' && claude --permission-mode acceptEdits --model 'sonnet'",
-      ),
-    ).toBe(false);
-    expect(CLAUDE_READY.test("Restored session: Wed Aug 12 03:23:51 PDT 2026")).toBe(
-      false,
-    );
-    expect(CLAUDE_READY.test("yusufalbazian@Yusufs-MacBook-Pro qwallah %")).toBe(
-      false,
-    );
   });
 });
 

@@ -12,7 +12,8 @@
     { "name": "active tab", "css": [".rl-wb-strip [role=tab][aria-selected=true]"], "expect": { "height": 34 } }
   ],
   "home": {
-    "copy": ["Home", "Runs", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps"],
+    "copy": ["Home", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps"],
+    "absent": ["Runs"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "door plate", "css": [".rl-wb-door-plate"] },
@@ -61,7 +62,8 @@
     ]
   },
   "sidebar": {
-    "copy": ["Home", "Runs", "Localhost"],
+    "copy": ["Home", "Localhost"],
+    "absent": ["Runs"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "Places", "css": [".rl-sb .rl-sb-places"] },

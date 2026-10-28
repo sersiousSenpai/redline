@@ -78,7 +78,7 @@ export function surfaceChips(surface: SurfaceInfo, sources: ChipSources): Contex
       return sources.diff
         ? [{ id: "diff", label: "This diff", title: sources.diff.repo, defaultOn: true }]
         : [];
-    // Localhost, Memory, Runs, a chat and the empty plate have no on-screen
+    // Localhost, Memory, a chat and the empty plate have no on-screen
     // selection App can read.
     default:
       return [];
@@ -123,8 +123,6 @@ export function surfaceContextLabel(surface: SurfaceInfo, pageTitle?: string | n
       return "Localhost";
     case "memory":
       return "Memory";
-    case "runs":
-      return "Runs";
     case "chat":
       return surface.label || "Chat";
     case "terminal":

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
-//! Runs, Localhost), a "Sessions" label with Combine, the joined-session
+//! Localhost), a "Sessions" label with Combine, the joined-session
 //! shadow, then project groups from lib/sessionGroups — Needs you first while
 //! something does — each holding the rich plan rows (status colour, v{n},
-//! pending count, unseen pulse, run chips, detached/codex chips, the revision
+//! pending count, unseen pulse, build-state chips, detached/codex chips, the revision
 //! tree and a ⋯ menu), chat rows, and the launches whose plan has not arrived.
 //! Under each plan row sit its terminals in the shared status vocabulary
 //! (workbench/status.ts): needs you is an amber opacity pulse, working is the
@@ -15,7 +15,7 @@
 //! so only the rows that changed render.
 
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, FileText, Globe, House, MessageSquare, Plus, Terminal, TriangleAlert, Workflow } from "lucide-react";
+import { ChevronDown, FileText, Globe, House, MessageSquare, Plus, Terminal } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
@@ -42,17 +42,12 @@ import {
   computeRevisionDisplay,
   latestDisplayVersion,
 } from "../lib/revisionVersions";
-import {
-  isLiveRunState,
-  isSequentialFallback,
-  SEQUENTIAL_FALLBACK_NOTE,
-} from "../lib/orchestration";
 import { detachedPillTitle } from "../lib/restoreHarness";
 import "./SessionSidebar.css";
 
-/** The sidebar's Places: Home (the door and its tabs), the Runs monitor and
- *  the Localhost dashboard. */
-export type SidebarPlace = "home" | "runs" | "servers";
+/** The sidebar's Places: Home (the door and its tabs) and the Localhost
+ *  dashboard. */
+export type SidebarPlace = "home" | "servers";
 
 /** A terminal under its plan row, in the shared status vocabulary. */
 export interface SidebarTerminal {
@@ -99,8 +94,6 @@ export interface SessionSidebarProps {
   /** A plan that just arrived while another was being read: its row glows
    *  once. Nonce'd so a second arrival glows again. */
   arrivalGlow?: { sessionId: string; nonce: number } | null;
-  /** Open the RunReport container for an orchestrated run (chip click). */
-  onOpenRunReport?: (sessionId: string) => void;
   /** Hand N selected plans to the Front Door as combine pills. Does what
    *  Home already does — clears the selection — and seeds the pills; the
    *  composer there becomes the place to add an instruction. Absent when
@@ -139,11 +132,9 @@ export interface SessionSidebarProps {
   /** Which Place reads selected. `null` means none; absent means the host
    *  has no Places and Home is "nothing open" (`startActive`/no active id). */
   place?: SidebarPlace | null;
-  /** Given, all three Places render and Home goes here; absent, only Home
+  /** Given, both Places render and Home goes here; absent, only Home
    *  renders and it calls `onNewPlan`/`onNewSession`. */
   onSelectPlace?: (place: SidebarPlace) => void;
-  /** Runs in flight, on the Runs place when > 0. */
-  runsLive?: number;
   /** Local dev servers' ports (":5173"), summarized on the Localhost place. */
   localhostPorts?: readonly string[];
   /** Each plan's terminals, by session id; always shown under the row. */
@@ -155,24 +146,12 @@ export interface SessionSidebarProps {
   onNewTab?: () => void;
 }
 
-/** Chip palette for the orchestrated-run lifecycle. `stalled` warns; `landed`
- *  closes green; the in-flight states read as info. */
-const RUN_STATE_COLORS: Record<string, string> = {
-  orchestrating: "var(--color-info)",
-  running: "var(--color-info)",
-  in_code_review: "var(--color-warning)",
-  // The overnight queue's parked run: committed to its branch, the review
-  // waits on YOUR morning verdict — the same deliberate needs-you hue as an
-  // in-flight code review, never the muted fallback.
-  awaiting_review: "var(--color-warning)",
-  landed: "var(--color-success)",
-  stalled: "var(--color-warning, #b45309)",
-  // A stand-down: deliberate and terminal — muted, not alarming.
-  abandoned: "var(--color-ink-muted)",
-  // A single agent building an approved plan in its terminal. Not a "live
-  // run" (`isLiveRunState`): there is no run graph to watch, and the plan can
-  // still be reopened.
-  building: "var(--color-info)",
+/** Chip palette for an approved plan's build state: its agent building it in
+ *  a terminal reads as info; a plan marked Completed (`landed`) closes green.
+ *  Any other stored value is from a cut feature and draws no chip. */
+const BUILD_STATE_CHIPS: Record<string, { color: string; title: string }> = {
+  building: { color: "var(--color-info)", title: "An agent is building this approved plan in its terminal" },
+  landed: { color: "var(--color-success)", title: "Marked completed" },
 };
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
@@ -219,7 +198,6 @@ interface LightCan {
 
 const PLACE_TITLES: Record<SidebarPlace, string> = {
   home: "Home — the front door and its tabs",
-  runs: "Runs — the orchestration monitor",
   servers: "Localhost — your local dev servers",
 };
 
@@ -227,10 +205,10 @@ function SessionSidebarBase(props: SessionSidebarProps) {
   const {
     sessions, activeId, pendingCounts, joined, onSelectJoined, onLeaveJoined,
     onSelect, onDelete, onRename, onArchive, onSetPlanState, onMoveProject, onExport,
-    onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow, onOpenRunReport,
+    onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow,
     onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
-    onSelectLaunch, needs, working, place, onSelectPlace, runsLive, localhostPorts,
+    onSelectLaunch, needs, working, place, onSelectPlace, localhostPorts,
     terminals, homeTerminals, onSelectTerminal, onNewTab,
   } = props;
 
@@ -391,7 +369,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           onMoveProject={onMoveProject}
           onExport={onExport}
           onSelectRevision={onSelectRevision}
-          onOpenRunReport={onOpenRunReport}
           onSelectTerminal={onSelectTerminal}
         />
       );
@@ -415,8 +392,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
 
   return (
     <nav className="rl-sb" aria-label="Sessions">
-      {/* The Places. Home is the door and its tabs; Runs and Localhost are
-          full views. Without `onSelectPlace` there is nowhere but Home. */}
+      {/* The Places. Home is the door and its tabs; Localhost is a full
+          view. Without `onSelectPlace` there is nowhere but Home. */}
       <div className="rl-sb-places">
         <PlaceRow id="home" icon={House} label="Home" current={homeCurrent} onSelect={selectPlace} />
         {homeTerminals && homeTerminals.length > 0 && (
@@ -425,10 +402,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
               <TerminalRow key={t.id} sessionId="" terminal={t} onSelect={onSelectTerminal} />
             ))}
           </ul>
-        )}
-        {onSelectPlace && (
-          <PlaceRow id="runs" icon={Workflow} label="Runs" current={place === "runs"} onSelect={selectPlace}
-            end={runsLive ? <span className="rl-sb-place-live">{runsLive} live</span> : null} />
         )}
         {onSelectPlace && (
           <PlaceRow id="servers" icon={Globe} label="Localhost" current={place === "servers"} onSelect={selectPlace}
@@ -748,7 +721,6 @@ function SessionRowBase({
   onSetPlanState, onMoveProject,
   onExport,
   onSelectRevision,
-  onOpenRunReport,
   onSelectTerminal,
 }: {
   session: SessionSummary;
@@ -783,7 +755,6 @@ function SessionRowBase({
   onMoveProject?: (id: string) => void;
   onExport: (sessionId: string, versionNumber: number) => void;
   onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
-  onOpenRunReport?: (sessionId: string) => void;
   onSelectTerminal?: (sessionId: string, terminalId: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -1087,18 +1058,12 @@ function SessionRowBase({
               codex
             </span>
           )}
-          {/* Orchestrated-run lifecycle chip — the Runs monitor's one entry
-              point (deliberately contextual: it exists only while a session
-              has a run). Clicking a live run opens the live monitor; a
-              finished run reopens its report. An abandoned/needs-follow-up
-              run keeps its last state visible — only a Resolved mark walks
-              it to `landed`. */}
-          {session.runState === "building" && !combining && (
+          {session.runState && BUILD_STATE_CHIPS[session.runState] && !combining && (
             <span
-              title="An agent is building this approved plan in its terminal"
+              title={BUILD_STATE_CHIPS[session.runState].title}
               style={{
-                color: RUN_STATE_COLORS.building,
-                border: `1px solid ${RUN_STATE_COLORS.building}`,
+                color: BUILD_STATE_CHIPS[session.runState].color,
+                border: `1px solid ${BUILD_STATE_CHIPS[session.runState].color}`,
                 borderRadius: "9999px",
                 padding: "0 6px",
                 fontSize: "9px",
@@ -1107,51 +1072,7 @@ function SessionRowBase({
                 letterSpacing: "0.06em",
               }}
             >
-              building
-            </span>
-          )}
-          {session.runState && session.runState !== "building" && !combining && (
-            <span
-              title={`Orchestrated run: ${session.runState.replace(/_/g, " ")} — click to ${
-                isLiveRunState(session.runState) ? "watch it live" : "open the run report"
-              }`}
-              {...nestedControl(() => onOpenRunReport?.(session.sessionId))}
-              style={{
-                ...NESTED_CONTROL_STYLE,
-                color: RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)",
-                border: `1px solid ${RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)"}`,
-                borderRadius: "9999px",
-                padding: "0 6px",
-                fontSize: "9px",
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                cursor: "pointer",
-              }}
-            >
-              {session.runState.replace(/_/g, " ")}
-            </span>
-          )}
-          {/* The run degraded to the sequential fallback. Deliberately its
-              own chip rather than a tint on the state chip: the state is
-              still true, and this is a second, independent fact about the
-              run — one that is otherwise only visible after navigating to
-              the Runs surface and reading a neutral-styled word. */}
-          {session.runState && !combining && isSequentialFallback(session.runMode) && (
-            <span
-              title={SEQUENTIAL_FALLBACK_NOTE}
-              style={{
-                color: "var(--color-warning)",
-                border: "1px solid var(--color-warning)",
-                borderRadius: "9999px",
-                padding: "0 6px",
-                fontSize: "9px",
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-              }}
-            >
-              seq
+              {session.runState}
             </span>
           )}
           {pending > 0 && (
@@ -1337,7 +1258,6 @@ function StatusGlyph({ icon, tone, need }: { icon: StatusIcon; tone: StatusTone;
   // Working turns the shared ring: an HTML element the compositor spins. A
   // rotating <svg> is repainted on the main thread every frame.
   if (icon === "spin") return <Spinner size={12} className="rl-sb-spin" style={{ color: TONE[tone] }} />;
-  if (icon === "alert") return <TriangleAlert size={14} aria-hidden style={{ color: TONE[tone] }} />;
   if (icon === "chat") return <MessageSquare size={14} aria-hidden style={{ color: TONE[tone] }} />;
   return <FileText size={14} aria-hidden style={{ color: TONE[tone] }} />;
 }

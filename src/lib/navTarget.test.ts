@@ -10,7 +10,7 @@ import {
 } from "./navTarget";
 
 describe("innerTabs", () => {
-  it("gives the memory and runs surfaces their tabs", () => {
+  it("gives the memory surface its tabs", () => {
     expect(innerTabs("memory").map((t) => t.id)).toEqual([
       "ask",
       "timeline",
@@ -18,12 +18,8 @@ describe("innerTabs", () => {
       "map",
       "health",
     ]);
-    expect(innerTabs("runs").map((t) => t.id)).toEqual([
-      "live",
-      "history",
-      "work",
-      "build",
-    ]);
+    // The Runs surface and its tabs went with the run feature.
+    expect(innerTabs("runs")).toEqual([]);
   });
 
   it("a surface with no tabs is reached whole", () => {
@@ -48,7 +44,6 @@ describe("innerTabs", () => {
 describe("isKnownTab", () => {
   it("accepts a tab the surface has", () => {
     expect(isKnownTab("memory", "catalog")).toBe(true);
-    expect(isKnownTab("runs", "work")).toBe(true);
   });
 
   it("rejects a tab from another surface, an unknown one, and nothing", () => {
@@ -61,13 +56,14 @@ describe("isKnownTab", () => {
 
 describe("navTargets", () => {
   it("lists a surface then its tabs, in order", () => {
-    expect(navTargets(["review", "runs"])).toEqual([
+    expect(navTargets(["review", "memory"])).toEqual([
       { surface: "review" },
-      { surface: "runs" },
-      { surface: "runs", tab: "live" },
-      { surface: "runs", tab: "history" },
-      { surface: "runs", tab: "work" },
-      { surface: "runs", tab: "build" },
+      { surface: "memory" },
+      { surface: "memory", tab: "ask" },
+      { surface: "memory", tab: "timeline" },
+      { surface: "memory", tab: "catalog" },
+      { surface: "memory", tab: "map" },
+      { surface: "memory", tab: "health" },
     ]);
   });
 

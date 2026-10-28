@@ -58,8 +58,6 @@ describe("polling", () => {
     "src/components/BrowserPane.tsx",
     "src/hooks/usePush.ts",
     "src/hooks/useReview.ts",
-    "src/hooks/useRunGraph.ts",
-    "src/components/OrchestrationSurface.tsx",
     "src/components/MemoryStatusPill.tsx",
     "src/components/StreamInspector.tsx",
   ];

@@ -51,7 +51,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const str = (v: unknown): v is string => typeof v === "string";
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter(str) : []);
 
-const DOOR_DESTINATIONS: readonly DoorDestination[] = ["plan", "run", "chat", "drafter", "browser", "review", "memory", "servers", "runs"];
+const DOOR_DESTINATIONS: readonly DoorDestination[] = ["plan", "chat", "drafter", "browser", "review", "memory", "servers"];
 /** Every DiffSource, as a record so a new member is a type error here. */
 const DIFF_SOURCE_SET: Record<DiffSource, true> = { uncommitted: true, staged: true, unstagedPlusUntracked: true, lastCommit: true, vsBase: true, commitSha: true, runBranch: true };
 const isDiffSource = (v: unknown): v is DiffSource => typeof v === "string" && Object.prototype.hasOwnProperty.call(DIFF_SOURCE_SET, v);
@@ -103,7 +103,6 @@ function parsePane(raw: unknown): AnyPane | null {
       break;
     case "servers":
     case "memory":
-    case "runs":
       pane = { id: raw.id, kind: raw.kind, data: {} };
       break;
   }
@@ -349,7 +348,7 @@ function readJson(storage: Pick<Storage, "getItem">, key: string): unknown {
   }
 }
 
-const SURFACE_KINDS = ["browser", "drafter", "review", "servers", "memory", "runs", "chat"] as const;
+const SURFACE_KINDS = ["browser", "drafter", "review", "servers", "memory", "chat"] as const;
 
 /** One-time: Home's first tab from what App persisted — `redline.mainSurface`
  *  (a surface beside the door when `doc.pinned`, split by `split.*`), else a
@@ -380,7 +379,7 @@ export function migrateToWorkbenchOnce(storage: Pick<Storage, "getItem" | "setIt
   // Only the kinds that open with nothing but their kind can be restored
   // from a bare surface name: a chat room, drafter draft or review target
   // was never in these keys, so those land on the door.
-  const restorable = kind === "browser" || kind === "servers" || kind === "memory" || kind === "runs";
+  const restorable = kind === "browser" || kind === "servers" || kind === "memory";
   if (restorable) {
     const surfacePane: AnyPane = kind === "browser" ? { id: surfaceId, kind, data: { workspace: "regular" } } : { id: surfaceId, kind, data: {} };
     panes[surfaceId] = surfacePane;

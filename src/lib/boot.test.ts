@@ -205,7 +205,6 @@ describe("boot-path JS contract", () => {
     "VoicePanel",
     "ShareSnapshotDialog",
     "MemorySurface",
-    "OrchestrationSurface",
     "BrowserPane",
     "MemoryInspector",
     "BookshelfView",
@@ -224,6 +223,13 @@ describe("boot-path JS contract", () => {
     "PresenceBar",
     "PlanToc",
   ];
+
+  it("the orchestration-run feature stays cut: no Runs surface, run report or team build", () => {
+    for (const gone of ["OrchestrationSurface", "RunReport", "ScaledBuild", "useOrchestration", "lib/runner/", "teamBuildItems", "orchestrateHandoff"]) {
+      expect(app.includes(gone), `App names ${gone}`).toBe(false);
+    }
+    expect(app).not.toMatch(/selectSurface\("runs"\)/);
+  });
 
   it("the heavy surfaces never return to App's static import list", () => {
     for (const name of LAZY_ONLY) {
@@ -438,7 +444,7 @@ describe("boot-path JS contract", () => {
       /const SURFACE_CHUNK_LOADERS[\s\S]*?= \{([\s\S]*?)\}/,
     );
     expect(map, "SURFACE_CHUNK_LOADERS map missing").not.toBe(null);
-    for (const key of ["document", "drafter", "browser", "memory", "runs", "chat"]) {
+    for (const key of ["document", "drafter", "browser", "memory", "chat"]) {
       expect(map![1].includes(`${key}:`), `${key} missing from loader map`).toBe(
         true,
       );

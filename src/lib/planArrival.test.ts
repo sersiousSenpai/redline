@@ -37,7 +37,7 @@ describe("arrivalFocus", () => {
   });
 
   it("focuses the selection on a masked surface (the caller leaves the surface alone)", () => {
-    for (const mainSurface of ["browser", "memory", "runs"] as const) {
+    for (const mainSurface of ["browser", "memory", "servers"] as const) {
       expect(arrivalFocus(at({ activeId: "A", plateMode: "plan", mainSurface }))).toBe("focus");
     }
   });

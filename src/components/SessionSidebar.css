@@ -46,7 +46,6 @@
 .rl-sb-place[aria-current] > svg { color: var(--color-ink); }
 .rl-sb-place:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 .rl-sb-place-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-sb-place-live { flex: none; font-size: var(--rl-text-label); color: var(--color-mode-build-fg); }
 .rl-sb-place-ports { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 10.5px; color: var(--color-ink-5); }
 
 /* ── The Sessions label, with Combine ───────────────────────────────────── */

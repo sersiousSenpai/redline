@@ -131,7 +131,6 @@ export const FIRST_PARTY_HARNESSES: readonly HarnessManifest[] = [
         browser: false,
         review: false,
         servers: false,
-        runs: false,
         collab: false,
         memory: false,
       },

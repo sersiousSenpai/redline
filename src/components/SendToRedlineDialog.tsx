@@ -69,7 +69,7 @@ export function SendToRedlineDialog({
         <div className="flex items-center gap-2">
           <span style={{ fontSize: "15px" }}>▶</span>
           <span style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-ink)" }}>
-            {destination === "drafter" ? "Continue in Prompt Drafter" : destination === "auto" ? "Prepare an auto session" : "Continue with an AI model plan"}
+            {destination === "drafter" ? "Continue in Prompt Drafter" : "Continue with an AI model plan"}
           </span>
         </div>
         {context && (
@@ -88,14 +88,13 @@ export function SendToRedlineDialog({
           </p>
         )}
 
-        {onDestinationChange && <label className="flex items-center gap-3 text-sm">Continue as<select aria-label="Continue as" value={destination} onChange={e => onDestinationChange(e.target.value as ContinueDestination)} style={{ background: "var(--color-bg-elevated)" }}><option value="drafter">Prompt Drafter</option><option value="plan">AI model plan</option><option value="auto">Auto session</option></select></label>}
+        {onDestinationChange && <label className="flex items-center gap-3 text-sm">Continue as<select aria-label="Continue as" value={destination} onChange={e => onDestinationChange(e.target.value as ContinueDestination)} style={{ background: "var(--color-bg-elevated)" }}><option value="drafter">Prompt Drafter</option><option value="plan">AI model plan</option></select></label>}
         {onMarkdownChange && <label className="flex flex-col gap-1 text-xs">Review and edit the brief<textarea aria-label="Prepared brief" value={markdown} onChange={e => onMarkdownChange(e.target.value)} rows={14} className="rounded border p-3 text-sm" style={{ borderColor: "var(--color-rule)", background: "var(--color-bg-elevated)", resize: "vertical", minHeight: 160 }} /></label>}
         {destination !== "drafter" && <><label style={{ fontSize: "11px", color: "var(--color-ink-muted)", fontWeight: 600 }}>
           Launch in repository
         </label>
         <ProjectPicker options={options} value={project} onChange={setProject} />
         {destination === "plan" && modelControls}
-        {destination === "auto" && <p className="text-xs">The execution graph opens for review before running. Configure its agents and checks in the Runs workspace.</p>}
 
         {project === null && (
           <div
@@ -109,7 +108,7 @@ export function SendToRedlineDialog({
               color: "var(--color-ink)",
             }}
           >
-            {destination === "auto" ? "Choose the project repository for this auto session." : "The plan will start in your home directory. Select a repository to give it a project workspace."}
+            The plan will start in your home directory. Select a repository to give it a project workspace.
           </div>
         )}
         </>}
@@ -133,7 +132,7 @@ export function SendToRedlineDialog({
           <button
             type="button"
             onClick={() => onConfirm(project)}
-            disabled={pending || !!validationError || (destination === "auto" && !project)}
+            disabled={pending || !!validationError}
             className="rounded px-3 py-1.5 font-medium"
             style={{
               fontSize: "12px",
@@ -142,7 +141,7 @@ export function SendToRedlineDialog({
               cursor: "pointer",
             }}
           >
-            {pending ? "Saving and preparing…" : destination === "drafter" ? "Save and open brief" : destination === "auto" ? "Prepare execution graph" : "Save and launch plan"}
+            {pending ? "Saving and preparing…" : destination === "drafter" ? "Save and open brief" : "Save and launch plan"}
           </button>
         </div>
         </fieldset>

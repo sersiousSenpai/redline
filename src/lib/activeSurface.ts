@@ -17,7 +17,6 @@ export interface SurfaceInfo {
     | "review"
     | "servers"
     | "memory"
-    | "runs"
     | "chat"
     | "terminal"
     | "welcome";
@@ -34,7 +33,6 @@ export interface SurfaceInputs {
   reviewOpen: boolean;
   serversOpen: boolean;
   memoryOpen: boolean;
-  runsOpen: boolean;
   /** The chat room is the selected surface. Unlike the other center-pane
    *  occupants a chat has an id and a name, because it is a THREAD — and the
    *  agent in it needs to recognize its own room (see `surface_line`'s
@@ -118,18 +116,6 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       kind: "memory",
       id: null,
       label: "Memory",
-      detail: null,
-      projectPath: null,
-    };
-  }
-  if (s.runsOpen) {
-    // The Orchestration Monitor spans every orchestrated run — machine-scoped
-    // like Localhost and Memory.
-    return {
-      ...base,
-      kind: "runs",
-      id: null,
-      label: "Runs",
       detail: null,
       projectPath: null,
     };

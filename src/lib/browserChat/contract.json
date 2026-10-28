@@ -47,7 +47,7 @@
   },
   "replyActions": ["copy", "add-to-task-list", "add-to-mission", "continue-as"],
   "pillComposerDestinations": {
-    "browser": ["plan", "run"]
+    "browser": ["plan"]
   },
   "skill": {
     "name": "browse",

@@ -49,7 +49,7 @@ describe("surfaceChips — one 'this thing' chip per surface", () => {
   });
 
   it("surfaces with no on-screen selection offer nothing", () => {
-    for (const kind of ["servers", "memory", "runs", "chat", "welcome"] as const)
+    for (const kind of ["servers", "memory", "chat", "welcome"] as const)
       expect(chipSet(kind)).toEqual([]);
   });
 
@@ -58,7 +58,7 @@ describe("surfaceChips — one 'this thing' chip per surface", () => {
   // work, and a chat learns the plan on screen from its surface line.
   it("a plan on screen offers no chip, so no send attaches it", () => {
     expect(chipSet("plan")).toEqual([]);
-    for (const destination of ["plan", "run", "drafter", "chat"] as const)
+    for (const destination of ["plan", "drafter", "chat"] as const)
       expect(visibleChips(surfaceChips(surface("plan"), everything), destination)).toEqual([]);
   });
 

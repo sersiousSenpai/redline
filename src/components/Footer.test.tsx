@@ -60,7 +60,7 @@ describe("approve, build later, build and reopen", () => {
     const built: string[] = [];
     let reopened = 0;
     await mountWith({
-      approval: { version: 3, runState: null, runLive: false },
+      approval: { version: 3, runState: null },
       buildTargets: [{ id: "same", label: "with Claude" }, { id: "codex", label: "with Codex" }],
       onBuild: (id: string) => built.push(id),
       onReopen: () => reopened++,
@@ -79,7 +79,7 @@ describe("approve, build later, build and reopen", () => {
 
   it("reopening a plan that is already building asks once, inline", async () => {
     let reopened = 0;
-    await mountWith({ approval: { version: 2, runState: "building", runLive: false }, onReopen: () => reopened++ });
+    await mountWith({ approval: { version: 2, runState: "building" }, onReopen: () => reopened++ });
     expect(button("Build")).toBeUndefined();
     await act(async () => button("Reopen")!.click());
     expect(reopened).toBe(0);
@@ -87,34 +87,20 @@ describe("approve, build later, build and reopen", () => {
     await act(async () => button("Reopen anyway")!.click());
     expect(reopened).toBe(1);
   });
-
-  it("hides Reopen under a live run", async () => {
-    await mountWith({ approval: { version: 1, runState: "running", runLive: true }, onReopen: () => {} });
-    expect(button("Reopen")).toBeUndefined();
-  });
 });
 
-describe("approve and build with a team (Track O)", () => {
-  it("offers Auto and Custom in the approve menu and routes the scale", async () => {
-    const picked: string[] = [];
+describe("Approve & build is one launch", () => {
+  it("its menu holds only build later: no team, no run", async () => {
+    let later = 0;
     await act(async () => root.render(createElement(Footer, {
       comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
-      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {}, onBuildTeam: (scale: string) => picked.push(scale),
+      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => { later++; },
     })));
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
     const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    const auto = items.find((b) => b.textContent?.startsWith("Approve & build with a team · Auto"))!;
-    expect(auto.textContent).toContain("8 agents · 5M tokens · 4 h");
-    await act(async () => auto.click());
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
-    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.startsWith("Approve & build with a team · Custom"))!.click());
-    expect(picked).toEqual(["auto", "custom"]);
-  });
-
-  it("offers no team without a handler", async () => {
-    await mount("claude-code");
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
-    expect([...document.querySelectorAll('[role="menuitem"]')].some((b) => b.textContent?.includes("with a team"))).toBe(false);
+    expect(items.map((b) => b.textContent)).toEqual([expect.stringContaining("Approve, build later")]);
+    await act(async () => items[0].click());
+    expect(later).toBe(1);
   });
 });
 
@@ -166,8 +152,6 @@ describe("a review waiting for you", () => {
     expect(chip()?.textContent).toBe("Review ready → Open");
     await act(async () => chip()!.click());
     expect(opened).toBe(1);
-    await mountWith({ reviewNews: "Run report ready", onOpenReviewNews: () => {} });
-    expect(chip()?.textContent).toBe("Run report ready → Open");
   });
 });
 

@@ -23,7 +23,7 @@ describe("workbench store", () => {
     store.replace(emptyWorkbench());
     expect(listener).toHaveBeenCalledTimes(2);
     off();
-    store.dispatch({ type: "openTab", pane: { kind: "runs", data: {} } });
+    store.dispatch({ type: "openTab", pane: { kind: "servers", data: {} } });
     expect(listener).toHaveBeenCalledTimes(2);
   });
 });
@@ -36,7 +36,7 @@ describe("a lazily loaded reducer", () => {
     const listener = vi.fn();
     store.subscribe(listener);
     store.dispatch({ type: "openTab", pane: { kind: "memory", data: {} }, tabId: "m" });
-    store.dispatch({ type: "openTab", pane: { kind: "runs", data: {} }, tabId: "r" });
+    store.dispatch({ type: "openTab", pane: { kind: "servers", data: {} }, tabId: "r" });
     expect(store.getState().sets.home!.order).toEqual([]);
     expect(listener).not.toHaveBeenCalled();
     resolve(reduce);

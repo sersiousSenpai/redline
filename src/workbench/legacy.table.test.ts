@@ -23,7 +23,7 @@ import { reduce, type WorkbenchAction } from "./reducer";
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
 /** Every value `mainSurface` can hold today except the document itself. */
-const SURFACES: readonly Exclude<MainSurface, "document">[] = ["browser", "drafter", "review", "servers", "memory", "runs", "chat"];
+const SURFACES: readonly Exclude<MainSurface, "document">[] = ["browser", "drafter", "review", "servers", "memory", "chat"];
 
 /** What `selectSurface(s)` will carry once it dispatches `openSurface`: the
  *  kinds with no default data (drafter, review, chat) need it spelled out. */
@@ -39,7 +39,6 @@ function surfacePane(s: Exclude<MainSurface, "document">): PaneInit {
       return { kind: "chat", data: { source: "companion", companionId: "c1" } };
     case "servers":
     case "memory":
-    case "runs":
       return { kind: s, data: {} };
   }
 }
@@ -120,7 +119,7 @@ describe("legacyView: selectSurface(s) with the pin off opens the surface alone"
 
   it("the surfaces with default data open from a bare `kind`, the others need their data", () => {
     const home = ownerState("home");
-    for (const kind of ["browser", "servers", "memory", "runs"] as const) {
+    for (const kind of ["browser", "servers", "memory"] as const) {
       expect(legacyView(reduce(home, { type: "openSurface", kind })).mainSurface).toBe(kind);
     }
     // No default draft, repo or room: the reducer leaves the state alone, so
@@ -188,10 +187,10 @@ describe("legacyView: mainSurface does not follow focus", () => {
   it("two surfaces in one tab: the first in reading order is mainSurface, whatever is focused", () => {
     const base = ownerState("plan");
     let s = reduce(base, { type: "splitPane", paneId: focusedId(base), direction: "row", pane: surfacePane("browser"), newPaneId: "b" });
-    s = reduce(s, { type: "splitPane", paneId: "b", direction: "column", pane: surfacePane("runs"), newPaneId: "r" });
-    expect(legacyView(s)).toMatchObject({ mainSurface: "browser", docPinned: true, focusedKind: "runs", visibleKinds: ["plan", "browser", "runs"] });
+    s = reduce(s, { type: "splitPane", paneId: "b", direction: "column", pane: surfacePane("servers"), newPaneId: "r" });
+    expect(legacyView(s)).toMatchObject({ mainSurface: "browser", docPinned: true, focusedKind: "servers", visibleKinds: ["plan", "browser", "servers"] });
     s = reduce(s, { type: "splitPane", paneId: "b", direction: "column", pane: surfacePane("memory"), newPaneId: "m", before: true });
-    expect(legacyView(s)).toMatchObject({ mainSurface: "memory", focusedKind: "memory", visibleKinds: ["plan", "memory", "browser", "runs"] });
+    expect(legacyView(s)).toMatchObject({ mainSurface: "memory", focusedKind: "memory", visibleKinds: ["plan", "memory", "browser", "servers"] });
   });
 });
 

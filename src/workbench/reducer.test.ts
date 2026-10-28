@@ -629,7 +629,7 @@ describe("replacePane", () => {
   });
   it("is a no-op for an unknown pane", () => {
     const s = emptyWorkbench();
-    expect(reduce(s, { type: "replacePane", paneId: "nope", pane: { kind: "runs", data: {} } })).toBe(s);
+    expect(reduce(s, { type: "replacePane", paneId: "nope", pane: { kind: "servers", data: {} } })).toBe(s);
   });
 });
 

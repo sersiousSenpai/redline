@@ -5,11 +5,10 @@
 //
 // `selectSurface` has always been the app's one surface mutator, and it takes
 // exactly one thing — the surface. That is right, and this module does not
-// widen it: the inner tabs of the memory and runs surfaces belong to those
-// components, which persist and repair their own choice. What was missing is a
-// way to ASK for one from outside, so the command palette can reach the
-// Catalog or the work graph in one step instead of "go to Memory, then find
-// the chip".
+// widen it: the inner tabs of the memory surface belong to that component,
+// which persists and repairs its own choice. What was missing is a way to ASK
+// for one from outside, so the command palette can reach the Catalog in one
+// step instead of "go to Memory, then find the chip".
 //
 // The ask is a nonce'd request, not a controlled prop. A prop that stayed set
 // would drag the surface back to that tab on every render — the user could
@@ -52,12 +51,6 @@ export const SURFACE_INNER_TABS: Readonly<
     { id: "catalog", label: "Catalog" },
     { id: "map", label: "Map" },
     { id: "health", label: "Health" },
-  ],
-  runs: [
-    { id: "live", label: "Live" },
-    { id: "history", label: "History" },
-    { id: "work", label: "Work" },
-    { id: "build", label: "Build Redline" },
   ],
 };
 

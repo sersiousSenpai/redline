@@ -218,8 +218,8 @@ export function wasTruncated(m: TurnMeter | null): boolean {
 
 /** Compact token count: 950 → "950", 12400 → "12.4k", 2000000 → "2M".
  *
- *  Lifted here from `AgentSeats.tsx`, which held one of two byte-identical
- *  copies (the other was inline in the orchestration surface). */
+ *  Lifted here from `AgentSeats.tsx`, so the turn footer and the seats share
+ *  one formatter. */
 export function formatTokens(n: number): string {
   const fmt = (v: number, suffix: string) =>
     `${v.toFixed(1).replace(/\.0$/, "")}${suffix}`;

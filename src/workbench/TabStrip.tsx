@@ -47,7 +47,6 @@ import {
   RotateCcw,
   Server,
   Terminal,
-  Workflow,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -100,7 +99,6 @@ export const TAB_ICONS: Record<PaneKind, LucideIcon> = {
   review: GitCompare,
   servers: Server,
   memory: Brain,
-  runs: Workflow,
 };
 
 /** Pointer travel before a press becomes a drag. */

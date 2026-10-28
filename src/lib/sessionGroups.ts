@@ -21,10 +21,10 @@
 
 import type { SessionSummary } from "../types";
 import { computeRevisionDisplay } from "./revisionVersions";
-import { sessionMode, type ModeKind } from "./sessionMode";
+import { planBuildState, sessionMode, type ModeKind } from "./sessionMode";
 
 /** Why a row is in Needs you; the tag at the row's right end. */
-export type NeedReason = "Question" | "Permission" | "Review" | "Stalled";
+export type NeedReason = "Question" | "Permission";
 
 /** A terminal session launched from the start screen whose plan has not
  *  arrived. `title` is the prompt until a plan title (or the CLI's own
@@ -133,19 +133,6 @@ function planRowTitle(s: SessionSummary): string {
   return s.titleOverride || s.planTitle || s.projectName || s.projectPath || s.sessionId;
 }
 
-/** A plan's own need, before any engine ask: a run waiting on your code
- *  review, or one that stalled.
- *
- *  A plan held for its review is not one. That is what redlining IS (4d: the
- *  plan being marked is held, and sits in its project), and it is the row
- *  you are on: if opening it moved it out of Needs you, the row would jump
- *  out from under the click that opened it. */
-function planNeed(s: SessionSummary): NeedReason | null {
-  if (s.runState === "in_code_review" || s.runState === "awaiting_review") return "Review";
-  if (s.runState === "stalled") return "Stalled";
-  return null;
-}
-
 /** A plan row's mode, in the top bar's own words (lib/sessionMode): the row
  *  you open wears the chip's colour. Claude mid-turn in its terminal is a
  *  revision being written; a plan with no mode to name (aborted, nothing
@@ -180,7 +167,7 @@ export function sidebarItems(input: SidebarInput): SidebarItem[] {
       at: s.updatedAt,
       projectPath: folderKey(s.projectPath),
       mode: planRowMode(s, busy),
-      need: needs[key] ?? planNeed(s),
+      need: needs[key] ?? null,
       working: busy,
       archivedAt: s.archivedAt ?? null,
       session: s,
@@ -285,7 +272,7 @@ export function buildSidebar(input: SidebarInput): SidebarModel {
  *  amber, building green) plus a quiet grey. */
 export type StatusTone = "plan" | "redline" | "build" | "quiet";
 
-export type StatusIcon = "spin" | "dot" | "alert" | "pen" | "hammer" | "check" | "built" | "run" | "chat" | "file";
+export type StatusIcon = "spin" | "dot" | "pen" | "hammer" | "check" | "built" | "chat" | "file";
 
 export interface RowStatus {
   /** The status line's first word(s): "In review", "Approved · not built". */
@@ -299,13 +286,10 @@ export interface RowStatus {
 const NEED_STATUS: Record<NeedReason, RowStatus> = {
   Question: { word: "Question for you", tone: "redline", icon: "dot", detail: "Claude asked you something and is waiting" },
   Permission: { word: "Needs permission", tone: "redline", icon: "dot", detail: "Claude is waiting for you to allow a tool" },
-  Review: { word: "Ready for review", tone: "redline", icon: "dot", detail: "The run finished and waits on your review" },
-  Stalled: { word: "Stalled", tone: "redline", icon: "alert", detail: "The run stopped making progress" },
 };
 
 /** Where a row is in its life, in one line. A spinner means something is
- *  running right now: a terminal mid-turn, or an orchestrated run the run
- *  watcher keeps honest. A build handed to an agent in its terminal is
+ *  running right now: a terminal mid-turn. A build handed to an agent in its terminal is
  *  "Approved" with a hammer, never a spinner: nothing tells Redline when that
  *  agent finishes, so a spinner there would spin forever. */
 export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | "session">): RowStatus {
@@ -319,15 +303,11 @@ export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | 
       ? { word: "Building", tone: "build", icon: "spin", detail: "An agent is building this plan in its terminal" }
       : { word: s.held ? "Planning" : "Revising", tone: "plan", icon: "spin", detail: "Claude is working in this plan's terminal" };
   }
-  if (s.runState === "orchestrating") return { word: "Starting the run", tone: "build", icon: "spin" };
-  if (s.runState === "running") return { word: "Running", tone: "build", icon: "spin", detail: "An orchestrated run is building this plan" };
   if (s.status === "in_review") return { word: "In review", tone: "redline", icon: "pen", detail: s.held ? "Claude is waiting on your review" : undefined };
   if (s.status === "aborted") return { word: "Aborted", tone: "quiet", icon: "file" };
-  switch (s.runState) {
+  switch (planBuildState(s.runState)) {
     case "landed": return { word: "Built", tone: "build", icon: "built" };
     case "building": return { word: "Approved", tone: "build", icon: "hammer", detail: "Handed to an agent to build in its terminal" };
-    case "ready": return { word: "Run ready", tone: "build", icon: "run", detail: "A run is drafted and waits on you to start it" };
-    case "abandoned": return { word: "Stood down", tone: "quiet", icon: "file" };
     default: return { word: "Approved · not built", tone: "build", icon: "check" };
   }
 }

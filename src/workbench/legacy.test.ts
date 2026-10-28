@@ -40,7 +40,7 @@ describe("legacyView", () => {
     s = reduce(s, { type: "openTab", pane: room, tabId: "r" });
     expect(legacyView(s)).toMatchObject({ mainSurface: "chat", docPinned: false });
     expect(surfaceOf({ id: "x", kind: "terminals", data: { tiles: [], focus: 0, zoomed: null, pinned: [] } })).toBeNull();
-    expect(surfaceOf({ id: "x", kind: "runs", data: {} })).toBe("runs");
+    expect(surfaceOf({ id: "x", kind: "servers", data: {} })).toBe("servers");
   });
 
   it("the active file is the focused file pane, else the tab's first; a surface tab has none", () => {
@@ -74,8 +74,8 @@ describe("legacyView", () => {
   });
 
   it("maps every surface App can select to a pane kind", () => {
-    const surfaces: MainSurface[] = ["document", "browser", "drafter", "review", "servers", "memory", "runs", "chat"];
-    expect(surfaces.map((s) => kindForSurface(s, "plan:s1"))).toEqual(["plan", "browser", "drafter", "review", "servers", "memory", "runs", "chat"]);
+    const surfaces: MainSurface[] = ["document", "browser", "drafter", "review", "servers", "memory", "chat"];
+    expect(surfaces.map((s) => kindForSurface(s, "plan:s1"))).toEqual(["plan", "browser", "drafter", "review", "servers", "memory", "chat"]);
     expect(kindForSurface("document", HOME_KEY)).toBe("door");
     expect(kindForSurface("document", "launch:l")).toBe("door");
   });

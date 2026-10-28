@@ -5,18 +5,15 @@
 // into it" used to be a blind `setTimeout(pty_write, 900)` — no ack, no
 // await, no `.catch()` — against a backend whose unchecked write converts a
 // missing terminal into success. A handoff that failed was indistinguishable
-// from one that landed, which is how an orchestrated run once evaporated
-// without a trace. This module replaces the guess with a checked sequence:
-// wait for the real spawn signal, write through the checked command, observe
-// the shell's output instead of assuming, and (for Orchestrate) confirm the
-// prompt actually reached claude by watching for the ingest claim.
+// from one that landed, which is how a launch once evaporated without a
+// trace. This module replaces the guess with a checked sequence: wait for the
+// real spawn signal, write through the checked command, and observe the
+// shell's output instead of assuming.
 //
 // Pure logic + injected deps so it is unit-testable without a PTY — the
 // `activeSurface.ts` / `paneLayout.ts` house pattern. The deps are wired to
 // `whenPtySpawned` / `awaitPtyOutput` (lib/terminalSeams) and the
-// `pty_write_checked` / `get_run_state` Tauri commands at the call site.
-
-import { isLiveRunState } from "./orchestration";
+// `pty_write_checked` Tauri command at the call site.
 
 /** Where a handoff can fail. `spawn` = the terminal never came up; `launch` =
  *  the first write (the shell command) was refused; `prompt` = the typed
@@ -55,19 +52,6 @@ export interface HandoffDeps {
   journal(stage: string, detail?: string): void;
   sleep(ms: number): Promise<void>;
 }
-
-/** claude's TUI coming up — the marker the orchestrate prompt waits for,
- *  because claude enters raw mode and can discard bytes buffered before its
- *  init (the second failure window after the spawn race). Matched against the
- *  RAW output stream, so it lists banner strings across CLI generations: the
- *  v2.x boot banner ("Claude Code v2.1.222") and the persistent mode bar
- *  ("(shift+tab to cycle)") joined the older hints on 08/12, after the field
- *  showed 2.1.222 printing none of the originals — every orchestrate burned
- *  the full 30s timeout before the fallback settle typed anyway. None of
- *  these can match the echoed launch command (`cd … && claude --permission-
- *  mode …`), which is the text on screen before the TUI takes over. */
-export const CLAUDE_READY =
-  /\? for shortcuts|Welcome to Claude Code|Claude Code v\d|shift\+tab to cycle|╭─{3,}/;
 
 /** A shell sitting at its prompt, ready to read a line.
  *
@@ -146,126 +130,4 @@ export async function deliverToTerminal(
     );
   }
   return { ok: true };
-}
-
-/** Timing knobs, injectable so tests run in microseconds. */
-export interface OrchestrateTiming {
-  spawnTimeoutMs: number;
-  readyTimeoutMs: number;
-  readyFallbackMs: number;
-  /** Per-attempt window for the ingest claim to advance the run state. */
-  claimTimeoutMs: number;
-  claimPollMs: number;
-  /** Prompt re-writes after the first attempt. */
-  maxPromptRetries: number;
-}
-
-const DEFAULT_ORCHESTRATE_TIMING: OrchestrateTiming = {
-  spawnTimeoutMs: SPAWN_TIMEOUT_MS,
-  readyTimeoutMs: 30_000,
-  readyFallbackMs: READY_FALLBACK_MS,
-  claimTimeoutMs: 20_000,
-  claimPollMs: 1_000,
-  maxPromptRetries: 2,
-};
-
-export interface OrchestrateDeps extends HandoffDeps {
-  /** `sessions.run_state` for the plan session — the delivery probe. */
-  getRunState(sessionId: string): Promise<string | null>;
-  /** Re-register the launch guards before a prompt retry. Mandatory, not
-   *  cosmetic: the orchestration guard expires on `GUARD_TTL` (300 s), so a
-   *  slow approval of the workflow card would otherwise lose the claim. */
-  rearm(): Promise<void>;
-}
-
-/** The full Orchestrate handoff: spawn → launch command → (claude ready) →
- *  prompt → confirm the ingest claim fired, retrying the prompt when it
- *  didn't. Delivery is not the goal; the claim is — *leaving*
- *  `orchestrating` is the only evidence a run actually started. */
-export async function orchestrateHandoff(
-  deps: OrchestrateDeps,
-  id: string,
-  planSessionId: string,
-  launchCmd: string,
-  prompt: string,
-  timing?: Partial<OrchestrateTiming>,
-): Promise<HandoffResult> {
-  const t = { ...DEFAULT_ORCHESTRATE_TIMING, ...timing };
-  const fail = (stage: HandoffFailureStage, reason: string): HandoffResult => {
-    deps.journal("handoff_failed", `${stage}: ${reason}`);
-    return { ok: false, stage, reason };
-  };
-
-  const launched = await deliverToTerminal(
-    deps,
-    id,
-    [{ stage: "launch", data: `${launchCmd}\r` }],
-    { spawnTimeoutMs: t.spawnTimeoutMs },
-  );
-  if (!launched.ok) return fail(launched.stage, launched.reason);
-
-  // The readiness marker is only awaited once — a retry types into a claude
-  // that is already up (the failure being retried is a lost prompt, not a
-  // lost boot).
-  const ready = await deps.awaitOutput(id, CLAUDE_READY, t.readyTimeoutMs);
-  if (!ready) await deps.sleep(t.readyFallbackMs);
-
-  const polls = Math.max(1, Math.ceil(t.claimTimeoutMs / t.claimPollMs));
-  for (let attempt = 0; attempt <= t.maxPromptRetries; attempt++) {
-    if (attempt > 0) {
-      // Re-arm BEFORE re-typing: the guard is consume-once and TTL-bounded.
-      try {
-        await deps.rearm();
-      } catch (e) {
-        return fail("prompt", `re-arming the launch guards failed: ${String(e)}`);
-      }
-    }
-    try {
-      await deps.writeChecked(id, `${prompt}\r`);
-    } catch (e) {
-      return fail("prompt", String(e));
-    }
-    deps.journal("handoff_prompt_written", `attempt ${attempt + 1}`);
-
-    for (let i = 0; i < polls; i++) {
-      // The condition is POSITIVE on purpose. It used to be
-      // `state !== "orchestrating"` over a `.catch(() => null)`, which made
-      // two very different things read as delivery: a transient IPC error on
-      // the very first poll, and a `run_state` of `null` — the value
-      // `reset_run` writes. Either one ended the loop with `{ ok: true }`,
-      // reporting a run delivered with no evidence it ever was, which is the
-      // one failure this whole verified handoff exists to prevent.
-      let state: string | null;
-      try {
-        state = await deps.getRunState(planSessionId);
-      } catch {
-        // Not knowing is not evidence. Keep polling; the timeout below is
-        // the honest verdict if every probe stays blind.
-        await deps.sleep(t.claimPollMs);
-        continue;
-      }
-      if (state === null) {
-        // Observed, not inferred: something reset the run out from under the
-        // launch. Retrying the prompt cannot fix that, so stop now and say so.
-        return fail(
-          "prompt",
-          "the run was reset while the orchestrator prompt was being " +
-            "delivered — its run state went back to none",
-        );
-      }
-      if (isLiveRunState(state) && state !== "orchestrating") {
-        // The ingest claim advanced the chip: the click is no longer the
-        // only evidence the run started.
-        return { ok: true };
-      }
-      // Still `orchestrating`, or some non-live state (`landed`, `stalled`)
-      // that is not a claim landing — keep watching.
-      await deps.sleep(t.claimPollMs);
-    }
-  }
-  return fail(
-    "prompt",
-    "the orchestrator prompt was typed but no ingest claim ever arrived — " +
-      "the run never left 'orchestrating'",
-  );
 }

@@ -24,7 +24,6 @@ const SURFACES: ReadonlyArray<readonly [region: string, component: string]> = [
   ["drafter", "PromptDrafter"],
   ["review pane", "ReviewPanel"],
   ["memory", "MemorySurface"],
-  ["runs", "OrchestrationSurface"],
   ["collab plan editor", "PlanEditor"],
   ["plan editor", "PlanEditor"],
   ["browser", "BrowserPane"],

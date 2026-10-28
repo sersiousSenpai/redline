@@ -7,7 +7,6 @@ const base: SurfaceInputs = {
   reviewOpen: false,
   serversOpen: false,
   memoryOpen: false,
-  runsOpen: false,
   chatOpen: false,
   chatId: null,
   chatTitle: null,
@@ -88,23 +87,6 @@ describe("deriveActiveSurface", () => {
       const s = deriveActiveSurface({ ...base, chatOpen: true, chatId: "c1", [open]: true });
       expect(s.kind).not.toBe("chat");
     }
-  });
-
-  it("reports the Runs surface without an id or a project", () => {
-    // Machine-scoped like Localhost: every orchestrated run, no session
-    // identity of its own.
-    const s = deriveActiveSurface({
-      ...base,
-      runsOpen: true,
-      activeId: "sess-1",
-      hasTerminal: true,
-    });
-    expect(s).toMatchObject({
-      kind: "runs",
-      id: null,
-      label: "Runs",
-      projectPath: null,
-    });
   });
 
   it("reports terminal when a dock terminal exists but no plan is selected", () => {

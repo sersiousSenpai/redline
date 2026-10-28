@@ -8,8 +8,7 @@ import type { ReviewSession } from "../../types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => null }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}) }));
-vi.mock("../../hooks/useOrchestration", () => ({ useOrchestration: () => null }));
-import PlanPane, { buildProgress, priorWithComments, type PlanPaneProps } from "./PlanPane";
+import PlanPane, { priorWithComments, type PlanPaneProps } from "./PlanPane";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
@@ -133,11 +132,5 @@ describe("PlanPane", () => {
     expect(more.getAttribute("aria-expanded")).toBe("true");
     await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     expect(document.body.querySelector(".rl-plan-menu-panel")).toBeNull();
-  });
-
-  it("buildProgress reads a live run's totals", () => {
-    expect(buildProgress(null)).toBe(null);
-    expect(buildProgress({ totals: { plannedAgents: 11, done: 2, running: 1 } })).toEqual({ step: 3, of: 11 });
-    expect(buildProgress({ totals: { plannedAgents: null, done: 2, running: 1 } })).toBe(null);
   });
 });

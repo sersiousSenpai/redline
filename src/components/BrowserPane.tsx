@@ -224,7 +224,7 @@ interface BrowserPaneProps {
   /** Close the browser (toggle it off). */
   onClose: () => void;
   onOpenDraft?: (draftId: string) => void;
-  onMissionContinue?: (missionId: string, destination: "plan" | "auto", body: string, handoffId: string) => void;
+  onMissionContinue?: (missionId: string, destination: "plan", body: string, handoffId: string) => void;
   /** When false (e.g. a modal/overlay covers the pane), the native webview is
    *  hidden so it doesn't paint over the overlay. Defaults to true. */
   visible?: boolean;

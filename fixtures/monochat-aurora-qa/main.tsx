@@ -116,7 +116,7 @@ function Fixture() {
     {sidecar && <aside className="qa-discussion" aria-label="Document discussion"><button onClick={() => setSidecar(false)}>Close discussion</button><p>Preserve the original decision. This discussion stays beside its source.</p><textarea aria-label="Anchored reply" placeholder="Continue this discussion…"/><button>Send reply</button></aside>}
     <PaneDivider orientation="horizontal" label="terminal" collapsed={!terminal} dragging={false} onToggle={() => setTerminal(value => !value)} onPointerDown={noop}/>
     {terminal && <div className="qa-terminal rl-term-dock">Terminal · fixture</div>}
-    <Footer comments={[]} sessionReady={surface !== "Home"} canSubmit={false} canApprove={false} canOrchestrate={false} waiting={false} waitingAsk={false} onSubmit={noop} onApprove={noop} onOrchestrate={noop} termCollapsed={!terminal} termTabCount={0} termHasUnseen={false} onExpandTerminal={() => setTerminal(true)} reviewNews={reviewNews} onOpenReviewNews={() => setReviewNews(null)}/>
+    <Footer comments={[]} sessionReady={surface !== "Home"} canSubmit={false} canApprove={false} waiting={false} waitingAsk={false} onSubmit={noop} onApprove={noop} termCollapsed={!terminal} termTabCount={0} termHasUnseen={false} onExpandTerminal={() => setTerminal(true)} reviewNews={reviewNews} onOpenReviewNews={() => setReviewNews(null)}/>
     <MonochatIsland clearanceKey={String(terminal)} landing={surface === "Home"} surfaceKey={surface} onVisibilityChange={setVisible}
       open={open} onOpenChange={setOpen} compactOpen={compact} onCompactChange={setCompact} compact={compact && renderComposer("card")}
       context={roomChat ? "Redline Aurora" : surface === "Document" ? "Auth rewrite" : surface === "Browser" ? "LiDAR-GS" : "Front door"} busy={busy}

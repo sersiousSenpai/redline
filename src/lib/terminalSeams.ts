@@ -111,7 +111,7 @@ export function tapPtyOutput(id: string, bytes: Uint8Array) {
 /** The house `HandoffDeps` wiring: the spawn signal + output tap above, the
  *  checked write and liveness commands below. One shared instance so every
  *  "open a terminal and type into it" call site (App, TerminalTabs) runs the
- *  same verified path. The journal is a no-op here — the Orchestrate flow
+ *  same verified path. The journal is a no-op here — a caller with a session
  *  overlays its own session-scoped journal. */
 export const tauriHandoffDeps: HandoffDeps = {
   whenSpawned: whenPtySpawned,

@@ -50,18 +50,14 @@ export interface SessionModeInput {
   revising?: boolean;
   /** The session's revisions, oldest first: the build family's vN. */
   revisions?: ReadonlyArray<{ versionNumber: number; restored?: boolean }>;
-  /** `SessionSummary.runState`: building | orchestrating | running |
-   *  in_code_review | landed | stalled, or null for a plain approve. */
+  /** `SessionSummary.runState`: building | landed, or null for a plain
+   *  approve (`planBuildState` reads anything else as null). */
   runState?: string | null;
   /** The CLI's own permission mode, from the conversation mirror's latest
    *  `mode_change`; null or absent until it has reported one. */
   cliMode?: ConvoMode | null;
 }
 
-/** Run states in which the approved plan is still being built. `stalled`
- *  counts: the build has not finished, it has stopped making progress, and
- *  the plan footer says which. */
-const BUILDING_STATES = new Set(["building", "orchestrating", "running", "in_code_review", "stalled"]);
 
 export function sessionMode(input: SessionModeInput): SessionMode | null {
   switch (input.target) {
@@ -84,8 +80,8 @@ function planMode(input: SessionModeInput): SessionMode | null {
     // The substantive version, as the version pill counts it: a restore
     // re-presents a version, it does not make a new one.
     const version = latestDisplayVersion(revisions, revisions[revisions.length - 1]?.versionNumber ?? 1);
-    const runState = input.runState ?? null;
-    const word = runState === "landed" ? "Built" : runState && BUILDING_STATES.has(runState) ? "Building" : "Approved";
+    const runState = planBuildState(input.runState);
+    const word = runState === "landed" ? "Built" : runState === "building" ? "Building" : "Approved";
     return { kind: "build", label: `${word} v${version}`, version };
   }
   if (input.held) return { kind: "redline", label: "Redlining" };
@@ -180,11 +176,17 @@ export function needsYou(input: NeedsYouInput): NeedsYou {
   };
 }
 
+/** The build state of an approved plan, from `sessions.run_state`: its
+ *  agent building it in a terminal (`building`, from Build), or marked
+ *  Completed (`landed`). Any other stored value was written by the
+ *  orchestrated-run feature, which is gone, and reads as null: not built. */
+export function planBuildState(runState: string | null | undefined): "building" | "landed" | null {
+  return runState === "building" || runState === "landed" ? runState : null;
+}
+
 /** Whether an approved plan is being built right now: one agent in its
- *  terminal (`building`) or an orchestrated run that has not landed
- *  (`orchestrating`, `running`). Narrower than the chip's Building — a run
- *  in code review is waiting on YOU and a stalled one has stopped — so it is
- *  what the sidebar's Building section and its spinners key on. */
+ *  terminal (`building`). What the sidebar's Building section and its
+ *  spinners key on. */
 export function isBuildingRunState(runState: string | null | undefined): boolean {
-  return runState === "building" || runState === "orchestrating" || runState === "running";
+  return runState === "building";
 }

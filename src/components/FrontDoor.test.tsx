@@ -101,7 +101,6 @@ function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
     onLaunch: () => {},
     refusal: null,
     onDrafter: () => {},
-    onRun: () => {},
     onChat: () => {},
     chatEnabled: true,
     destination: "plan",
@@ -890,9 +889,9 @@ describe("the floating replacement composer", () => {
     expect(host.contains(menu)).toBe(false);
     expect(menu.querySelector("select")).toBeNull();
     await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })));
-    expect(document.activeElement?.textContent).toContain("Just run it");
+    expect(document.activeElement?.textContent).toContain("Talk it through first");
     await act(async () => (document.activeElement as HTMLButtonElement).click());
-    expect(destination).toHaveBeenCalledWith("run");
+    expect(destination).toHaveBeenCalledWith("chat");
     expect(launch).not.toHaveBeenCalled();
     expect(composer()?.value).toBe("Keep this draft");
     expect(document.activeElement).toBe(trigger);
@@ -936,73 +935,25 @@ describe("dictation into the door", () => {
   });
 });
 
-describe("FrontDoor — Just run it", () => {
-  it("restricts a compact browser composer to Plan and Run, including the modifier shortcut", async () => {
-    const onRun = vi.fn(), onDrafter = vi.fn();
-    await mount({ destination: "plan", allowedDestinations: ["plan", "run"], onRun, onDrafter, text: "Build this" });
+describe("FrontDoor — no Just run it", () => {
+  it("restricts a compact browser composer to Plan, including the modifier shortcut", async () => {
+    const onLaunch = vi.fn(), onDrafter = vi.fn();
+    await mount({ destination: "plan", allowedDestinations: ["plan"], onLaunch, onDrafter, text: "Build this" });
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Destination"]')!.click());
     const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Destination"]')!;
-    expect(menu.textContent).toContain("Just run it"); expect(menu.textContent).not.toContain("Draft a document"); expect(menu.textContent).not.toContain("Talk it through");
+    expect(menu.textContent).not.toContain("Just run it"); expect(menu.textContent).not.toContain("Draft a document"); expect(menu.textContent).not.toContain("Talk it through");
     await act(async () => composer()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })));
-    expect(onRun).toHaveBeenCalledOnce(); expect(onDrafter).not.toHaveBeenCalled();
-  });
-  it("sends ⏎ to the run path, never the plan launch", async () => {
-    const onRun = vi.fn(), onLaunch = vi.fn();
-    await mount({ destination: "run", onRun, onLaunch, text: "Bump the lockfile" });
-    await pressEnter();
-    expect(onRun).toHaveBeenCalledOnce();
-    expect(onLaunch).not.toHaveBeenCalled();
+    expect(onLaunch).toHaveBeenCalledOnce(); expect(onDrafter).not.toHaveBeenCalled();
   });
 
-  it("keeps ⌘⏎ one key away from a plan", async () => {
-    const onRun = vi.fn(), onLaunch = vi.fn();
-    await mount({ destination: "run", onRun, onLaunch, text: "Bump the lockfile" });
-    await act(async () => {
-      composer()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
-    });
-    expect(onLaunch).toHaveBeenCalledOnce();
-    expect(onRun).not.toHaveBeenCalled();
-  });
-
-  it("says what a run skips: auto mode on Claude, no approvals and no sandbox on Codex", async () => {
-    await mount({ destination: "run", text: "x" });
-    expect(host.querySelector(".rl-fd-runmode")?.textContent).toBe("Auto mode");
-    expect(host.querySelector(".rl-fd-runmode.is-unsafe")).toBeNull();
-    // A fresh root: the harness owns `backend` as state from its first mount.
-    act(() => root.unmount());
-    root = createRoot(host);
-    await mount({ destination: "run", text: "x", backend: { backend: "codex", model: null, effort: null } });
-    expect(host.querySelector(".rl-fd-runmode.is-unsafe")?.textContent).toBe("No approvals · no sandbox");
-    await mount({ destination: "plan", text: "x" });
-    expect(host.querySelector(".rl-fd-runmode")).toBeNull();
-  });
-
-  it("is hidden for harnesses whose non-plan flags are unverified, and a sticky run falls back to plan", async () => {
-    const onRun = vi.fn(), onLaunch = vi.fn();
-    await mount({ destination: "run", onRun, onLaunch, text: "x", backend: { backend: "cursor", model: null, effort: null } });
-    expect(host.querySelector(".rl-fd-runmode")).toBeNull();
+  it("a sticky \"run\" from before the cut falls back to plan", async () => {
+    const onLaunch = vi.fn();
+    await mount({ destination: "run" as unknown as "plan", onLaunch, text: "Bump the lockfile" });
     await pressEnter();
     expect(onLaunch).toHaveBeenCalledOnce();
-    expect(onRun).not.toHaveBeenCalled();
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Destination"]')!.click());
     const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Destination"]')!;
     expect(menu.textContent).not.toContain("Just run it");
-  });
-
-  it("offers a folder with no $HOME escape when there is nowhere to run", async () => {
-    const onRun = vi.fn();
-    await mount({ destination: "run", onRun, text: "Make a todo app", projectOptions: [], lastLaunchProject: null });
-    await pressEnter();
-    expect(onRun).not.toHaveBeenCalled();
-    expect(host.textContent).toContain("Build this in a new folder");
-    expect(host.textContent).toContain("Create & run");
-    expect(host.textContent).not.toContain("just use Home");
-  });
-
-  it("labels a run's flight pill as running", async () => {
-    await mount({ pending: { ...PENDING, kind: "run" } });
-    expect(flight()?.textContent).toContain("Running");
-    expect(flight()?.textContent).not.toContain("Planning");
   });
 });
 

@@ -48,7 +48,7 @@ describe("surface conversations", () => {
     expect(kinds(inputs({ surface: "drafter", drafterDraftId: "draft" }))).toEqual(["drafter", "companion"]);
     expect(kinds(inputs({ surface: "browser", browseId: "tab" }))).toEqual(["browse", "browselist", "companion"]);
     // A surface with no dock has nowhere to carry it.
-    for (const surface of ["memory", "review", "servers", "runs", "unknown"]) expect(kinds(inputs({ surface }))).toEqual([]);
+    for (const surface of ["memory", "review", "servers", "unknown"]) expect(kinds(inputs({ surface }))).toEqual([]);
     expect(kinds(inputs({ plateMode: "file" }))).toEqual([]);
     expect(kinds(inputs({ plateMode: "door", chatEnabled: false }))).toEqual([]);
     expect(kinds(inputs({ chatEnabled: false }))).toEqual(["voice"]);

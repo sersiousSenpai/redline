@@ -139,9 +139,9 @@ describe("buildResumeCommand", () => {
     expect(cmd).not.toContain("rawPlanMarkdown");
   });
 
-  it("carries the rescission sentence only for an un-approved Orchestrate", () => {
-    // The resumed session's context still holds ORCHESTRATE_STAND_DOWN
-    // ("this session's work is done"); the restore prompt must void it, or
+  it("carries the rescission sentence only for a rescinded approval", () => {
+    // The resumed session's context still holds the build-later stand-down
+    // ("do not implement"); the restore prompt must void it, or
     // the resumed claude obeys the stale stand-down instead of the restore.
     // Stays VISIBLE rather than riding only the hidden context: it is one of
     // the things the trigger has to be able to say on its own.

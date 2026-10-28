@@ -32,7 +32,6 @@ import { heldPlanByTerminal, heldTerminalIds } from "./lib/heldTerminals";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
 /** How long a direct run's flight pill stays up: through the launch, not the
  *  run — after this the tile is the status. */
-const RUN_FLIGHT_MS = 12_000;
 
 const loadPlanEditor = () => import("./components/PlanEditor");
 const PlanEditor = lazy(() =>
@@ -95,10 +94,9 @@ import {
   type RestoreAttempt,
   type RestoreEvent,
 } from "./lib/restoreAttempt";
-import { isLiveRunState } from "./lib/orchestration";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 import { Header } from "./components/Header";
-import { sessionMode } from "./lib/sessionMode";
+import { planBuildState, sessionMode } from "./lib/sessionMode";
 import { Button } from "./components/ui/Button";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
 // only mounts when the share dialog opens.
@@ -177,14 +175,10 @@ import {
 } from "./lib/terminalSeams";
 import {
   deliverToTerminal,
-  orchestrateHandoff,
   PROMPT_TIMEOUT_MS,
   SHELL_PROMPT,
   type HandoffStep,
-  type OrchestrateDeps,
 } from "./lib/terminalHandoff";
-import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems";
-import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
 // The right rail's chrome and its collapsed edge strip (W4): one lazy chunk.
 const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RightRail })));
 const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
@@ -241,17 +235,7 @@ const loadMemorySurface = () => import("./components/MemorySurface");
 const MemorySurface = lazy(() =>
   loadMemorySurface().then((m) => ({ default: m.MemorySurface })),
 );
-// Off the boot path like the drafter: the Runs surface only matters once an
-// orchestrated run exists, so its chunk loads on first open.
-// The run report — the container an orchestrated run's review pane sits in.
-// Behind the run chip, never on the way to the front door, and (like the
-// preflight modal above) pure surface that a user who has never orchestrated
-// should not carry at boot.
-const RunReport = lazy(() =>
-  import("./components/RunReport").then((m) => ({ default: m.RunReport })),
-);
-
-// Build Redline's one piece outside Runs: the readiness indicator, the restart
+// Build Redline's readiness indicator, the restart
 // confirmation, and the cover that goes up while Redline is saving its work or
 // checking a version it just installed. Lazy, and it stays unfetched on a
 // machine that never prepares a release — the boot path has single-digit KB of
@@ -260,18 +244,6 @@ const ActivationBar = lazy(() =>
   import("./components/ActivationBar").then((m) => ({ default: m.ActivationBar })),
 );
 
-// The Orchestrate preflight modal. Lazy because it is behind a click that
-// already awaits three invokes (push_status, the workflows probe, the allow
-// candidates), so a chunk fetch is free there — and because it is pure prose
-// and controls that nobody who never orchestrates should pay for at boot. The
-// door is on the boot path with single-digit KB of headroom; this is exactly
-// the kind of weight that has no business sitting on it.
-const loadOrchestrationSurface = () => import("./components/OrchestrationSurface");
-const OrchestrationSurface = lazy(() =>
-  loadOrchestrationSurface().then((m) => ({
-    default: m.OrchestrationSurface,
-  })),
-);
 // Off the boot path for the same reason as MemorySurface: the Localhost
 // surface is a pure function of one scan, opened on demand, and static only
 // by omission while boot JS sits at its ceiling.
@@ -283,9 +255,6 @@ const ServersPane = lazy(() =>
 // size budget, so a chat room in the boot chunk would fail `size-budget.json`
 // outright. It loads when the door's third destination is taken.
 const loadChatRoom = () => import("./components/ChatRoom");
-// Scaled builds (Track O): the Custom dialog and the pre-flight/pause cards.
-const ScaledBuildDialog = lazy(() => import("./components/ScaledBuild").then((m) => ({ default: m.ScaledBuildDialog })));
-const ScaledBuildCards = lazy(() => import("./components/ScaledBuild").then((m) => ({ default: m.ScaledBuildCards })));
 const ChatRoom = lazy(() => loadChatRoom().then((m) => ({ default: m.ChatRoom })));
 // Every lazy surface body's chunk, keyed by the surface that mounts it. The
 // boot effect prefetches the LANDING surface's entry the moment
@@ -300,7 +269,6 @@ const SURFACE_CHUNK_LOADERS: Partial<
   drafter: loadPromptDrafter,
   browser: loadBrowserPane,
   memory: loadMemorySurface,
-  runs: loadOrchestrationSurface,
   servers: loadServersPane,
   // Not a surface any more — the room is the conversation dock's Companion
   // body. Kept keyed here so the dock warms it through the same helper.
@@ -575,12 +543,8 @@ import {
 import {
   buildPlanLaunchCommand,
   buildRunLaunchCommand,
-  buildScaledLaunchCommand,
-  buildScaledPrompt,
   runSupported,
 } from "./lib/planLaunchCommand";
-import type { CodeReviewSession, WorkflowAvailability } from "./types";
-import type { RunGraph } from "./lib/runner/schema";
 import { useModelCatalogs } from "./hooks/useModelCatalogs";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
@@ -843,7 +807,7 @@ const selectFocusedDoorDestination = (state: WorkbenchState): LaunchDestination 
   const { set, tab } = activePanes(state);
   const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
   const d = focused?.kind === "door" ? focused.data.destination : undefined;
-  return d === "plan" || d === "run" || d === "chat" || d === "drafter" || d === "browser" ? d : null;
+  return d === "plan" || d === "chat" || d === "drafter" || d === "browser" ? d : null;
 };
 /** The companion chat pane the active tab shows, if any: the room is a
  *  pane now, and the one ChatRoom body follows it. */
@@ -1208,7 +1172,6 @@ function App() {
   const reviewOpen = mainSurface === "review";
   const serversOpen = mainSurface === "servers";
   const memoryOpen = mainSurface === "memory";
-  const runsOpen = mainSurface === "runs";
   const chatOpen = mainSurface === "chat";
   // The user has explicitly reopened something on this visit to an immersive
   // surface, so the mask is off until they leave. Declared here — above
@@ -1762,13 +1725,6 @@ function App() {
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunch | null>(null);
   const pendingLaunchRef = useRef(pendingLaunch);
   pendingLaunchRef.current = pendingLaunch;
-  // A direct run's flight pill. Its OWN slot, deliberately not `pendingLaunch`:
-  // that slot claims plan-decision windows and drives the `/hooks` nudge, and
-  // a run sends no plan to claim. It lives only through the launch itself —
-  // the tile is the status after that — so it retires on its own.
-  const [runFlight, setRunFlight] = useState<
-    { prompt: string; startedAt: number; terminalId: string; restore: LaunchRestore; kind: "run" } | null
-  >(null);
   const launchedPlansRef = useRef(new Map<string, PendingLaunch>());
   const [chatReceipts, setChatReceipts] = useState<Record<string, ChatPlanReceipt>>({});
   const chatHandoffSeeds = useRef(new Map<string, { text: string; id: string }>());
@@ -2371,7 +2327,7 @@ function App() {
     initialProject: string | null;
     destination?: ContinueDestination;
     source?: ContinueRequest["source"];
-    missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" | "run" };
+    missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "run" };
   } | null>(null);
   const [sendPending, setSendPending] = useState(false);
   const sendPendingRef = useRef(false);
@@ -2453,23 +2409,22 @@ function App() {
   const browserHeld = useWorkbench(wb, (s) => singletonHolder(s, "browser", browserHolder));
   const wbLayoutKey = `${useWorkbench(wb, selectWbLayoutKey)}|${browserHeld}`;
   // An agent asking for a code review (a `/redline-code-review` curl holding
-  // for feedback), or a run filing its exit report, is news — never a move.
+  // for feedback) is news — never a move.
   // The review surface waits for you: a notice says so once, a footer chip
   // holds the way in until you go there (or the agent stops waiting), and
   // from another app the Dock bounces and a notification says it. The agent
   // waits either way; the hook itself adopts the repo/source/round.
-  const [reviewNews, setReviewNews] = useState<"review" | "report" | null>(null);
+  const [reviewNews, setReviewNews] = useState<"review" | null>(null);
   const reviewNewsRef = useRef(reviewNews);
   reviewNewsRef.current = reviewNews;
-  const tellReview = useCallback((kind: "review" | "report") => {
-    const message = kind === "report" ? "Run report ready" : "Review ready";
+  const tellReview = useCallback(() => {
+    const message = "Review ready";
     const there = mainSurfaceRef.current === "review";
-    // A report's own review request follows it in: one piece of news.
     if (!there && reviewNewsRef.current) return;
     // Already on the review surface, it is on screen: only the OS is told.
     if (!there) {
-      reviewNewsRef.current = kind;
-      setReviewNews(kind);
+      reviewNewsRef.current = "review";
+      setReviewNews("review");
       setToast({
         message,
         tone: "info",
@@ -2478,13 +2433,13 @@ function App() {
       });
     }
     void import("./lib/osNotice")
-      .then(({ noticeWhenAway }) => noticeWhenAway(message, kind === "report" ? "A run filed its report. Open Redline to review it." : "An agent is waiting for your code review in Redline."))
+      .then(({ noticeWhenAway }) => noticeWhenAway(message, "An agent is waiting for your code review in Redline."))
       .catch(() => {});
   }, []);
   useEffect(() => {
     let alive = true;
     const p = listen("review-requested", () => {
-      if (alive) tellReview("review");
+      if (alive) tellReview();
     });
     return () => {
       alive = false;
@@ -2492,51 +2447,19 @@ function App() {
     };
   }, [tellReview]);
   // Over once you go to the review surface, or once the agent stops
-  // waiting on a review nobody opened. A report waits for you.
+  // waiting on a review nobody opened.
   useEffect(() => {
     if (mainSurface === "review") setReviewNews(null);
   }, [mainSurface]);
   useEffect(() => {
-    if (!codeReview.holdActive) setReviewNews((news) => (news === "review" ? null : news));
+    if (!codeReview.holdActive) setReviewNews(null);
   }, [codeReview.holdActive]);
-  // Orchestrated runs: which plan session's RunReport container wraps the
-  // review surface (null = the plain review pane). Opened by the exit-report
-  // event or by clicking a run chip in the sessions pane.
-  const [runReportFor, setRunReportFor] = useState<string | null>(null);
-  // A verified Orchestrate handoff that failed — the persistent error banner
-  // with Retry / Copy launch command / Open terminal manually. The state was
-  // already rolled back (reset_run) by the time this is set.
-  const [handoffFailure, setHandoffFailure] = useState<{
-    sessionId: string;
-    stage: string;
-    reason: string;
-    launchCmd: string;
-    prompt: string;
-    projectPath: string | null;
-    /** A team build's failed launch: Retry relaunches the team, not a graph. */
-    retryScaled?: ScaleConfig;
-  } | null>(null);
   // Sessions whose approval was rescinded (unapprove_plan) this app session —
   // their restore prompt carries the "your stand-down is void" sentence so a
-  // resumed claude doesn't obey a stale ORCHESTRATE_STAND_DOWN in its context.
+  // resumed claude doesn't obey a stale build-later stand-down in its context.
   const [rescindedIds, setRescindedIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  useEffect(() => {
-    let alive = true;
-    // The orchestrator filed its exit report → the review surface opens on
-    // the RunReport container (the review-requested event that follows
-    // lands inside it), whenever the user goes there.
-    const rep = listen<{ sessionId: string }>("orchestration-report", (e) => {
-      if (!alive) return;
-      setRunReportFor(e.payload.sessionId);
-      tellReview("report");
-    });
-    return () => {
-      alive = false;
-      void rep.then((un) => un());
-    };
-  }, [tellReview]);
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -5230,7 +5153,6 @@ function App() {
     reviewOpen,
     serversOpen,
     memoryOpen,
-    runsOpen,
     chatOpen,
     chatId,
     chatTitle,
@@ -6068,8 +5990,11 @@ function App() {
   // restored (which clears `detached` on the next plan-received POST).
   const canSubmit = pendingComments.length > 0 && !detached;
   const canApprove = !!session && session.status !== "approved" && !detached;
-  const activeRunState =
-    summaries.find((s) => s.sessionId === session?.sessionId)?.runState ?? null;
+  // `building` or `landed`; anything else the cut run feature left reads as
+  // not built.
+  const activeRunState = planBuildState(
+    summaries.find((s) => s.sessionId === session?.sessionId)?.runState,
+  );
 
   // A highlight clicked in the plan brings its thread forward: the rail
   // turns to Discussion (it never opens a folded rail — the card waits there).
@@ -6365,7 +6290,7 @@ function App() {
   // Building an approved plan: the agent that wrote it ("same", resuming its
   // session in a building mode) or a hand-off to the other harness, which
   // reads the approved plan from a file. Cursor/Antigravity are not offered
-  // (their non-plan flags are unverified). Multi-agent builds are Track O.
+  // (their non-plan flags are unverified).
   const planHarness: Backend = restoreDecision.harness;
   const buildTargets = useMemo(() => {
     if (session?.status !== "approved") return [];
@@ -6375,16 +6300,10 @@ function App() {
     for (const b of ["claude-code", "codex"] as const) {
       if (b !== planHarness) targets.push({ id: b, label: `with ${agentLabelFor(b)}`, detail: "a fresh session reads the approved plan" });
     }
-    targets.push(...TEAM_BUILD_ITEMS);
     return targets;
   }, [session?.status, planHarness]);
 
   const buildApproved = async (targetId: string) => {
-    const scale = teamScaleOf(targetId);
-    if (scale) {
-      void startTeamBuild(scale);
-      return;
-    }
     if (!session || busy) return;
     const sessionId = session.sessionId;
     const projectPath = session.projectPath || null;
@@ -6456,139 +6375,12 @@ function App() {
     }
   };
 
-  // SCALED BUILDS (Track O): build with a team. Auto launches at the
-  // defaults; Custom opens the dialog first. Either way the lead is a typed
-  // `ultracode:` launch through the verified handoff, with the run's own
-  // pre-flight and budget hooks in its `--settings`.
-  const [scaleDialogFor, setScaleDialogFor] = useState<{ sessionId: string; defaults: ScaleConfig } | null>(null);
-  const startTeamBuild = async (scale: Scale) => {
-    if (!session || busy) return;
-    const defaults = await invoke<ScaleConfig>("scaled_defaults").catch(() => null);
-    if (!defaults) {
-      setToast("Couldn't read the team build defaults", 6000);
-      return;
-    }
-    if (scale === "custom") setScaleDialogFor({ sessionId: session.sessionId, defaults });
-    else void launchScaledBuild(session.sessionId, defaults);
-  };
-  const launchScaledBuild = async (sessionId: string, config: ScaleConfig) => {
-    if (busy) return;
-    const projectPath = (session?.sessionId === sessionId ? session.projectPath : summaries.find((s) => s.sessionId === sessionId)?.projectPath) || null;
-    // Refuse before approving anything: without workflows the team can't run.
-    const availability = await invoke<WorkflowAvailability>("workflow_availability", { projectPath }).catch(() => null);
-    if (availability?.disabledInSettings || availability?.disabledInEnv) {
-      setToast(`Dynamic workflows are turned off${availability.settingsSource ? ` in ${availability.settingsSource}` : ""}; a team build needs them.`, 8000);
-      return;
-    }
-    setBusy(true);
-    let launch: ScaledLaunch;
-    try {
-      launch = await invoke<ScaledLaunch>("scaled_build_start", { sessionId, config });
-    } catch (err) {
-      if (isDetachError(err)) {
-        setDetachDismissed(false);
-        void refreshSummaries();
-      } else setToast(`Couldn't start the team build: ${err}`, 8000);
-      return;
-    } finally {
-      setBusy(false);
-    }
-    void refreshSummaries();
-    const launchCmd = buildScaledLaunchCommand(launch.projectPath, launch.settingsPath, launch.leadModel, launch.effort);
-    const prompt = buildScaledPrompt(sessionId, launch.runId);
-    suppressTerminalRevealFocus();
-    const id = await openTerminal(launch.projectPath);
-    // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
-    // claim links the lead under the plan and starts the Runs watcher.
-    const rearm = () =>
-      invoke("record_orchestration_launch", { prompt, planSessionId: sessionId, terminalId: id }).then(() => undefined);
-    await rearm().catch((err) => console.error("record_orchestration_launch failed", err));
-    const fail = async (stage: string, reason: string) => {
-      await invoke("scaled_stop", { runId: launch.runId }).catch(() => {});
-      await invoke("reset_run", { sessionId }).catch(() => {});
-      setHandoffFailure({ sessionId, stage, reason, launchCmd, prompt, projectPath: launch.projectPath, retryScaled: config });
-      void refreshSummaries();
-    };
-    if (!id) {
-      await fail("spawn", "no terminal tab could be opened");
-      return;
-    }
-    const deps: OrchestrateDeps = {
-      ...tauriHandoffDeps,
-      journal: (stage, detail) => {
-        void invoke("record_handoff_event", { sessionId, stage, detail: detail ?? null }).catch(() => {});
-      },
-      getRunState: (sid) => invoke<string | null>("get_run_state", { sessionId: sid }),
-      rearm,
-    };
-    const result = await orchestrateHandoff(deps, id, sessionId, launchCmd, prompt);
-    if (result.ok) {
-      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      setToast({ message: "Team build started in a Terminals tab. Redline shows you its workflow before any agent starts.", action: { label: "Show", onAction: () => showTerminal(id) } });
-    } else await fail(result.stage, result.reason);
-  };
-  // A pre-flight or a pause is waiting on the user: mount the cards (lazy).
-  const [scaledAttention, setScaledAttention] = useState(0);
-  useEffect(() => {
-    const bump = () => setScaledAttention((n) => n + 1);
-    const subs = [listen("scaled-preflight", bump), listen("scaled-paused", bump)];
-    void invoke<unknown[]>("scaled_pending")
-      .then((rows) => { if (rows?.length) bump(); })
-      .catch(() => {});
-    return () => subs.forEach((s) => void s.then((f) => f()));
-  }, []);
-
   // Reopen for review: rescind the approval, then restore the session so the
   // plan comes back held, in review, with its comments — the stand-down it
   // was given is declared void in the restore trigger.
   const reopenApproved = async () => {
     if (!session) return;
     if (await unapproveSession(session.sessionId)) await restorePlanSessionWith({ rescinded: true });
-  };
-
-  // A native graph is reviewed in Runs before any task gets write access.
-  const [nativeRunId, setNativeRunId] = useState<string | null>(null);
-  const [runPlanAnchor, setRunPlanAnchor] = useState<{ sessionId: string; blockId: string } | null>(null);
-  useEffect(() => {
-    if (!runPlanAnchor || session?.sessionId !== runPlanAnchor.sessionId || (classicWb ? !wbView.visibleKinds.includes("plan") : mainSurface !== "document")) return;
-    const frame = requestAnimationFrame(() => {
-      const block = document.querySelector(`.doc-article [data-block-id="${cssEscape(runPlanAnchor.blockId)}"]`);
-      if (block instanceof HTMLElement) { block.scrollIntoView({ block: "center", behavior: "smooth" }); setRunPlanAnchor(null); }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [runPlanAnchor, session, mainSurface]);
-  const showNativeRun = (run: RunGraph) => {
-    setNativeRunId(run.runId);
-    selectSurface("runs");
-    void refreshSummaries();
-  };
-  const relaunchOrchestrator = async (sessionId: string) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const runs = await invoke<RunGraph[]>("runner_list");
-      const existing = runs.find((run) => run.planSessionId === sessionId && !["done", "abandoned"].includes(run.status));
-      showNativeRun(existing ?? await invoke<RunGraph>("runner_decompose", { planSessionId: sessionId }));
-      setHandoffFailure((cur) => cur?.sessionId === sessionId ? null : cur);
-    } catch (err) { setToast(`Could not open the run: ${err}`); }
-    finally { setBusy(false); }
-  };
-  const openRunReview = async (reviewId: string) => {
-    const reviews = await invoke<CodeReviewSession[]>("review_sessions_list");
-    const review = reviews.find((row) => row.reviewId === reviewId);
-    if (!review) throw new Error("The run review no longer exists.");
-    if (review) { codeReview.setSource("uncommitted"); await codeReview.openReview(review.repoPath, "uncommitted"); selectSurface("review"); }
-  };
-
-  // B1: clear a wedged run without touching the approval.
-  const resetRunFor = async (sessionId: string) => {
-    try {
-      await invoke("reset_run", { sessionId });
-      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      void refreshSummaries();
-    } catch (err) {
-      setToast(`Reset failed: ${err}`, 6000);
-    }
   };
 
   // B3: rescind the approval — back to review, detached, ledger supersession
@@ -6602,8 +6394,6 @@ function App() {
         next.add(sessionId);
         return next;
       });
-      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      setRunReportFor((cur) => (cur === sessionId ? null : cur));
       void refreshSummaries();
       setToast(
         "Approval rescinded — the session is back in review. Restore reattaches it.", 7000,
@@ -6615,45 +6405,6 @@ function App() {
     }
   };
 
-  // B4: abort a live run. Never kills the orchestrator process — names (and
-  // offers to show) the terminal tab to close instead.
-  const standDownRun = async (sessionId: string) => {
-    try {
-      const native = (await invoke<RunGraph[]>("runner_list")).find((run) => run.planSessionId === sessionId && !["done", "abandoned"].includes(run.status));
-      if (native) {
-        showNativeRun(await invoke<RunGraph>("runner_intervene", { runId: native.runId, nodeId: null, action: "stop", message: null, baseRev: native.rev }));
-        setToast("Run stopped. Its graph, messages, and file changes are saved.");
-        return;
-      }
-      const terminal = await invoke<string | null>("stand_down_run", {
-        sessionId,
-      });
-      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      void refreshSummaries();
-      if (terminal) {
-        setToast({
-          message:
-            "Run stood down — close its terminal tab to stop the orchestrator.",
-          tone: "info",
-          action: {
-            label: "Show tab",
-            onAction: () => {
-              setToast(null);
-              showTerminal(terminal);
-            },
-          },
-        });
-      } else {
-        setToast(
-          "Run stood down — the orchestrator (if it is running) keeps going until its terminal is closed.",
-          10000,
-        );
-      }
-    } catch (err) {
-      setToast(`Stand down failed: ${err}`, 6000);
-    }
-  };
-
   // A5: the single-step verified handoff shared by every "open a terminal
   // and type a command" path — spawn-verified, write-checked, loud on
   // failure. Replaces the identical blind setTimeout(pty_write, 900) pattern
@@ -6661,8 +6412,7 @@ function App() {
   // persistent (Dismiss, never a timer): a spawn timeout surfaces at +15s,
   // after the user has already looked away — an 8s auto-dismiss is how these
   // failures kept escaping diagnosis. With a sessionId the handoff also
-  // journals its breadcrumbs (handoff_spawned/…/handoff_failed), same trail
-  // as Orchestrate.
+  // journals its breadcrumbs (handoff_spawned/…/handoff_failed).
   const typeIntoTerminal = (
     id: string,
     data: string,
@@ -7198,8 +6948,7 @@ function App() {
       }
     }
     if (run) {
-      // Its own pill, never the pending plan card.
-      setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
+      // A run sends no plan to claim: its Agent tab is its status.
       setLastLaunchProject(req.projectPath!);
       setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : { message: "Running in its Agent tab", action: { label: "Show", onAction: () => showTerminal(terminalId) } });
       return { ok: true, terminalId, launchId };
@@ -7306,10 +7055,10 @@ function App() {
 
   // Repo confirmed in SendToRedlineDialog: bring the document pane forward and
   // launch the held plan in a terminal scoped to the chosen repo.
-  const runContinuation = async ({ markdown, source, destination, project, missionHandoff, harness }: { markdown: string; source?: ContinueRequest["source"]; destination: ContinueDestination; project: string | null; harness?: BackendChoice; missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" | "run" } }) => {
+  const runContinuation = async ({ markdown, source, destination, project, missionHandoff, harness }: { markdown: string; source?: ContinueRequest["source"]; destination: ContinueDestination; project: string | null; harness?: BackendChoice; missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "run" } }) => {
     if (sendPendingRef.current || !markdown.trim()) throw new Error("Another continuation is starting; try again in a moment.");
     let handoff = missionHandoff;
-    if ((destination === "auto" || destination === "run") && !project) throw new Error("Choose a project to build in.");
+    if (destination === "run" && !project) throw new Error("Choose a project to build in.");
     sendPendingRef.current = true; setSendPending(true); setSendError(null);
     let claimToken: string | undefined;
     let preparedDraftId: string | null = null;
@@ -7337,14 +7086,9 @@ function App() {
           let unavailable: string | null = null;
           if (claim.handoff.status === "delivered" && claim.handoff.destinationId) {
             try {
-              if (destination === "auto") {
-                const graph = await invoke<RunGraph>("runner_get", { runId: claim.handoff.destinationId });
-                setSendConfirm(null); showNativeRun(graph);
-              } else {
-                const live = await invoke<boolean>("pty_is_live", { id: claim.handoff.destinationId });
-                if (!live) throw new Error("The original plan terminal is no longer available.");
-                await showRawTerminal(claim.handoff.destinationId); setSendConfirm(null);
-              }
+              const live = await invoke<boolean>("pty_is_live", { id: claim.handoff.destinationId });
+              if (!live) throw new Error("The original plan terminal is no longer available.");
+              await showRawTerminal(claim.handoff.destinationId); setSendConfirm(null);
               return;
             } catch (error) { unavailable = String(error); }
           }
@@ -7355,12 +7099,6 @@ function App() {
         }
         claimToken = claim.claimToken;
         preparedDraftId ??= claim.handoff.draftId ?? null;
-      }
-      if (handoff?.destination === "auto" && claimToken) {
-        const graph = await invoke<RunGraph>("mission_prepare_auto", { missionId: handoff.missionId, handoffId: handoff.handoffId, claimToken, projectPath: project });
-        claimSettled = true; setSendConfirm(null); showNativeRun(graph);
-        setToast("Execution brief prepared. Review the graph and use Run to start the auto session.");
-        return;
       }
       const result = await launchPlan({
         mode: destination === "run" ? "run" : "plan", choice: harness,
@@ -7918,9 +7656,6 @@ function App() {
   const launchConfirmedRef = useRef<{ startedAt: number; confirmed: boolean } | null>(
     null,
   );
-  // A direct run's pill obeys the same law, tracked beside it in this one
-  // effect so the pay-back keeps exactly one call site.
-  const runConfirmedRef = useRef<{ startedAt: number; confirmed: boolean } | null>(null);
   useEffect(() => {
     const died = (
       f: { startedAt: number; terminalId: string } | null,
@@ -7943,32 +7678,18 @@ function App() {
       setPendingLaunch(null);
       dead.push(pendingLaunch!);
     }
-    if (died(runFlight, runConfirmedRef)) {
-      setRunFlight(null);
-      dead.push({ ...runFlight!, launchId: "", origin: "front-door-run", draftId: null });
-    }
     // Give the sentence back, for the door that took one — the ONE place the
     // pay-back fires. This is the involuntary case: the launch did not survive
     // and nobody chose that, so the composer is refilled ready to re-send. The
     // Drafter's document never left the screen, so its restore is `none`.
     for (const p of dead) repayPending(p, "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveTermIds, pendingLaunch, runFlight]);
+  }, [liveTermIds, pendingLaunch]);
   // Flow's launches obey the same law: one whose terminal closed is gone
   // from the stage and the sidebar, since no plan can come from a dead PTY.
   useEffect(() => {
     noteFlowLaunch({ type: "terminals", live: liveTermIds });
   }, [liveTermIds, noteFlowLaunch]);
-
-  // The run's pill retires itself once the run is under way: no plan arrives
-  // to clear it, and a run's tile is its own status from then on. Keyed on
-  // `startedAt` so one run's timer can never retire the next run's pill.
-  useEffect(() => {
-    if (!runFlight) return;
-    const startedAt = runFlight.startedAt;
-    const t = setTimeout(() => setRunFlight((f) => (f?.startedAt === startedAt ? null : f)), RUN_FLIGHT_MS);
-    return () => clearTimeout(t);
-  }, [runFlight]);
 
   // The `/hooks` nudge is the only time-based item: it appears once a launch
   // has waited HOOK_SILENCE_MS for its plan. One timer for that moment — not
@@ -8336,11 +8057,11 @@ function App() {
     return blocks.filter((block): block is ContextBlock => block !== null);
   };
 
-  const launchFromFrontDoor = async (projectOverride?: string, mode: "plan" | "run" = "plan") => {
+  const launchFromFrontDoor = async (projectOverride?: string) => {
     // Plans pilled → this is a combination, and the composer's text is context
     // on top of them rather than the thing being launched. The plans are its
     // context, so the chips sit this one out.
-    if (mode === "plan" && frontDoorCombine.length > 0) {
+    if (frontDoorCombine.length > 0) {
       const launchId = await launchCombine(projectOverride);
       // Launched from the open door, it is handed off into like any plan.
       if (launchId && frontDoorOpenRef.current) doorLaunchRef.current = launchId;
@@ -8358,10 +8079,10 @@ function App() {
     setFrontDoorLaunching(true);
     try {
       const r = await launchPlan({
-        mode,
-        origin: browser ? "browser-island" : mode === "run" ? "front-door-run" : "front-door",
+        mode: "plan",
+        origin: browser ? "browser-island" : "front-door",
         background: browser,
-        prompt: withContext(prompt, await gatherContext(mode)),
+        prompt: withContext(prompt, await gatherContext("plan")),
         projectPath: project,
         // The front door has no document, and inheriting the active Drafter's id
         // would file this plan under an unrelated draft.
@@ -8373,7 +8094,7 @@ function App() {
       if (!r.ok) {
         // At the top on the browser, where the native page would cover a
         // toast in the corner.
-        const message = `Couldn't ${mode === "run" ? "start the run" : "launch the plan"} — ${r.reason}`;
+        const message = `Couldn't launch the plan — ${r.reason}`;
         setToast(browser ? { message, placement: "top" } : message, 6000);
         // And say it INSIDE the island. A toast in the corner is easy to miss
         // when your eyes are on the sentence you just pressed ⏎ on — which is
@@ -8393,12 +8114,12 @@ function App() {
       setFrontDoorAttachments([]);
       // A plan launched from the open door: the door shows it in place, and
       // hands off into the plan when it lands (`doorLaunchRef`).
-      if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
-      if (mode === "plan") noteDoorLaunchTab(r.launchId);
+      if (frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
+      noteDoorLaunchTab(r.launchId);
       // Handed off: the compact card shrinks back into the pill, which shows
       // the work. The open door shows it in place.
       setDoorCompact(false);
-      announceDoor(mode === "run" ? "Run started in the terminal." : "Plan launched. Redline is planning it in the terminal.");
+      announceDoor("Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
       setFrontDoorLaunching(false);
@@ -9074,13 +8795,12 @@ function App() {
 
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
 
-  // The door's one flight pill: its own plan launch or its own run, whichever
-  // started last. Built once per launch, not per render: the composer reads a
-  // new object as a new launch.
-  const frontDoorFlight = useMemo(() => {
-    const plan = pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? { ...pendingLaunch, kind: "plan" as const } : null;
-    return plan && runFlight ? (runFlight.startedAt > plan.startedAt ? runFlight : plan) : (runFlight ?? plan);
-  }, [pendingLaunch, runFlight]);
+  // The door's one flight pill: its own plan launch. Built once per launch,
+  // not per render: the composer reads a new object as a new launch.
+  const frontDoorFlight = useMemo(
+    () => (pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? pendingLaunch : null),
+    [pendingLaunch],
+  );
   // The welcome's pills: the way back into recent plans, chats and browser
   // tabs. Tabs are ranked research-first against the unresolved plans, read
   // from the saved workspaces whenever the door shows (the lazy browser pane
@@ -9122,10 +8842,10 @@ function App() {
   };
   // On screen in the dock's column — the same room, at column scale.
   const chatDocked = !chatPane && !!chatId && voiceDocked && dockContext?.kind === "companion";
-  // The compact card launches only in place — Plan or Run. Elsewhere than the
+  // The compact card launches only in place — a plan. Elsewhere than the
   // browser its menu also offers the Drafter and Chat, and picking either
   // grows the card into the door, which takes that destination.
-  const cardDestination: LaunchDestination = frontDoorDest === "run" ? "run" : "plan";
+  const cardDestination: LaunchDestination = "plan";
   const growCardTo = (next: LaunchDestination) => {
     setFrontDoorDest(next);
     if (next !== "drafter" && next !== "chat") return;
@@ -9193,16 +8913,15 @@ function App() {
                 // front door must not render a card for the Drafter's launch.
                 pending={frontDoorFlight}
                 onLaunch={(project) => void launchFromFrontDoor(project)}
-                onRun={(project) => void launchFromFrontDoor(project, "run")}
                 // A refusal from App's own backstop gate, so the fix lands in
                 // the island rather than only in a corner toast.
                 refusal={frontDoorRefusal}
                 onDrafter={drafterFromFrontDoor}
                 onChat={() => void chatFromFrontDoor()}
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                // The browser's card is Plan and Run alone: a page has no
-                // Drafter or Chat of its own to grow into.
-                allowedDestinations={card && mainSurface === "browser" ? ["plan", "run"] : undefined}
+                // The browser's card is Plan alone: a page has no Drafter or
+                // Chat of its own to grow into.
+                allowedDestinations={card && mainSurface === "browser" ? ["plan"] : undefined}
                 // A door tab's Open targets, and the destination the pane
                 // remembers (a door opened from a browser pane starts on
                 // Browser); the global default follows every pick.
@@ -9221,7 +8940,7 @@ function App() {
                 // Dismissing the flight pill retires the INDICATOR, nothing
                 // else: the plan keeps running in its tile and the composer —
                 // already blank, already usable — stays blank. No pay-back.
-                onCancelPending={() => (frontDoorFlight?.kind === "run" ? setRunFlight(null) : setPendingLaunch(null))}
+                onCancelPending={() => setPendingLaunch(null)}
                 // The pill's other half: go watch it. Reveal the dock, focus
                 // the tile the plan is running in, and glow it once so the
                 // eye lands on the right one of fourteen.
@@ -9294,11 +9013,10 @@ function App() {
     [chatPane, chats, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
   // The workbench sidebar's own data (W1): which Place reads selected, the
-  // live runs and Localhost ports beside them, and each session's terminals
+  // Localhost ports beside it, and each session's terminals
   // in the shared status vocabulary — its agent's terminal from
   // `useSessionTerminals`, its state from the CLI's own hooks.
-  const sidebarPlace = !classicWb ? null : wbView.focusedKind === "runs" ? "runs" as const : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
-  const sidebarRunsLive = useMemo(() => summaries.filter((s) => isLiveRunState(s.runState)).length, [summaries]);
+  const sidebarPlace = !classicWb ? null : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
   // Read off the Localhost scan, which runs only while that pane is on
   // screen; a ports chip of its own comes with W7's discovery.
   const sidebarPorts = useMemo(() => (devServers.scan?.running ?? []).map((r) => `:${r.port}`), [devServers.scan]);
@@ -9359,8 +9077,8 @@ function App() {
     },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
     // The Places (W1): Home is the workbench's Home set (its door lands),
-    // Runs and Localhost open in the current set.
-    onSelectPlace: (place: "home" | "runs" | "servers") => {
+    // Localhost opens in the current set.
+    onSelectPlace: (place: "home" | "servers") => {
       if (place === "home") {
         tripDoor();
         setActiveId(null);
@@ -9407,24 +9125,10 @@ function App() {
       }
       setViewedVersionNumber(versionNumber);
     },
-    onOpenRunReport: (sessionId: string) => {
-      // The run chip is the Runs monitor's one entry point: a live run opens
-      // the live monitor (selecting the session so the monitor lands on ITS
-      // run); a finished run reopens the report, as before.
-      const chipRunState =
-        summaries.find((s) => s.sessionId === sessionId)?.runState ?? null;
-      if (isLiveRunState(chipRunState)) {
-        if (sessionId !== activeId) setActiveId(sessionId);
-        selectSurface("runs");
-      } else {
-        setRunReportFor(sessionId);
-        selectSurface("review");
-      }
-    },
   });
   const browserHandlers = useStableHandlers({
     onOpenDraft: (draftId: string) => { setDrafterDraftId(draftId); setDrafterShelfOpen(false); selectSurface("drafter"); },
-    onMissionContinue: (missionId: string, destination: "plan" | "auto", body: string, handoffId: string) => {
+    onMissionContinue: (missionId: string, destination: "plan", body: string, handoffId: string) => {
       const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
       selectSurface("document");
       setSendError(null);
@@ -9526,18 +9230,14 @@ function App() {
     onSubmit: submitReview,
     onApprove: approvePlan,
     onApproveLater: () => void approvePlanLater(),
-    onBuildTeam: (scale: Scale) => void startTeamBuild(scale),
     approval:
       session?.status === "approved"
         ? {
             version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
             runState: activeRunState,
-            runLive: isLiveRunState(activeRunState),
-            // A live run, or the plan's own agent at work in its
-            // terminal after Approve & build.
-            building:
-              isLiveRunState(activeRunState) ||
-              (activeRunState === null && !!planChromeTerminalId && terminalKinds.get(planChromeTerminalId) === "working"),
+            // The plan's own agent at work in its terminal after
+            // Approve & build.
+            building: activeRunState === null && !!planChromeTerminalId && terminalKinds.get(planChromeTerminalId) === "working",
           }
         : null,
     buildTargets,
@@ -9546,7 +9246,6 @@ function App() {
     planState: session ? { status: session.status, runState: activeRunState, held: activeHeld } : undefined,
     onSetPlanState: session ? (state: ManualPlanState) => { void setPlanState(session.sessionId, state); } : undefined,
     onMoveProject: session ? () => { void openMovePlan(session.sessionId); } : undefined,
-    progress: null,
     terminals: planChromeTerminalId ? 1 : 0,
     onShowTerminal: planShowTerminal ?? undefined,
   };
@@ -9795,7 +9494,6 @@ function App() {
               unseenIds={unseenPlanIds}
               arrivalGlow={arrivalGlow}
               place={sidebarPlace}
-              runsLive={sidebarRunsLive}
               localhostPorts={sidebarPorts}
               terminals={sidebarTerminals}
               homeTerminals={sidebarTerminals[""]}
@@ -10322,28 +10020,7 @@ function App() {
                 </ErrorBoundary>
               </Suspense>
             );
-            // An orchestrated run wraps the review pane in its RunReport
-            // container (claims vs ground truth above, resolution bar below);
-            // closing the container falls back to the plain review pane.
-            const runReportSummary = runReportFor
-              ? summaries.find((s) => s.sessionId === runReportFor) ?? null
-              : null;
-            const reviewBody = runReportFor ? (
-              <Suspense fallback={null}>
-              <RunReport
-                planSessionId={runReportFor}
-                planTitle={runReportSummary?.planTitle ?? null}
-                repoPath={runReportSummary?.projectPath ?? null}
-                review={codeReview}
-                projectOptions={projectOptions}
-                onClose={() => setRunReportFor(null)}
-                onResolved={() => void refreshSummaries()}
-                canRelaunch={runReportSummary?.status === "approved"}
-                onRelaunch={(sid) => void relaunchOrchestrator(sid)}
-                onStandDown={(sid) => void standDownRun(sid)}
-              />
-              </Suspense>
-            ) : (
+            const reviewBody = (
               <ErrorBoundary region="review pane" fallback={surfaceFallback("review pane")}>
                 <Suspense fallback={null}>
                   <ReviewPanel
@@ -10390,30 +10067,6 @@ function App() {
                     activeSessionId={session?.sessionId ?? null}
                     activeSessionName={session?.projectName ?? null}
                     tabRequest={mainSurface === "memory" ? tabRequest : null}
-                  />
-                </ErrorBoundary>
-              </Suspense>
-            );
-            const runsBody = (
-              <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
-                <ErrorBoundary region="runs" fallback={surfaceFallback("runs")}>
-                  <OrchestrationSurface
-                    active={runsOpen}
-                    nativeRunId={nativeRunId}
-                    onOpenPlanBlock={(sessionId, blockId) => { setActiveId(sessionId); setRunPlanAnchor({ sessionId, blockId: blockId.replace(/^rl:/, "") }); selectSurface("document"); }}
-                    onReviewSession={(id) => { void openRunReview(id).catch((err) => setToast(`Could not open review: ${err}`)); }}
-                    summaries={summaries}
-                    activePlanSessionId={activeId}
-                    onOpenRunReport={(sid) => {
-                      setRunReportFor(sid);
-                      selectSurface("review");
-                    }}
-                    onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
-                    onResetRun={(sid) => void resetRunFor(sid)}
-                    onUnapprove={(sid) => void unapproveSession(sid)}
-                    onStandDown={(sid) => void standDownRun(sid)}
-                    tabRequest={runsOpen ? tabRequest : null}
-                    onToast={setToast}
                   />
                 </ErrorBoundary>
               </Suspense>
@@ -10608,7 +10261,6 @@ function App() {
               review: reviewBody,
               servers: serversBody,
               memory: memoryBody,
-              runs: runsBody,
               // No `chat` entry: the room is a conversation, and conversations
               // live in the dock now. `"chat"` stays in the `MainSurface` union
               // for one release (a downgrade must still read its own persisted
@@ -10720,8 +10372,6 @@ function App() {
                     return spring(pane, serversBody);
                   case "memory":
                     return spring(pane, memoryBody);
-                  case "runs":
-                    return spring(pane, runsBody);
                 }
               };
               return (
@@ -11314,13 +10964,11 @@ function App() {
         onSubmit={submitReview}
         onApprove={approvePlan}
         onApproveLater={() => void approvePlanLater()}
-        onBuildTeam={(scale) => void startTeamBuild(scale)}
         approval={
           session?.status === "approved"
             ? {
                 version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
                 runState: activeRunState,
-                runLive: isLiveRunState(activeRunState),
               }
             : null
         }
@@ -11329,7 +10977,7 @@ function App() {
         onReopen={() => void reopenApproved()}
         termNeedYou={termNeedYou}
         onJumpToNeedsYou={jumpToNeedsYou}
-        reviewNews={reviewNews === "report" ? "Run report ready" : reviewNews === "review" ? "Review ready" : null}
+        reviewNews={reviewNews === "review" ? "Review ready" : null}
         onOpenReviewNews={() => selectSurface("review")}
         onShowTerminal={showSessionTerminal}
         backend={session?.backend ?? null}
@@ -11411,115 +11059,9 @@ function App() {
           windows where the backend is refusing writes, because an editor that
           silently drops what you type is worse than one that says why. */}
       <Suspense fallback={null}>
-        <ActivationBar
-          onOpenBuildRedline={() => {
-            setTabRequest({ tab: "build", nonce: Date.now() });
-            selectSurface("runs");
-          }}
-          onToast={setToast}
-        />
+        <ActivationBar onToast={setToast} />
       </Suspense>
       {toast && <RedlineToast key={toast.id} toast={toast} onDismiss={dismissToast} />}
-      {scaleDialogFor && (
-        <Suspense fallback={null}>
-          <ScaledBuildDialog
-            defaults={scaleDialogFor.defaults}
-            onClose={() => setScaleDialogFor(null)}
-            onLaunch={(config) => {
-              const sid = scaleDialogFor.sessionId;
-              setScaleDialogFor(null);
-              void launchScaledBuild(sid, config);
-            }}
-          />
-        </Suspense>
-      )}
-      {scaledAttention > 0 && (
-        <Suspense fallback={null}>
-          <ScaledBuildCards nonce={scaledAttention} onIdle={() => setScaledAttention(0)} onToast={setToast} />
-        </Suspense>
-      )}
-      {/* A5: a failed Orchestrate handoff is persistent and actionable —
-          never a 10-second toast. The run state was already rolled back to
-          NULL when this appears; the plan stays approved. */}
-      {handoffFailure && (
-        <div
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 rounded shadow-lg px-4 py-3"
-          style={{
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-danger, #d33)",
-            color: "var(--color-ink)",
-            fontSize: "12px",
-            maxWidth: "560px",
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {handoffFailure.retryScaled ? "Team build" : "Orchestrate"} handoff failed at {handoffFailure.stage}
-          </div>
-          <div
-            style={{ color: "var(--color-ink-muted)", marginBottom: 8 }}
-          >
-            {handoffFailure.reason} — the plan is still approved; the run was
-            rolled back.
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              onClick={() =>
-                void (handoffFailure.retryScaled
-                  ? launchScaledBuild(handoffFailure.sessionId, handoffFailure.retryScaled)
-                  : relaunchOrchestrator(handoffFailure.sessionId))
-              }
-              className="rounded px-2 py-1"
-              style={{
-                border: "1px solid var(--color-info)",
-                color: "var(--color-info)",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              Retry
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void navigator.clipboard?.writeText(
-                  `${handoffFailure.launchCmd}\n${handoffFailure.prompt}`,
-                );
-                setToast("Launch command + prompt copied");
-              }}
-              className="rounded px-2 py-1"
-              style={{
-                border: "1px solid var(--color-rule)",
-                cursor: "pointer",
-              }}
-            >
-              Copy launch command
-            </button>
-            <button
-              type="button"
-              onClick={() => void openTerminal(handoffFailure.projectPath)}
-              className="rounded px-2 py-1"
-              style={{
-                border: "1px solid var(--color-rule)",
-                cursor: "pointer",
-              }}
-            >
-              Open terminal manually
-            </button>
-            <button
-              type="button"
-              onClick={() => setHandoffFailure(null)}
-              className="rounded px-2 py-1"
-              style={{
-                color: "var(--color-ink-muted)",
-                cursor: "pointer",
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
       {inviteOpen && (
         <Suspense fallback={null}>
         <InviteDialog

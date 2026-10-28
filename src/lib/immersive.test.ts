@@ -17,7 +17,6 @@ const ALL_SURFACES: MainSurface[] = [
   "review",
   "servers",
   "memory",
-  "runs",
 ];
 
 /** A user with everything open — the shape the overlay has to hide. */

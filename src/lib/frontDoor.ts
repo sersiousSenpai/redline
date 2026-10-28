@@ -24,14 +24,10 @@ export const FRONT_DOOR_TEXT_KEY = "redline.frontDoor.text";
  *  `chat` is the third: an unbound conversation, for the half-formed idea that
  *  is not yet a plan and not yet a document.
  *
- *  `run` is the fourth: no plan at all — the sentence goes straight to an
- *  agent that builds it (`--permission-mode auto` on Claude, no approvals and
- *  no sandbox on Codex). Offered only where `runSupported` says the harness's
- *  non-plan flags are verified. */
-/** `browser` is the door tab's fifth (W1): the sentence opens as an address
+ *  `browser` is the door tab's fourth (W1): the sentence opens as an address
  *  or a search in the browser the tab converts into. Offered only by a door
  *  pane with that destination among its Open targets. */
-export type LaunchDestination = "plan" | "drafter" | "chat" | "run" | "browser";
+export type LaunchDestination = "plan" | "drafter" | "chat" | "browser";
 
 export type SubmitAction = LaunchDestination | "newline" | "ignore";
 
@@ -53,9 +49,7 @@ export interface SubmitKeyInfo {
  *  So ⌘⏎ still opens the Drafter from the plan route and still plans from the
  *  Drafter route — byte-for-byte today's behavior — and chat gets the sane
  *  answer, ⌘⏎ = plan, because "I have written the thing out, just build it" is
- *  the move you want one key away from a half-formed thought. `run` falls back
- *  to plan for the opposite reason: the one key away from "just do it" should
- *  be "show me first". */
+ *  the move you want one key away from a half-formed thought. */
 export function fallbackDestination(d: LaunchDestination): LaunchDestination {
   return d === "plan" ? "drafter" : "plan";
 }

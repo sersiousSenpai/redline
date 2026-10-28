@@ -48,14 +48,13 @@ describe("submitAction", () => {
   it("follows the selected destination on a bare Enter", () => {
     expect(submitAction(key("Enter"), "plan")).toBe("plan");
     expect(submitAction(key("Enter"), "drafter")).toBe("drafter");
-    expect(submitAction(key("Enter"), "run")).toBe("run");
   });
 
-  it("sends a run on ⏎, plans on ⌘⏎, and keeps ⇧⏎ a newline", () => {
-    expect(submitAction(key("Enter", { metaKey: true }), "run")).toBe("plan");
-    expect(submitAction(key("Enter", { ctrlKey: true }), "run")).toBe("plan");
-    expect(submitAction(key("Enter", { shiftKey: true }), "run")).toBe("newline");
-    expect(submitAction(key("Enter", { isComposing: true }), "run")).toBe("ignore");
+  it("sends a chat on ⏎, plans on ⌘⏎, and keeps ⇧⏎ a newline", () => {
+    expect(submitAction(key("Enter", { metaKey: true }), "chat")).toBe("plan");
+    expect(submitAction(key("Enter", { ctrlKey: true }), "chat")).toBe("plan");
+    expect(submitAction(key("Enter", { shiftKey: true }), "chat")).toBe("newline");
+    expect(submitAction(key("Enter", { isComposing: true }), "chat")).toBe("ignore");
   });
 
   it("puts the OTHER destination on the modifier, whichever is selected", () => {
@@ -114,11 +113,6 @@ describe("fallbackDestination", () => {
     // "I've written it out, just build it" is the move that belongs one key
     // away from a half-formed thought.
     expect(fallbackDestination("chat")).toBe("plan");
-  });
-
-  it("puts plan one key away from a direct run", () => {
-    // "Just do it" → the modifier is "show me first", never another run.
-    expect(fallbackDestination("run")).toBe("plan");
   });
 });
 
@@ -379,7 +373,7 @@ describe("the island never moves on its own", () => {
   it("builds the in-flight launch once per launch, not per render", () => {
     const flight = app.slice(app.indexOf("const frontDoorFlight ="), app.indexOf("const frontDoorFlight =") + 400);
     expect(flight).toMatch(/^const frontDoorFlight = useMemo\(/);
-    expect(flight).toContain("[pendingLaunch, runFlight]");
+    expect(flight).toContain("[pendingLaunch]");
   });
 });
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// Immersive surfaces: the browser, Localhost, Memory, Runs, the Drafter and
+// Immersive surfaces: the browser, Localhost, Memory, the Drafter and
 // Code Review are full-bleed destinations that want the whole window, and the
 // periphery around the main pane (sessions sidebar, discussion pane, doc
 // pin, header, footer) letterboxes them. Entering one hides the

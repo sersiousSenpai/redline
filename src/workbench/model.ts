@@ -62,14 +62,12 @@ export function isSessionKey(value: unknown): value is SessionKey {
  *  surfaces a door tab converts into in place. */
 export type DoorDestination =
   | "plan"
-  | "run"
   | "chat"
   | "drafter"
   | "browser"
   | "review"
   | "memory"
-  | "servers"
-  | "runs";
+  | "servers";
 
 /** What a pane can show. The three document faces (`door`, `plan`, `file`)
  *  are what `documentPlate.ts` calls the plate; the rest are the surfaces
@@ -84,8 +82,7 @@ export type PaneKind =
   | "drafter"
   | "review"
   | "servers"
-  | "memory"
-  | "runs";
+  | "memory";
 
 export const PANE_KINDS: readonly PaneKind[] = [
   "door",
@@ -98,7 +95,6 @@ export const PANE_KINDS: readonly PaneKind[] = [
   "review",
   "servers",
   "memory",
-  "runs",
 ];
 
 export function isPaneKind(value: unknown): value is PaneKind {
@@ -118,7 +114,6 @@ export function isDocumentKind(kind: PaneKind): boolean {
 export const GLOBAL_KINDS: readonly PaneKind[] = [
   "memory",
   "servers",
-  "runs",
   "drafter",
   "browser",
   "review",
@@ -160,7 +155,6 @@ export interface PaneDataByKind {
   review: { repo: string; source: DiffSource };
   servers: Record<string, never>;
   memory: Record<string, never>;
-  runs: Record<string, never>;
 }
 
 export interface Pane<K extends PaneKind = PaneKind> {
@@ -326,7 +320,5 @@ export function paneTitle(pane: AnyPane): string {
       return "Localhost";
     case "memory":
       return "Memory";
-    case "runs":
-      return "Runs";
   }
 }

@@ -2579,20 +2579,6 @@ html[data-rl-tile-drag] * {
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 14px;
 }
-/* The Orchestration Monitor's running-agent dot: a slow breathe, not a blink —
-   a dozen tiles pulsing hard would read as an alarm, not as liveness. */
-@keyframes rl-run-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-.rl-run-pulse {
-  animation: rl-run-pulse 1.6s ease-in-out infinite;
-}
 .rl-shortcut-group-title {
   font-size: 11px;
   font-weight: 600;

@@ -54,12 +54,14 @@ describe("sessionMode: the truth table", () => {
   });
 
   it("an approved plan is in the build family, numbered by the approved version", () => {
-    for (const runState of ["building", "orchestrating", "running", "in_code_review", "stalled"]) {
-      expect(sessionMode(plan({ status: "approved", runState, revisions: v(1, 2, 3, 4) }))).toEqual({
-        kind: "build",
-        label: "Building v4",
-        version: 4,
-      });
+    expect(sessionMode(plan({ status: "approved", runState: "building", revisions: v(1, 2, 3, 4) }))).toEqual({
+      kind: "build",
+      label: "Building v4",
+      version: 4,
+    });
+    // A state from the cut run feature reads as approved, not building.
+    for (const runState of ["orchestrating", "running", "in_code_review", "stalled"]) {
+      expect(sessionMode(plan({ status: "approved", runState, revisions: v(1, 2) }))?.label).toBe("Approved v2");
     }
     expect(sessionMode(plan({ status: "approved", runState: "landed", revisions: v(1, 2) }))?.label).toBe("Built v2");
     expect(sessionMode(plan({ status: "approved", runState: null, revisions: v(1, 2, 3) }))?.label).toBe("Approved v3");
