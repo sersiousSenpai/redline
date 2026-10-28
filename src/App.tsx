@@ -9140,6 +9140,8 @@ function App() {
     // remount (the pane's nonce guard resets with it).
     onOpenRequestConsumed: onBrowserOpenConsumed,
     onCloseDock: () => closeDock(),
+    // The new-tab page's "Ask Memory" and its footer links.
+    onOpenMemory: () => selectSurface("memory"),
   });
 
   // The comment composer, while a mark is being written: the discussion

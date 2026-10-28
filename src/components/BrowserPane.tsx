@@ -45,6 +45,7 @@ import {
   type ChatStateMap,
 } from "../lib/browseChatState";
 import { cartKey, sameTabUrl } from "../lib/browseList";
+import { agentSearchTurn, rememberClosed, searchAddress, type ClosedPage } from "../lib/browserNewTab";
 import {
   parseSelectionEvents,
   promptForSelection,
@@ -298,6 +299,8 @@ interface BrowserPaneProps {
   /** The ids the dock needs to build its context list. Pushed on change; App
    *  clears it when this pane unmounts. */
   onDockState?: (s: BrowserDockState) => void;
+  /** Opens Memory — the new-tab page's "Ask Memory" and its footer links. */
+  onOpenMemory?: () => void;
 }
 
 const hostnameOf = (u: string): string => {
@@ -327,6 +330,7 @@ function BrowserPaneBase({
   onOpenDockPill,
   onCloseDock,
   onDockState,
+  onOpenMemory,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
   const tileSlotsRef = useRef(new Map<string, HTMLDivElement>());
@@ -353,6 +357,9 @@ function BrowserPaneBase({
   const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
   const eventPagesRef = useRef(new Set<string>());
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  // Pages closed in this pane, newest first: the strip's Recently closed and
+  // the new-tab page's row. Kept for the pane's life only.
+  const [closedPages, setClosedPages] = useState<ClosedPage[]>([]);
   const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
   const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {}, { debounceMs: 120 });
   const [groupsByWorkspace, setGroupsByWorkspace] = usePersistedState<Record<string, TabGroup[]>>("redline.browser.groups", {});
@@ -1806,6 +1813,8 @@ function BrowserPaneBase({
     // screen, so the chat never points at a dead thread (BC-5).
     dispatchChat({ type: "close-tab", tabId: id });
     explicitlyClosedRef.current.add(id);
+    const closing = tabsRef.current.find((t) => t.id === id);
+    if (closing) setClosedPages((list) => rememberClosed(list, { url: closing.url, title: closing.title, at: Date.now() }));
     const closedBrowseId = tabsRef.current.find((tab) => tab.id === id)?.browseId;
     updateTileLayout({ tiles: tileLayout.tiles.filter((bid) => bid !== closedBrowseId),
       maximized: tileLayout.maximized === closedBrowseId ? null : tileLayout.maximized,
@@ -2365,6 +2374,18 @@ function BrowserPaneBase({
     ensureLive(id);
   };
   const openResearch = () => setMissionMenuOpen(true);
+  // The new-tab page's Agent search (⌥⏎): the tab it was typed in opens the
+  // search, and that tab's own page chat takes the query as a turn that goes
+  // out at once — the plan Search's seed, in place instead of a fresh tab.
+  const agentSearch = (query: string, pageId: string) => {
+    const tab = tabsRef.current.find((t) => t.id === pageId);
+    if (!tab || !query.trim()) return;
+    navigate(searchAddress(query), pageId);
+    dispatchChat({ type: "reopen-tab", tabId: pageId, quiet: false });
+    seedPageChat({ text: agentSearchTurn(query), nonce: Date.now(), source: { kind: "plan-search" } });
+    setChatFor(tab.browseId, { open: true, pill: "page" });
+  };
+  const actingTabs = new Set(tabs.filter((tab) => pageActions.acting.has(`browser-${tab.id}`)).map((tab) => tab.id));
   // The page chat is memoized. What it is handed keeps its identity across
   // the pane's own renders (a title, a dot, a layout tick) unless it really
   // changed: handlers through refs, the rail's cards by value. A handler
@@ -2419,7 +2440,7 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
-      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={new Set(tabs.filter((tab) => pageActions.acting.has(`browser-${tab.id}`)).map((tab) => tab.id))} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
@@ -2452,7 +2473,10 @@ function BrowserPaneBase({
           rect, so it resizes automatically). */}
       {(() => {
         const slot = <BrowserTileStage stageRef={slotRef} slots={tileSlotsRef} pages={tilePages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={browserFullscreen}
-          renderHome={page => <Suspense fallback={<div className="rb-page-cover">Opening new tab…</div>}><BrowserHomePage tabs={tabs} onOpen={url => { const open = tabs.find(tab => tab.url === url && tab.id !== page.id); if (open) selectTab(open.id); else navigate(url, page.id); }} onMission={id => void switchToMission(id)}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
+          renderHome={page => <Suspense fallback={<div className="rb-page-cover">Opening new tab…</div>}><BrowserHomePage page={page} tabs={tabs} acting={actingTabs} closed={closedPages}
+            onBrowse={text => navigate(text, page.id)} onAgentSearch={text => agentSearch(text, page.id)}
+            onOpen={url => { const open = tabs.find(tab => sameTabUrl(tab.url, url) && tab.id !== page.id); if (open) selectTab(open.id); else navigate(url, page.id); }}
+            onSelectTab={selectTab} onMission={id => void switchToMission(id)} onOpenMemory={onOpenMemory}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
           onAssign={(index, browseId) => { const next = assignVisibleTile(tileLayout, visibleBrowseIds, index, browseId); updateTileLayout(next); const tab = tabs.find((t) => t.browseId === browseId); if (tab) selectTab(tab.id); }}
           onAddPage={(index) => { const browseId = openTab(); if (browseId) updateTileLayout(assignTile(tileLayout, index, browseId)); }}
           onSwap={(from, to) => updateTileLayout(swapVisibleTiles(tileLayout, visibleBrowseIds, from, to))}

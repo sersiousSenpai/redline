@@ -1,18 +1,69 @@
-.rb-home { height:100%; overflow:auto; padding:clamp(20px,5vw,64px); color:var(--color-ink); background:var(--color-paper); }
-.rb-home header { margin:0 0 36px; }
-.rb-home header>span { font-size:12px; color:var(--color-ink-muted); }
-.rb-home h1 { font-family:var(--font-serif,Georgia,serif); font-size:clamp(24px,3vw,36px); font-weight:500; max-width:620px; margin:12px 0; }
-.rb-home header p,.rb-home-empty { color:var(--color-ink-muted); font-size:13px; }
-.rb-home section { margin-bottom:32px; }
-.rb-home h2 { font-size:13px; font-weight:600; margin:0 0 12px; }
-.rb-home-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:12px; }
-.rb-home-tile { display:flex; flex-direction:column; min-width:0; overflow:hidden; padding:0 0 12px; border:1px solid var(--color-rule); border-radius:10px; color:var(--color-ink); background:var(--color-bg-elevated); text-align:left; cursor:pointer; }
-.rb-home-tile:hover { border-color:var(--color-ink-muted); }
-.rb-home-tile:focus-visible { outline:2px solid var(--color-info); outline-offset:3px; }
-.rb-home-tile strong,.rb-home-tile>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; padding:0 12px; }
-.rb-home-tile strong { font-size:12px; font-weight:500; margin:11px 0 5px; }
-.rb-home-tile>span { font-size:11px; color:var(--color-ink-muted); }
-.rb-home-shot { height:96px; width:100%; overflow:hidden; display:grid; place-items:center; color:var(--color-ink-muted); border-bottom:1px solid var(--color-rule); background:var(--color-paper); }
-.rb-home-shot img { width:100%; height:100%; object-fit:cover; object-position:top; }
-.rb-home-task { padding-top:14px; }
-.rb-home-task svg { margin-left:12px; }
+/* The browser's new-tab page (RLPaneBrowser, state "newtab"): an 820 px
+   column, a 40 px serif title, one omnibox, a live strip, two columns of
+   36 px rows. Redline tokens only; nothing animates but the shared Spinner. */
+.rb-home { height:100%; overflow-y:auto; display:flex; flex-direction:column; align-items:center; padding:0 40px 48px; box-sizing:border-box; color:var(--color-ink); background:var(--color-paper); font-size:13px; }
+.rb-nt-column { width:min(820px,100%); display:flex; flex-direction:column; gap:28px; padding-top:72px; }
+.rb-nt-head { display:flex; flex-direction:column; gap:10px; }
+.rb-nt-kicker { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--color-ink-quiet); }
+.rb-nt-head h1 { margin:0; font:500 40px/1.1 var(--font-serif,Georgia,serif); letter-spacing:-.015em; color:var(--color-ink); }
+
+.rb-nt-omnibox { display:flex; flex-direction:column; gap:12px; padding:16px 18px 12px; border:1px solid var(--color-rule-strong); border-radius:18px; background:var(--color-paper); box-shadow:0 1px 2px color-mix(in srgb,var(--color-ink) 10%,transparent); }
+.rb-nt-omnibox:focus-within { border-color:var(--color-focus-rim); }
+.rb-nt-field { display:flex; align-items:center; gap:12px; color:var(--color-ink-quiet); }
+.rb-nt-field input { flex:1; min-width:0; height:26px; padding:0; border:0; outline:none; background:transparent; color:var(--color-ink); font:inherit; font-size:17px; }
+.rb-nt-field input::placeholder { color:var(--color-ink-quiet); }
+.rb-nt-verbs { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.rb-nt-verb { display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 12px; border:1px solid var(--color-rule-strong); border-radius:15px; background:transparent; color:var(--color-ink); font:inherit; font-size:12.5px; cursor:pointer; }
+.rb-nt-verb:hover { background:var(--color-hover-wash); }
+.rb-nt-verb[data-primary] { border-color:var(--color-info); background:color-mix(in srgb,var(--color-info) 12%,var(--color-paper)); color:var(--color-info-text); }
+.rb-nt-verb kbd { font:inherit; font-size:11px; color:var(--color-ink-quiet); }
+.rb-nt-verb[data-primary] kbd { color:inherit; opacity:.75; }
+.rb-nt-hint { flex:1; min-width:0; padding-left:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11.5px; color:var(--color-ink-quiet); }
+.rb-nt-go { flex:none; display:grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid var(--color-rule-strong); border-radius:50%; background:transparent; color:var(--color-ink-muted); cursor:pointer; }
+.rb-nt-go:hover { background:var(--color-hover-wash); color:var(--color-ink); }
+.rb-nt-verb:focus-visible,.rb-nt-go:focus-visible,.rb-nt-chip:focus-visible,.rb-nt-row:focus-visible,.rb-nt-link:focus-visible { outline:2px solid var(--color-info); outline-offset:2px; }
+
+.rb-nt-live { display:flex; gap:6px; flex-wrap:wrap; }
+.rb-nt-chip { display:inline-flex; align-items:center; gap:7px; max-width:100%; height:30px; padding:0 12px; border:1px solid var(--color-rule); border-radius:15px; background:transparent; color:var(--color-ink); font:inherit; font-size:12.5px; white-space:nowrap; cursor:pointer; }
+.rb-nt-chip:hover { background:var(--color-hover-wash); }
+.rb-nt-chip>span { overflow:hidden; text-overflow:ellipsis; font-size:11.5px; color:var(--color-ink-quiet); }
+.rb-nt-chip>svg { flex:none; color:var(--color-ink-muted); }
+.rb-nt-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--color-ink-quiet); }
+.rb-nt-dot[data-tone="up"] { background:var(--color-success); }
+
+.rb-nt-columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:28px 40px; margin-top:8px; }
+.rb-nt-section { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.rb-nt-section-head { display:flex; align-items:center; height:24px; padding:0 4px; }
+.rb-nt-section-head h2 { flex:1; margin:0; font-size:10.5px; font-weight:400; letter-spacing:.1em; text-transform:uppercase; color:var(--color-ink-quiet); }
+.rb-nt-section-head>span { font-size:11.5px; color:var(--color-ink-muted); }
+.rb-nt-subject { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+.rb-nt-subject[data-first] { margin-top:0; }
+.rb-nt-subject-head { display:flex; align-items:center; gap:8px; height:30px; padding:0 4px; font-size:12.5px; color:var(--color-ink); min-width:0; }
+.rb-nt-subject-head svg { flex:none; color:var(--color-ink-muted); }
+.rb-nt-subject-head strong { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rb-nt-subject-head span { flex:none; font-size:11.5px; color:var(--color-ink-quiet); }
+
+.rb-nt-row { display:flex; align-items:center; gap:10px; width:100%; height:36px; padding:0 4px; border:0; border-bottom:1px solid var(--color-rule); background:transparent; color:var(--color-ink); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+.rb-nt-row:hover { background:var(--color-hover-wash); }
+.rb-nt-row[data-nested] { padding-left:22px; }
+.rb-nt-row-icon { flex:none; display:grid; place-items:center; width:16px; height:16px; color:var(--color-ink-muted); }
+.rb-nt-row-icon .rb-favicon { width:14px; height:14px; }
+.rb-nt-row-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rb-nt-row-title>span { color:var(--color-ink-quiet); }
+.rb-nt-row[data-muted] .rb-nt-row-title { color:var(--color-ink-muted); }
+.rb-nt-row-age { flex:none; font-size:11.5px; color:var(--color-ink-quiet); white-space:nowrap; }
+.rb-nt-empty,.rb-nt-note { margin:0; padding:8px 4px; font-size:12px; color:var(--color-ink-quiet); }
+
+.rb-nt-foot { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:0 4px; font-size:11.5px; color:var(--color-ink-quiet); }
+.rb-nt-spacer { flex:1; }
+.rb-nt-link { padding:0; border:0; background:none; color:var(--color-info-text); font:inherit; cursor:pointer; }
+.rb-nt-link:hover { text-decoration:underline; }
+.rb-nt-section-head .rb-nt-link { font-size:11.5px; }
+
+@media (max-width:760px) {
+  .rb-home { padding:0 16px 32px; }
+  .rb-nt-column { padding-top:40px; gap:22px; }
+  .rb-nt-head h1 { font-size:32px; }
+  .rb-nt-hint { display:none; }
+  .rb-nt-verbs .rb-nt-go { margin-left:auto; }
+}
