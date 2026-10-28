@@ -507,6 +507,20 @@ and the app's uptime:
 | GPU process CPU at idle | `perf-idle.sh` | < 5% | to be measured |
 | Renderer footprint at 1 h and 8 h of uptime | `/v1/perf` → `renderer.footprintBytes` (or `perf-idle.sh`) | 8 h within 20% of 1 h | to be measured |
 
+### Workbench perf marks (final walk, 2026-10-28)
+
+The workbench's own marks (`workbench/perf.ts`), read from the dev app's Web
+Inspector with `performance.getEntriesByName(...)` at the end of the final
+live walk of `feat/workbench` (1ff805b). Medians over the walk; the tab-switch
+tail is the switches into a 14-tile wall.
+
+| Mark | Plan target | n | Median | Spread | Met |
+|---|---|---|---|---|---|
+| `wb:tab-switch` | kept tab: 0 mounts, ≤ 16 ms main thread; not kept: ≤ 150 ms | 71 | 25 ms | tail 2.4–8.2 s (into a 14-tile wall) | median yes; the wall tail no |
+| `wb:session-switch` | ≤ 100 ms to first paint | 4 | 50 ms | 33, 36, 50, 77 ms | yes |
+| `wb:new-tab-caret` (⌘T) | caret in the door box ≤ 80 ms | 15 | 15 ms | — | yes |
+| `wb:terminal-swap` at 14 tiles, 6 streaming | same frame, no `pty_attach` replay | 21 | 61 ms | 19–337 ms | **no** — the "same frame" target is not met (no replay: met) |
+
 ## Idle heat (measured 2026-10-27)
 
 An idle Redline should cost nothing: no spinner, poll, fork or timer runs for
@@ -556,6 +570,20 @@ and no transcript tail at 150 ms — which is why the rules above are guarded
 at the source rather than only by these numbers. The before/after that
 matters is the one the user feels: a day-old app with sessions that finished
 hours ago.
+
+### Measured — Workbench W6 head (925319f), release bundle
+
+Measured with `~/redline-wt/workbench-tools/measure-release.sh <label>
+<Redline.app>`: it launches the bundle with the Claude session environment
+stripped, waits for the window, lets boot settle for 12 s, then runs
+`scripts/perf-idle.sh --app Redline --seconds 12` on the scene the app
+restores, captures the window and quits. It runs without `sudo`, so the
+wakeup counts it prints are not authoritative and are left out here.
+
+| Scene | Host CPU | GPU CPU | Renderer CPU | Display link | Spawns | Against the targets |
+|---|---|---|---|---|---|---|
+| Browser landing (a live page on screen) | 0.8% | 0.0% | 0.0% | parked | 0 | not a target scene (a live page is not idle) |
+| Document landing (the plan) | 0.0% | 0.0% | 0.0% | parked (0/s) | 0 | targets met |
 
 ### Targets (release build, at idle, no live agent output)
 
