@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { chatProgress, elapsedLabel } from "./chatProgress";
+import { chatProgress, elapsedLabel, isWaitingStatus } from "./chatProgress";
 import { emptyMeter } from "./turnMeter";
 
 describe("a live reply's progress phrase", () => {
@@ -52,5 +52,17 @@ describe("a live reply's progress phrase", () => {
     // Still the turn's sign of life for the quiet clock.
     expect(chatProgress([{ at: 5, kind: "rateLimit", label: "x" }], limited, null, 0, 12).quietFor).toBe(7);
     expect(elapsedLabel(-1)).toBe("0s");
+  });
+
+  it("never shows the daemon's own waiting words before the first token: the Spinner alone", () => {
+    for (const label of ["Preparing chat context", "Starting the selected model", "Waiting for the model"]) {
+      expect(isWaitingStatus(label)).toBe(true);
+      expect(chatProgress([], null, { at: 2, label }, 0, 12).label).toBeNull();
+    }
+    // A real step before the wait word keeps its name.
+    expect(chatProgress([{ at: 1, kind: "tool", label: "Read…" }], null, { at: 3, label: "Waiting for the model" }, 0, 12).label).toBe("Reading files");
+    // And a real step the surface names is still a step.
+    expect(isWaitingStatus("Opening the requested page")).toBe(false);
+    expect(chatProgress([], null, { at: 2, label: "Searching your memory" }, 0, 12).label).toBe("Searching your memory");
   });
 });

@@ -32,6 +32,17 @@ function plainActivity(label: string): string | null {
  *  the request goes through, a request starting): never the row's words. */
 const WAITING_KINDS = new Set(["rateLimit", "requesting"]);
 
+/** The daemon's own words for a turn that has not started streaming — the
+ *  context being gathered, the model starting, the request out. Only the
+ *  wait, said in words: an older daemon still sends them as a status, and
+ *  they never reach the row (the shared Spinner says it, aria "Replying"). */
+const WAITING_WORDS = new Set(["preparing chat context", "starting the selected model", "waiting for the model", "preparing your reply"]);
+
+/** A status that only names the wait, never a step of work. */
+export function isWaitingStatus(label: string | null | undefined): boolean {
+  return WAITING_WORDS.has((label ?? "").trim().toLowerCase());
+}
+
 export function elapsedLabel(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
@@ -48,7 +59,7 @@ export function chatProgress(
 ): { label: string | null; elapsed: string; quietFor: number } {
   const steps = activity.filter((entry) => !WAITING_KINDS.has(entry.kind));
   const latest = steps[steps.length - 1];
-  const recentStatus = status && status.at >= startedAt && (!latest || status.at >= latest.at) ? status : null;
+  const recentStatus = status && !isWaitingStatus(status.label) && status.at >= startedAt && (!latest || status.at >= latest.at) ? status : null;
   const lastEventAt = Math.max(latest?.at ?? 0, recentStatus?.at ?? 0);
   const writing = lastOutputAt > lastEventAt && !recentStatus?.running;
   const label = writing ? null : plainActivity(recentStatus?.label ?? latest?.label ?? "") || null;
