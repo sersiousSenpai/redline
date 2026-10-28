@@ -721,6 +721,27 @@ reports a missing artifact as a failure. `release.yml` builds per-arch DMGs on
 `v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
 Developer ID secrets land).
 
+### Workbench W6 ratchet (measured 2026-10-28)
+
+W6 moved App's pane bodies into `src/workbench/panes/*`, deleted the
+adapter (`legacyView`, `mainSurface.ts`, `documentPlate.ts`) and the inert
+immersive overlay (its hull rail and edge reveal), and slimmed the footer to
+a status bar. W2's Flow deletion had already freed the boot path, so the
+frontend ceilings come down to the measured figures plus a ~1.5% margin.
+`npx vite build` and `node scripts/check-size.mjs --strict`; no Rust changed.
+
+| Artifact | Before W6 (`77fb963`) | After W6 | Ceiling |
+|---|---|---|---|
+| Boot JS | 618,139 B | 619,640 B | 660,000 → **629,000 B** (98.5%) |
+| Dist total | 9,484,227 B | 9,482,498 B | 9,760,000 → **9,625,000 B** (98.5%) |
+
+Boot JS grew 1,501 B: the pane modules are static (they replaced JSX that
+was App's own, and each keeps its body's lazy boundary inside it), and the
+singleton slots moved out of the stage's chunk so a pane can render its slot
+before the stage lands; the adapter, the hull rail and the edge reveal left
+it. The next boot-path addition needs a lever: making a pane module itself a
+chunk (its body's chunk folded in) is the obvious one.
+
 ### Flow shell (measured 2026-10-18)
 
 The Flow shell (the session-first redesign: sidebar, the conversation
