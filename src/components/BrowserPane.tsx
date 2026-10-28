@@ -183,9 +183,7 @@ interface Tab {
 // the saved URL; only url/title/browseId need to survive.
 const TABS_KEY = "redline.browser.tabs";
 // The last active tab id (regular browsing). Persisted separately from the tab
-// list so a BrowserPane REMOUNT — which App triggers every time the document
-// pane toggles on/off (it re-parents this pane into/out of the SplitPane) —
-// restores the tab the user was on instead of snapping back to the first tab.
+// list so a BrowserPane REMOUNT restores the tab the user was on instead of snapping back to the first tab.
 // Missions own their own active tab, so they don't write this key.
 const ACTIVE_KEY = "redline.browser.activeId";
 const newBrowseId = (): string =>
@@ -1322,7 +1320,7 @@ function BrowserPaneBase({
   // keys on effectiveVisible and `layoutKey`.)
 
   // Observe the slot for size changes. It used to re-attach on `chatOpen`
-  // because opening the discussion re-parented this div into a SplitPane — a
+  // because opening the discussion re-parented this div into a split — a
   // new DOM node the old observer no longer watched. The panels live in the
   // app's dock now, so the slot is the same element for the pane's whole life
   // and one observer covers it.
@@ -2496,7 +2494,7 @@ function BrowserPaneBase({
       {videoFs.stage === "browser" && <BrowserFullscreenEdge title={tabs.find((tab) => tab.id === activeId)?.title ?? "Video"}
         onScreen={() => void videoFs.requestScreen()} onExit={() => videoFs.dispatch({ type: "exit" })}/>}
       {/* The active tab's native webview is positioned to cover this slot. When
-          the page-discussion panel is open, a SplitPane shrinks the slot so the
+          the page-discussion panel is open, a split shrinks the slot so the
           webview shares the pane with the chat (the webview tracks the slot's
           rect, so it resizes automatically). */}
       {(() => {

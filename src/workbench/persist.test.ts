@@ -3,7 +3,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
-import { DOC_PINNED_KEY, MAIN_SURFACE_KEY } from "../lib/mainSurface";
 import { HOME_KEY, SET_CAP, emptyWorkbench, type WorkbenchState } from "./model";
 import {
   LEGACY_DOC_PINNED_KEY,
@@ -14,6 +13,7 @@ import {
   bootToHome,
   migrateToWorkbenchOnce,
   parseWorkbench,
+  retireLegacyKeys,
   persistWorkbench,
   readWorkbench,
   trimSets,
@@ -50,8 +50,9 @@ describe("the stored shape", () => {
   it("keys and draft key match App's own constants", () => {
     expect(WORKBENCH_KEY).toBe("redline.workbench.v1");
     expect(DEFAULT_DOOR_DRAFT_KEY).toBe(FRONT_DOOR_TEXT_KEY);
-    expect(LEGACY_MAIN_SURFACE_KEY).toBe(MAIN_SURFACE_KEY);
-    expect(LEGACY_DOC_PINNED_KEY).toBe(DOC_PINNED_KEY);
+    // The keys App persisted before the workbench, spelled as they were.
+    expect(LEGACY_MAIN_SURFACE_KEY).toBe("redline.mainSurface");
+    expect(LEGACY_DOC_PINNED_KEY).toBe("redline.doc.pinned");
   });
 
   it("keeps a set's filled-agent marker, and reads a hostile one as strings only, deduped and capped", () => {
@@ -238,13 +239,28 @@ describe("migrateToWorkbenchOnce", () => {
     const pane = fresh.sets.home!.panes[fresh.sets.home!.tabs[fresh.sets.home!.order[0]].focusedPaneId];
     expect(pane).toMatchObject({ kind: "door", data: { draftKey: FRONT_DOOR_TEXT_KEY } });
     expect(readWorkbench(storage)).toEqual(fresh);
-    // The legacy keys stay: App reads them while the two models coexist.
     const second = new MemoryStorage();
     second.setItem(LEGACY_MAIN_SURFACE_KEY, JSON.stringify("document"));
     second.setItem(LEGACY_DOC_PINNED_KEY, "true");
     const doc = migrateToWorkbenchOnce(second)!;
     expect(Object.values(doc.sets.home!.panes).map((p) => p.kind)).toEqual(["door"]);
-    expect(second.getItem(LEGACY_MAIN_SURFACE_KEY)).toBe(JSON.stringify("document"));
+  });
+
+  it("retires every key the workbench replaced, the pre-07/09 pane booleans included, and nothing else", () => {
+    const storage = new MemoryStorage();
+    const legacy = [LEGACY_MAIN_SURFACE_KEY, LEGACY_DOC_PINNED_KEY, LEGACY_SPLIT_VERTICAL_KEY, LEGACY_SPLIT_RATIO_KEY, "redline.doc.open", "redline.browser.open", "redline.drafter.open", "redline.review.open"];
+    for (const key of legacy) storage.setItem(key, "true");
+    storage.setItem(LEGACY_MAIN_SURFACE_KEY, JSON.stringify("browser"));
+    const migrated = migrateToWorkbenchOnce(storage)!;
+    retireLegacyKeys(storage);
+    for (const key of legacy) expect(storage.getItem(key), key).toBeNull();
+    // What the migration made of them is the workbench's own record.
+    expect(readWorkbench(storage)).toEqual(migrated);
+    expect(storage.getItem(WORKBENCH_KEY)).not.toBeNull();
+    // A second boot has nothing left to read and nothing to undo.
+    expect(migrateToWorkbenchOnce(storage)).toBeNull();
+    retireLegacyKeys(storage);
+    expect(readWorkbench(storage)).toEqual(migrated);
   });
 
   it("a surface becomes the first tab; pinned, it splits with the door by split.*", () => {

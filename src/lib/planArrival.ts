@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import type { DocumentPlateMode } from "./documentPlate";
 import { isEditableTarget } from "./landing";
-import type { MainSurface } from "./mainSurface";
+import type { Surface } from "../config/workspace";
+import type { DocumentKind } from "../workbench/model";
 
 /** What a plan arriving from a session does to the reader.
  *
@@ -27,8 +27,10 @@ export interface ArrivalState {
   activeId: string | null;
   /** The session the plan belongs to. */
   sessionId: string;
-  mainSurface: MainSurface;
-  plateMode: DocumentPlateMode;
+  /** What the active tab shows (`workbench/view.ts`). */
+  surface: Surface;
+  /** The focused document face: the door, the plan, or a file. */
+  plateMode: DocumentKind;
   /** The version the reader chose to look back at; null is the latest. */
   viewedVersion?: number | null;
   /** The user is writing (see `writingNow`). */
@@ -40,7 +42,7 @@ export interface ArrivalState {
 
 export function arrivalFocus(state: ArrivalState): ArrivalFocus {
   if (state.ownDoorLaunch) return "handoff";
-  const onPlate = state.mainSurface === "document";
+  const onPlate = state.surface === "document";
   if (onPlate && state.plateMode === "file") return "flash";
   // A new version of the plan already selected is the answer waited for: it
   // lands in place, even mid-sentence — the caret stays put either way —

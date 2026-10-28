@@ -17,8 +17,30 @@
 // PRESERVED on rewrite (updaters spread-copy), so a hand-annotated or
 // future-versioned file survives a GUI gesture.
 
-import type { MainSurface } from "../lib/mainSurface";
 import type { CanonicalOverrides } from "../lib/paneLayout";
+
+/** A surface, as the manifest names it: the document (the plan, or the
+ *  door when no plan is open) and the panes a door tab can open. It is the
+ *  manifest's vocabulary — header order, landing, toggles — and what
+ *  `selectSurface` takes; the centre itself is the workbench's tabs of typed
+ *  panes (`workbench/model.ts`), and `workbench/view.ts` reads this back off
+ *  the active tab. */
+export type Surface =
+  | "document"
+  | "browser"
+  | "drafter"
+  | "review"
+  | "servers"
+  | "memory"
+  // A companion chat: the Front Door's chat destination. It earns NO header
+  // entry; it opens from the door and the recent-chat pills.
+  | "chat";
+
+/** A surface id as MANIFEST data carries it (workspace.json, a harness
+ *  pack): the known union, plus any string a future manifest names. Widened
+ *  where data flows in, so an unknown id degrades to nothing instead of
+ *  failing a closed union. */
+export type SurfaceId = Surface | (string & {});
 
 /** Surfaces a manifest can disable. Main surfaces (minus the document — the
  *  core pane is not removable) plus the auxiliary ones the header composes. */
@@ -50,14 +72,14 @@ export const TOGGLEABLE_SURFACES: readonly ToggleableSurface[] = [
 /** One header/main surface the registry can compose. `label`/`title` carry the
  *  exact strings the header rendered before the registry existed. */
 export interface SurfaceDescriptor {
-  id: MainSurface;
+  id: Surface;
   label: string;
   title: string;
 }
 
 /** The main-pane radio group, in default order. This IS today's hardcoded
  *  header tuple, relocated — the snapshot test pins it. Deliberately NOT
- *  every `MainSurface`: memory's entry is the ambient header pill — surfaces
+ *  every `Surface`: memory's entry is the ambient header pill — surfaces
  *  earn a permanent header button only when they're a daily destination, not
  *  per feature shipped. Chat is absent for the same reason: you reach it
  *  from the front door's destination picker or a recent-chat pill, both of
@@ -83,7 +105,7 @@ export const SURFACE_LABELS: Record<ToggleableSurface, string> = {
 };
 
 /** `"last"` = land wherever the previous run ended (today's behavior). */
-export type Landing = "last" | MainSurface;
+export type Landing = "last" | Surface;
 
 /** The parsed manifest. All fields optional — an empty object is a valid
  *  manifest meaning "all defaults". The index signature carries unknown keys
@@ -118,14 +140,14 @@ export interface Workspace {
 
 const MAIN_SURFACE_IDS = MAIN_SURFACE_DESCRIPTORS.map((d) => d.id);
 
-function isMainSurface(v: unknown): v is MainSurface {
+function isSurface(v: unknown): v is Surface {
   return (
     typeof v === "string" && (MAIN_SURFACE_IDS as string[]).includes(v)
   );
 }
 
 function isLanding(v: unknown): v is Landing {
-  return v === "last" || isMainSurface(v);
+  return v === "last" || isSurface(v);
 }
 
 /** The manifest an untouched install behaves as (and the explicit file the
@@ -213,9 +235,9 @@ export function surfaceEnabled(ws: Workspace, id: ToggleableSurface): boolean {
  *  appended in default order (so a manifest written before a surface existed
  *  still shows it), disabled surfaces filtered out. */
 export function headerSurfaces(ws: Workspace): SurfaceDescriptor[] {
-  const order = (ws.header?.order ?? MAIN_SURFACE_IDS).filter(isMainSurface);
-  const seen = new Set<MainSurface>();
-  const ordered: MainSurface[] = [];
+  const order = (ws.header?.order ?? MAIN_SURFACE_IDS).filter(isSurface);
+  const seen = new Set<Surface>();
+  const ordered: Surface[] = [];
   for (const id of order) {
     if (!seen.has(id)) {
       seen.add(id);
@@ -244,9 +266,9 @@ export function headerSurfaces(ws: Workspace): SurfaceDescriptor[] {
  *  document. */
 export function initialSurface(
   ws: Workspace,
-  persisted: MainSurface,
+  persisted: Surface,
   projectPath?: string | null,
-): MainSurface {
+): Surface {
   const projectLanding = projectPath
     ? ws.projects?.[projectPath]?.landing
     : undefined;
@@ -318,10 +340,10 @@ function materialized(ws: Workspace): Workspace {
 
 /** The full order (including disabled surfaces) — what gets persisted, so
  *  hiding then re-enabling a surface restores its position. */
-function headerOrderFull(ws: Workspace): MainSurface[] {
-  const order = (ws.header?.order ?? MAIN_SURFACE_IDS).filter(isMainSurface);
-  const seen = new Set<MainSurface>();
-  const ordered: MainSurface[] = [];
+function headerOrderFull(ws: Workspace): Surface[] {
+  const order = (ws.header?.order ?? MAIN_SURFACE_IDS).filter(isSurface);
+  const seen = new Set<Surface>();
+  const ordered: Surface[] = [];
   for (const id of order) {
     if (!seen.has(id)) {
       seen.add(id);
@@ -348,7 +370,7 @@ export function setSurfaceEnabled(
  *  the edges and for unknown ids. */
 export function moveHeaderSurface(
   ws: Workspace,
-  id: MainSurface,
+  id: Surface,
   delta: -1 | 1,
 ): Workspace {
   const order = headerOrderFull(ws);

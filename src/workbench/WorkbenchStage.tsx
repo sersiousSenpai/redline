@@ -2,11 +2,11 @@
 // Copyright 2026 Yusuf Al-Bazian
 //
 // The centre of the window under the workbench: the active set's tab strip
-// and, below it, the active tab's panes — a pane, or the one split W1 allows
-// (a document-family pane beside a surface, the SplitPane the doc pin used).
-// App hands in `renderPane`, which maps a pane to the body it already builds
-// (the plan article, the browser's slot, the drafter…), so this file knows
-// kinds and layout and nothing about what a plan is.
+// and, below it, the active tab's panes — a pane, or the one split the app
+// makes today (a document-family pane beside a surface, the tile; D24), laid
+// out from the tab's `LayoutNode` tree with the divider below. App hands in
+// `renderPane`, which dispatches a pane to its body in `./panes/*`, so this
+// file knows kinds and layout and nothing about what a plan is.
 //
 // Kept tabs: the active tab and the three most recently shown stay mounted.
 // A hidden kept tab is `inert` and skips layout and paint (styles.css), so its
@@ -17,11 +17,12 @@
 // poll resuming). Singleton bodies never mount inside a tab — only their
 // slots do (`SingletonSlot`).
 
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { PersistentPortalSlot } from "../components/PersistentPortalSlot";
-import { SplitPane } from "../components/SplitPane";
+import { rafCoalesce } from "../lib/raf";
+import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
 import { activeTabOf, isSplit, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
 import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
@@ -253,8 +254,7 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
         tabIndex={-1}
         // Focus follows the pointer into a pane (capture, so a click a child
         // swallows still counts); a focused document beside a surface keeps
-        // the surface on screen (`legacyView`: the surface never follows
-        // focus).
+        // the surface on screen (`view.ts`: the surface never follows focus).
         onPointerDownCapture={focused ? undefined : () => onFocusPane(pane.id)}
       >
         <ErrorBoundary region={pane.kind} fallback={(err, reset) => <PaneFallback region={pane.kind} error={err} reset={reset} />}>
@@ -268,8 +268,8 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
   ));
   if (children.length === 2) {
     return (
-      <SplitPane
-        vertical={node.direction === "column"}
+      <TwoUp
+        column={node.direction === "column"}
         ratio={node.weights[0] ?? 0.5}
         onRatioChange={(r) => onResize(tab.id, path, [r, 1 - r])}
         onDraggingChange={onSplitDragging}
@@ -287,6 +287,84 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
           {child}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** The narrowest share a pane of the tile keeps while its divider drags. A
+ *  weight of 0 is not a weight (`normalizeWeights` would even the split), and
+ *  a pane goes by its own ✕, not by a drag to the edge. */
+export const MIN_SHARE = 0.1;
+
+const clampShare = (r: number) => Math.max(MIN_SHARE, Math.min(1 - MIN_SHARE, r));
+
+/** Two children of a split and the divider between them. The live share is
+ *  written straight onto the first child's flex-basis, so a drag frame costs
+ *  one style write plus layout and re-renders neither pane (a custom property
+ *  on the container would invalidate style for both whole subtrees); the
+ *  tab's weights take the result once, on release. A drag holds a resize
+ *  session (`lib/resizeSession`), so the native webview shows its snapshot
+ *  meanwhile, and `onDraggingChange` tells App. */
+function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }: {
+  column: boolean;
+  ratio: number;
+  onRatioChange: (next: number) => void;
+  onDraggingChange?: (dragging: boolean) => void;
+  first: ReactNode;
+  second: ReactNode;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const firstRef = useRef<HTMLDivElement | null>(null);
+  const startDrag = (e: ReactPointerEvent) => {
+    e.preventDefault();
+    const el = containerRef.current;
+    if (!el) return;
+    // Captured, so a fast drag that leaves the 6px handle keeps tracking.
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    onDraggingChange?.(true);
+    beginResizeSession();
+    // The container cannot move during the drag: read it once, not per event.
+    const rect = el.getBoundingClientRect();
+    const size = column ? rect.height : rect.width;
+    const origin = column ? rect.top : rect.left;
+    let pending = clampShare(ratio);
+    const apply = rafCoalesce((r: number) => {
+      if (firstRef.current) firstRef.current.style.flexBasis = `${r * 100}%`;
+    });
+    const move = (ev: PointerEvent) => {
+      const pos = column ? ev.clientY : ev.clientX;
+      pending = clampShare(size > 0 ? (pos - origin) / size : 0.5);
+      apply(pending);
+    };
+    const up = () => {
+      apply.cancel();
+      // The exact rest position lands before the commit: no frame where the
+      // DOM and the state disagree.
+      if (firstRef.current) firstRef.current.style.flexBasis = `${pending * 100}%`;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      onRatioChange(pending);
+      onDraggingChange?.(false);
+      endResizeSession();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <div ref={containerRef} className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`}>
+      <div ref={firstRef} className="flex flex-col overflow-hidden min-w-0 min-h-0" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${clampShare(ratio) * 100}%` }}>
+        {first}
+      </div>
+      <div
+        onPointerDown={startDrag}
+        onDoubleClick={() => onRatioChange(0.5)}
+        title="Drag to resize · double-click to even"
+        className="rl-split-divider shrink-0"
+        role="separator"
+        aria-orientation={column ? "horizontal" : "vertical"}
+        style={{ flex: "0 0 6px", cursor: column ? "row-resize" : "col-resize", background: "var(--color-rule)", touchAction: "none" }}
+      />
+      <div className="flex flex-col overflow-hidden min-w-0 min-h-0 flex-1">{second}</div>
     </div>
   );
 }

@@ -9,8 +9,8 @@
 // centre is a SET of tabs per session (plus Home), each tab a tree of typed
 // panes, and the terminals a session owns are recorded against it. Nothing
 // here touches React, storage or the DOM: `reducer.ts` moves the state,
-// `persist.ts` keeps it, `legacy.ts` reads it back in App's old vocabulary
-// while the two coexist. Pure, unit-tested like `tilePolicy.ts`.
+// `persist.ts` keeps it, `view.ts` reads what the active tab shows. Pure,
+// unit-tested like `tilePolicy.ts`.
 
 import type { DiffSource } from "../types";
 
@@ -70,8 +70,8 @@ export type DoorDestination =
   | "servers";
 
 /** What a pane can show. The three document faces (`door`, `plan`, `file`)
- *  are what `documentPlate.ts` calls the plate; the rest are the surfaces
- *  the header radio used to point at, plus the agent / companion chat. */
+ *  are the plate; the rest are the surfaces a door tab opens, plus the agent
+ *  / companion chat. */
 export type PaneKind =
   | "door"
   | "plan"
@@ -101,13 +101,15 @@ export function isPaneKind(value: unknown): value is PaneKind {
   return typeof value === "string" && (PANE_KINDS as readonly string[]).includes(value);
 }
 
-/** The kinds that are "the document" in App's old vocabulary: a door, a
- *  plan, or a file in the viewer. Everything else is a surface. */
-export const DOCUMENT_KINDS: readonly PaneKind[] = ["door", "plan", "file"];
+/** The plate's three document faces: a door, a plan, or a file in the
+ *  viewer. Everything else is a surface. */
+export type DocumentKind = "door" | "plan" | "file";
+
+export const DOCUMENT_KINDS: readonly DocumentKind[] = ["door", "plan", "file"];
 
 /** Whether a pane kind is one of the plate's document faces. */
-export function isDocumentKind(kind: PaneKind): boolean {
-  return DOCUMENT_KINDS.includes(kind);
+export function isDocumentKind(kind: PaneKind): kind is DocumentKind {
+  return (DOCUMENT_KINDS as readonly PaneKind[]).includes(kind);
 }
 
 /** The kinds that open in the current set and never navigate you away. */
@@ -254,7 +256,7 @@ export function emptyWorkbench(): WorkbenchState {
   };
 }
 
-// ── Layout helpers (pure, shared by the reducer and the adapter) ───────────
+// ── Layout helpers (pure, shared by the reducer and the view) ──────────────
 
 export function isSplit(
   node: LayoutNode,

@@ -2,7 +2,7 @@ import { useQueuedChatPlans } from "./hooks/useQueuedChatPlans";
 import type { ChatPlanReceipt, ChatPlanRequest, ChatWorkbenchComposer } from "./components/ChatRoom";
 import { CONTINUE_EVENT, continuationKey, continuationOrigin, prepareCompanionContinuation, type ContinuationMessage, type ContinueRequest, type ContinueDestination } from "./lib/conversationContinuation";
 import { createPortal } from "react-dom";
-import { createBoundedPortalHost, PersistentPortalSlot } from "./components/PersistentPortalSlot";
+import { createBoundedPortalHost } from "./components/PersistentPortalSlot";
 import { HookConflictWarning } from "./components/HookConflictWarning";
 import { useHookConflicts } from "./hooks/useHookConflicts";
 // SPDX-License-Identifier: Apache-2.0
@@ -112,7 +112,6 @@ const ShareSnapshotDialog = lazy(() =>
 );
 import { importSharedPlanFromUrl } from "./collab/importSharedLink";
 import { deriveActiveSurface } from "./lib/activeSurface";
-import { documentPlateMode, type DocumentPlateMode } from "./lib/documentPlate";
 import {
   BROWSER_DOCK_KINDS,
   NO_BROWSER_DOCK,
@@ -209,7 +208,6 @@ const BrowserPane = lazy(() =>
   loadBrowserPane().then((m) => ({ default: m.BrowserPane })),
 );
 import { MenuOverlayProvider } from "./components/menuOverlay";
-import { SplitPane } from "./components/SplitPane";
 // Same Tiptap/ProseMirror stack as PlanEditor — lazy for the same reason. The
 // landing's type-to-start seed keeps buffering in App's window listener until
 // the chunk mounts and consumeSeed runs, so the handoff stays lossless.
@@ -316,8 +314,6 @@ import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { useAutoExitFullscreen } from "./hooks/useAutoExitFullscreen";
-import { useEdgeReveal } from "./hooks/useEdgeReveal";
-import { ChromeSlot } from "./components/HullRail";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
@@ -381,11 +377,6 @@ import {
   snapTocWide,
 } from "./lib/tocRail";
 import {
-  type MainSurface,
-  bootOnFrontDoor,
-  migrateMainSurfaceOnce,
-} from "./lib/mainSurface";
-import {
   defaultWorkspace,
   headerSurfaces,
   initialSurface,
@@ -399,6 +390,7 @@ import {
   surfaceEnabled,
   workspaceImmersive,
   workspaceLayout,
+  type Surface,
   type ToggleableSurface,
   type Workspace,
 } from "./config/workspace";
@@ -414,10 +406,6 @@ import {
   type HarnessEntry,
   type HarnessManifest,
 } from "./lib/harness";
-import {
-  effectiveShape,
-  isImmersive,
-} from "./lib/immersive";
 import { boxOf, type SwapRect } from "./lib/springSwap";
 import { SpringSwap } from "./components/SpringSwap";
 import { settingsRow } from "./components/SettingsMenu";
@@ -446,13 +434,13 @@ import { SNAPBACK_SETTLE_MS } from "./lib/boot";
 import { markOnce } from "./lib/bootMarks";
 import { beginMeasure, endMeasure } from "./workbench/perf";
 // The workbench (W1): the centre as per-session tab sets of typed panes.
-// `store` is the one boot-path piece beyond perf; the adapter reads App's
-// old vocabulary off it while the two models coexist (deleted in W6).
+// `store`, `persist` and the `view` selectors are the boot-path pieces
+// beyond perf: App reads what the active tab shows straight off the state.
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
-import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
-import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
+import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, retireLegacyKeys } from "./workbench/persist";
+import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
 import { terminalStatus, wallStatus } from "./workbench/status";
-import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
@@ -665,22 +653,16 @@ import type {
   CombineSource,
 } from "./types";
 
-// Upgrade pre-quick-switch persisted pane state (four booleans → one surface
-// value + a doc pin) exactly once, before the first usePersistedState read.
-migrateMainSurfaceOnce(localStorage);
-// …and the chat room's fold into the conversation dock (A3): a persisted
-// `mainSurface === "chat"` names a surface this build no longer renders.
+// The chat room's fold into the conversation dock (A3): a persisted
+// `redline.mainSurface === "chat"` names a surface this build no longer
+// renders.
 migrateChatSurfaceOnce(localStorage);
-// …and every launch opens on the Front Door: frame one must not paint the
-// surface the last run ended on (see bootOnFrontDoor).
-bootOnFrontDoor(localStorage);
-// …and the workbench: its one-time migration from those keys, a synchronous
-// read (the paint-cache rule), and — in the classic shell, which it drives —
-// boot on Home's door, with every change written back on a debounce.
+// The workbench: its one-time migration from the keys it replaced (then
+// retired, so nothing reads a stale surface or doc pin back), a synchronous
+// read (the paint-cache rule), and boot on Home's door, with every change
+// written back on a debounce.
 migrateToWorkbenchOnce(localStorage);
-// W1's workbench-or-legacy-centre switch. The flow shell is gone (W2), so
-// the workbench is the one centre; W6 deletes the adapter and this with it.
-const classicWb = true;
+retireLegacyKeys(localStorage);
 // A cold launch lands on Home's door; a RELOAD (⌘R, HMR, the WebContent-
 // crash reload) comes back where it was — the stored active set and its
 // tab, over Home and over the manifest's landing. sessionStorage tells the
@@ -696,51 +678,10 @@ const wbReload = (() => {
     return false;
   }
 })();
-const wb = createWorkbenchStore(classicWb && !wbReload ? bootToHome(readWorkbench(localStorage)) : readWorkbench(localStorage), () => import("./workbench/reducer").then((m) => m.reduce));
-if (classicWb) {
-  persistWorkbench(wb, localStorage);
-  void loadWorkbenchStage().catch(() => {});
-  void loadPlanPane().catch(() => {});
-}
-// `legacyView` builds a fresh object; the selector hands the same one back
-// for an unchanged state, or useSyncExternalStore would re-render App on
-// every notification.
-let legacyCacheState: WorkbenchState | null = null;
-let legacyCacheView: LegacyView | null = null;
-const selectLegacy = (state: WorkbenchState): LegacyView => {
-  if (state !== legacyCacheState) {
-    legacyCacheState = state;
-    legacyCacheView = legacyView(state);
-  }
-  return legacyCacheView!;
-};
-/** The active set's active tab and its panes, in reading order. */
-function activePanes(state: WorkbenchState): { key: SessionKey; set: NonNullable<WorkbenchState["sets"][SessionKey]> | null; tab: ReturnType<typeof activeTabOf>; panes: AnyPane[] } {
-  const set = state.sets[state.activeKey] ?? null;
-  const tab = set ? activeTabOf(set) : null;
-  const panes = tab && set ? paneIdsOf(tab.root).map((id) => set.panes[id]).filter((p): p is AnyPane => Boolean(p)) : [];
-  return { key: state.activeKey, set, tab, panes };
-}
-/** The first pane of `kind` in the set, active tab first, with its tab. */
-function findPane(state: WorkbenchState, kind: PaneKind): { tabId: string; pane: AnyPane } | null {
-  const set = state.sets[state.activeKey];
-  if (!set) return null;
-  const order = set.activeTabId ? [set.activeTabId, ...set.order.filter((id) => id !== set.activeTabId)] : set.order;
-  for (const tabId of order) {
-    const tab = set.tabs[tabId];
-    if (!tab) continue;
-    for (const id of paneIdsOf(tab.root)) {
-      const pane = set.panes[id];
-      if (pane && pane.kind === kind) return { tabId, pane };
-    }
-  }
-  return null;
-}
-/** The geometry the browser's native webview re-reads its rect on. */
-const selectWbLayoutKey = (state: WorkbenchState): string => {
-  const { key, tab } = activePanes(state);
-  return tab ? `${key}|${tab.id}|${JSON.stringify(tab.root)}` : key;
-};
+const wb = createWorkbenchStore(!wbReload ? bootToHome(readWorkbench(localStorage)) : readWorkbench(localStorage), () => import("./workbench/reducer").then((m) => m.reduce));
+persistWorkbench(wb, localStorage);
+void loadWorkbenchStage().catch(() => {});
+void loadPlanPane().catch(() => {});
 let doorCounter = 0;
 const newDoorPaneId = () => `door-${Date.now().toString(36)}-${(doorCounter++).toString(36)}`;
 
@@ -815,23 +756,7 @@ const surfaceFallback =
 let doorSentenceKey = FRONT_DOOR_TEXT_KEY;
 const getFrontDoorText = () => readSharedDraft(doorSentenceKey);
 const setFrontDoorText = (text: string) => writeSharedDraft(doorSentenceKey, text);
-const selectFocusedDoorDestination = (state: WorkbenchState): LaunchDestination | null => {
-  const { set, tab } = activePanes(state);
-  const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
-  const d = focused?.kind === "door" ? focused.data.destination : undefined;
-  return d === "plan" || d === "chat" || d === "drafter" || d === "browser" ? d : null;
-};
-/** The companion chat pane the active tab shows, if any: the room is a
- *  pane now, and the one ChatRoom body follows it. */
-const selectVisibleCompanion = (state: WorkbenchState): string | null => {
-  for (const pane of activePanes(state).panes) if (pane.kind === "chat" && pane.data.source === "companion") return pane.data.companionId;
-  return null;
-};
-const selectFocusedDoorDraftKey = (state: WorkbenchState): string => {
-  const { set, tab } = activePanes(state);
-  const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
-  return focused?.kind === "door" ? focused.data.draftKey : FRONT_DOOR_TEXT_KEY;
-};
+const selectFocusedDoorDraftKey = (state: WorkbenchState): string => focusedDoorDraftKey(state, FRONT_DOOR_TEXT_KEY);
 
 function App() {
   // The Front Door. Every launch starts with it SHUT: on the document's empty
@@ -860,14 +785,14 @@ function App() {
   // is the set's only tab — Home always keeps a door.
   const doorLaunchTabRef = useRef<{ launchId: string; key: SessionKey; tabId: string } | null>(null);
   const noteDoorLaunchTab = useCallback((launchId: string | null | undefined) => {
-    if (!classicWb || !launchId) return;
+    if (!launchId) return;
     const { key, set, tab } = activePanes(wb.getState());
     const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
     if (focused?.kind === "door" && tab) doorLaunchTabRef.current = { launchId, key, tabId: tab.id };
   }, []);
   const retireDoorLaunchTab = useCallback((launchId: string | null | undefined) => {
     const noted = doorLaunchTabRef.current;
-    if (!classicWb || !noted || !launchId || noted.launchId !== launchId) return;
+    if (!noted || !launchId || noted.launchId !== launchId) return;
     doorLaunchTabRef.current = null;
     const set = wb.getState().sets[noted.key];
     if (!set || set.order.length < 2 || !set.tabs[noted.tabId]) return;
@@ -913,14 +838,12 @@ function App() {
     return () => { subscriptions.forEach(subscription => { void subscription.then(stop => stop()); }); };
   }, [reportMonochatActivity]);
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
-  // The selected session. In the classic shell it is the workbench's active
-  // set (`legacyView.activeId`), plus the collab joined key — a room with no
-  // session key of its own — kept beside it; the flow shell keeps its own
-  // state until W2 deletes it.
-  const wbView = useWorkbench(wb, selectLegacy);
-  const [legacyActiveId, setLegacyActiveId] = useState<string | null>(null);
+  // The selected session: the workbench's active set (`StageView.activeId`),
+  // plus the collab joined key — a room with no session key of its own —
+  // kept beside it.
+  const view = useWorkbench(wb, selectStageView);
   const [joinedId, setJoinedId] = useState<string | null>(null);
-  const activeId: string | null = classicWb ? (joinedId ?? wbView.activeId) : legacyActiveId;
+  const activeId: string | null = joinedId ?? view.activeId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   // The one writer, in both forms (`leaveJoined` passes an updater). A
@@ -928,10 +851,6 @@ function App() {
   // below keys on `activeId`, and dispatching nothing keeps it from
   // loading twice.
   const setActiveId = useCallback((next: string | null | ((prev: string | null) => string | null)) => {
-    if (!classicWb) {
-      setLegacyActiveId(next);
-      return;
-    }
     const value = typeof next === "function" ? next(activeIdRef.current) : next;
     // A re-selection is no switch — but "no session" is Home only on Home:
     // a launch's set has no session id either, and Home pressed there
@@ -1112,11 +1031,10 @@ function App() {
     240,
     { debounceMs: 250 },
   );
-  // The six shape flags below are the PERSISTED preference — what the user
-  // last chose. On an immersive surface they are masked by `effectiveShape`
-  // into the derived names (`sidebarCollapsed`, …) further down, which is what
-  // every read site uses. Nothing masks the storage: immersive never writes,
-  // so leaving the surface simply lifts the overlay. See lib/immersive.ts.
+  // The shape flags below are the PERSISTED preference — what the user last
+  // chose. The responsive poses (`workbench/poses.ts`) derive the names every
+  // read site uses (`sidebarCollapsed`, …) further down; a resize never
+  // writes the preference.
   const [sidebarCollapsedPref, setSidebarCollapsed] = usePersistedState(
     "redline.sidebar.collapsed",
     false,
@@ -1143,32 +1061,17 @@ function App() {
   // see `effectiveDiscussionContext`.
   const [discussionPinned, setDiscussionPinned] =
     usePersistedState<DiscussionContext>("redline.discussion.context", "plan");
-  // The center pane shows exactly ONE surface at a time (document / browser /
-  // drafter / review) — the header buttons are a radio group, so switching is
-  // always a full quick-switch. Tiling is a separate explicit choice: while
-  // `docPinned` is on, the document stays alongside whichever non-document
-  // surface is selected, sharing the pane as a foldable split (see SplitPane);
-  // `splitVertical` flips between side-by-side (default) and stacked, and
-  // `splitRatio` is the document's share. `splitDragging` hides the native
-  // webview during a split-divider drag so it doesn't swallow the pointer.
-  const [legacyMainSurface, setMainSurface] = usePersistedState<MainSurface>(
-    "redline.mainSurface",
-    "document",
-  );
-  // Classic reads the active tab's surface off the workbench (it does NOT
-  // follow focus: clicking the plan half of a plan + browser tab must not
-  // hide the webview); flow keeps the persisted value.
-  const mainSurface: MainSurface = classicWb ? wbView.mainSurface : legacyMainSurface;
+  // What the active tab shows, in the manifest's vocabulary
+  // (`workbench/view.ts`): a surface pane's kind, or "document" for the
+  // plate's faces, a wall and an agent chat. It does NOT follow focus:
+  // clicking the plan half of a plan + browser tile must not hide the
+  // webview. `splitDragging` hides the native webview while the tile's
+  // divider drags, so it doesn't swallow the pointer.
+  const stageSurface: Surface = view.surface;
   // What the workbench does for `selectSurface(next)`, bound below once the
-  // state it reads (the doc pin, the drafter's document, the review) exists.
-  const openInWorkbenchRef = useRef<(next: MainSurface) => void>(() => {});
-  const [docPinnedPref, setDocPinned] = usePersistedState(
-    "redline.doc.pinned",
-    false,
-  );
-  // Derived views of the single surface value — they keep the many read sites
-  // below near-diff-free, and make disagreeing pane booleans unrepresentable.
-  const browserOpen = mainSurface === "browser";
+  // state it reads (the drafter's document, the review) exists.
+  const openInWorkbenchRef = useRef<(next: Surface) => void>(() => {});
+  const browserOpen = stageSurface === "browser";
   // The chat is ONE mounted room in two places: the door's slot while the
   // door holds it, the conversation dock's once it was carried out. The host
   // moves between them; the conversation in it never remounts.
@@ -1184,53 +1087,25 @@ function App() {
   const [browserHolder, setBrowserHolder] = useState<string | null>(null);
   const [browserMounted, setBrowserMounted] = useState(browserOpen);
   useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
-  const drafterOpen = mainSurface === "drafter";
-  const reviewOpen = mainSurface === "review";
-  const serversOpen = mainSurface === "servers";
-  const memoryOpen = mainSurface === "memory";
-  const chatOpen = mainSurface === "chat";
-  // The user has explicitly reopened something on this visit to an immersive
-  // surface, so the mask is off until they leave. Declared here — above
-  // selectSurface — because entering a surface re-arms it. Never persisted:
-  // "was immersive" is exactly the stale bit this design refuses to store.
-  const [immersiveBroken, setImmersiveBroken] = useState(false);
-  // Its orientation stays persisted for the tile the pin preference makes;
-  // the button that flipped it left the header with the workbench (W1).
-  const [splitVertical] = usePersistedState(
-    "redline.split.vertical",
-    false,
-  );
-  const [splitRatio, setSplitRatio] = usePersistedState(
-    "redline.split.ratio",
-    0.5,
-    { debounceMs: 250 },
-  );
+  const drafterOpen = stageSurface === "drafter";
+  const reviewOpen = stageSurface === "review";
+  const serversOpen = stageSurface === "servers";
+  const memoryOpen = stageSurface === "memory";
+  const chatOpen = stageSurface === "chat";
   const [splitDragging, setSplitDragging] = useState(false);
-  // The one way any surface comes forward — header radio clicks and every
-  // programmatic open funnel through here. Resets the split so a previously
-  // folded pane can't come back invisible, and hands the Discussion sidecar
-  // to the review on enter / back to the plan on leave.
+  // The one way any surface comes forward — the door's destinations, the
+  // palette and every programmatic open funnel through here. Hands the
+  // Discussion sidecar to the review on enter / back to the plan on leave.
   const selectSurface = useCallback(
-    (next: MainSurface) => {
-      setSplitRatio(0.5);
-      // The entry edge for immersion. Every header click and every
-      // programmatic open funnels through here, so one line re-arms the mask
-      // on each entry — "re-entering always hides again". Transition-driven,
-      // not state-driven, exactly like useAutoExitFullscreen: the rule fires
-      // on the move and never fights the user afterwards.
-      setImmersiveBroken(false);
-      // Leaving the plate the conversation had taken. It does NOT close — it
-      // collapses into the dock and comes with you, which is the whole point
-      // of there being one column: you walk out of the room still talking.
-      if (next === "review" && mainSurface !== "review") {
+    (next: Surface) => {
+      if (next === "review" && stageSurface !== "review") {
         setDiscussionPinned("review");
-      } else if (next !== "review" && mainSurface === "review") {
+      } else if (next !== "review" && stageSurface === "review") {
         setDiscussionPinned("plan");
       }
-      if (classicWb) openInWorkbenchRef.current(next);
-      else setMainSurface(next);
+      openInWorkbenchRef.current(next);
     },
-    [mainSurface, setSplitRatio, setDiscussionPinned, setMainSurface],
+    [stageSurface, setDiscussionPinned],
   );
   // Fresh view of selectSurface for mount-once listeners (review-requested).
   const selectSurfaceRef = useRef(selectSurface);
@@ -1271,7 +1146,7 @@ function App() {
   activeHarnessRef.current = activeHarness;
   // What the UI composes from: the harness's arrangement while inside one,
   // the user's own manifest otherwise. Layout knobs (snap-back overrides,
-  // immersive opt-out) deliberately keep reading the STOCK manifest — they
+  // arrival opt-out) deliberately keep reading the STOCK manifest — they
   // are user chrome, not part of a harness's surface set.
   const effectiveWorkspace = useMemo(
     () =>
@@ -1339,29 +1214,29 @@ function App() {
   // Launch-habit watcher: after boot settles, the FIRST surface switch inside
   // the watch window is this launch's habit sample. One sample per launch.
   const launchWatchRef = useRef<{
-    from: MainSurface;
+    from: Surface;
     startedAt: number;
     done: boolean;
   } | null>(null);
   useEffect(() => {
     const watch = launchWatchRef.current;
     if (!watch || watch.done) return;
-    if (mainSurface === watch.from) return;
+    if (stageSurface === watch.from) return;
     watch.done = true;
     if (Date.now() - watch.startedAt <= NUDGE_WINDOW_MS) {
-      saveNudgeState(recordLaunch(nudgeStateRef.current, mainSurface));
+      saveNudgeState(recordLaunch(nudgeStateRef.current, stageSurface));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mainSurface]);
+  }, [stageSurface]);
   const nudgeSuggestion = useMemo(
     () => suggestLanding(nudgeState, workspace),
     [nudgeState, workspace],
   );
   const voiceEnabled = surfaceEnabled(effectiveWorkspace, "voice");
   const chatEnabled = surfaceEnabled(effectiveWorkspace, "chat");
-  // Fresh view of mainSurface for the boot-time landing decision.
-  const mainSurfaceRef = useRef(mainSurface);
-  mainSurfaceRef.current = mainSurface;
+  // Fresh view of stageSurface for the boot-time landing decision.
+  const stageSurfaceRef = useRef(stageSurface);
+  stageSurfaceRef.current = stageSurface;
   // Enter a harness: pure recomposition — cache the manifest so the NEXT
   // launch's first render already composes it (no stock-header flash), load
   // this harness's saved arrangement, land on its landing surface. No
@@ -1373,7 +1248,7 @@ function App() {
       const active: ActiveHarness = {
         manifest,
         entry,
-        returnSurface: mainSurfaceRef.current,
+        returnSurface: stageSurfaceRef.current,
       };
       const delta = readHarnessArrangement(localStorage, manifest.id);
       storeActiveHarness(localStorage, active);
@@ -1381,7 +1256,7 @@ function App() {
       setHarnessDelta(delta);
       const target = initialSurface(
         harnessWorkspace(manifest, delta),
-        mainSurfaceRef.current,
+        stageSurfaceRef.current,
       );
       prefetchSurfaceChunk(target);
       selectSurfaceRef.current(target);
@@ -1399,7 +1274,7 @@ function App() {
     const back = leaving.returnSurface;
     const target =
       back && headerSurfaces(workspace).some((d) => d.id === back)
-        ? (back as MainSurface)
+        ? (back as Surface)
         : "document";
     prefetchSurfaceChunk(target);
     selectSurfaceRef.current(target);
@@ -1479,8 +1354,8 @@ function App() {
   // pane with no header entry.
   useEffect(() => {
     if (
-      mainSurface !== "document" &&
-      !surfaceEnabled(effectiveWorkspace, mainSurface as ToggleableSurface)
+      stageSurface !== "document" &&
+      !surfaceEnabled(effectiveWorkspace, stageSurface as ToggleableSurface)
     ) {
       selectSurfaceRef.current("document");
     }
@@ -1491,7 +1366,7 @@ function App() {
   // persist across reloads.
   // The conversation's host is the rail's Talk tab (W4): it is "open" when
   // the rail shows Talk, and `conversationContext.ts` still decides WHICH
-  // conversation it holds — the same shape `mainSurface` gave the center plate.
+  // conversation it holds — the same shape `stageSurface` gave the center plate.
   const dockScopeRef = useRef<DockScope | null>(null);
   // The conversation the user asked to see as a ROOM rather than as the column
   // beside a surface — the kind, not a boolean, so the pose can be decided
@@ -1721,17 +1596,6 @@ function App() {
   // guard `drafterOpening` is for the Drafter.
   const [chatOpening, setChatOpening] = useState(false);
   const chatCreation = useRef<Promise<Companion> | null>(null);
-  // Belt and braces for the surface that moved into the dock: nothing in this
-  // build selects `"chat"` any more and the boot migration rewrites the
-  // persisted value, but a workspace manifest can still NAME a surface (its
-  // `landing`), and landing on one with no body would show an empty plate.
-  useEffect(() => {
-    // Under the workbench "chat" is a companion chat pane: nothing to bounce.
-    if (classicWb || mainSurface !== "chat") return;
-    // The document's empty plate is where the door rests.
-    selectSurfaceRef.current("document");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mainSurface]);
 
   // ONE pending launch, keyed by the door it came through. Not one per
   // surface: `deriveReadiness` takes a single `pendingSince`, so two states
@@ -1783,18 +1647,13 @@ function App() {
     if (door.data.draftKey !== FRONT_DOOR_TEXT_KEY) writeSharedDraft(door.data.draftKey, "");
     return true;
   }, []);
-  doorSentenceKey = classicWb ? doorDraftKeyNow : FRONT_DOOR_TEXT_KEY;
+  doorSentenceKey = doorDraftKeyNow;
   const wbActiveKey = useWorkbench(wb, (st) => st.activeKey);
   const wbActiveTabId = useWorkbench(wb, (st) => st.sets[st.activeKey]?.activeTabId ?? null);
   const untouchedDoors = useRef(new Set<string>());
   // ⌘T's door, for the mount-once key listener below.
   const openDoorTabRef = useRef<() => void>(() => {});
   const openDoorTab = useCallback(() => {
-    // The flow shell has no tabs: ⌘T is its door.
-    if (!classicWb) {
-      openFrontDoorRef.current();
-      return;
-    }
     beginMeasure("wb:new-tab-caret");
     setDoorCompact(false);
     const { set, tab } = activePanes(wb.getState());
@@ -1839,7 +1698,6 @@ function App() {
   // on the store, so every way a door goes — the strip's ×, ⌘W, Esc, the
   // launch's handoff — forgets its key.
   useEffect(() => {
-    if (!classicWb) return;
     const doors = (state: WorkbenchState) => {
       const out = new Map<string, string>();
       for (const set of Object.values(state.sets)) {
@@ -1858,14 +1716,12 @@ function App() {
   }, []);
   const previousTabRef = useRef<{ key: SessionKey; tabId: string | null } | null>(null);
   useEffect(() => {
-    if (!classicWb) return;
     const prev = previousTabRef.current;
     previousTabRef.current = { key: wbActiveKey, tabId: wbActiveTabId };
     if (!prev || (prev.key === wbActiveKey && prev.tabId === wbActiveTabId)) return;
     closeUntouchedDoor(prev.key, prev.tabId);
   }, [wbActiveKey, wbActiveTabId, closeUntouchedDoor]);
   useEffect(() => {
-    if (!classicWb) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
@@ -2106,8 +1962,8 @@ function App() {
   // Safety net: if the editor never comes up at all, the surface must not stay
   // silent forever. Leaving the drafter ends the arrival regardless.
   useEffect(() => {
-    if (mainSurfaceRef.current !== "drafter") setQuietOpen(false);
-  }, [mainSurface]);
+    if (stageSurfaceRef.current !== "drafter") setQuietOpen(false);
+  }, [stageSurface]);
 
   // The shelf, shown in place of the open document inside the same surface —
   // no fourth pane, and it inherits the pane's fullscreen and zoom.
@@ -2358,19 +2214,18 @@ function App() {
     setFrontDoorOpen(value => !value);
   }, []);
   // Visibility from the active tab's panes (a review beside a browser is on
-  // screen though it is not the tab's "surface"), the old value in flow.
-  const codeReview = useReview(classicWb ? wbView.visibleKinds.includes("review") : reviewOpen);
+  // screen though it is not the tab's "surface").
+  const codeReview = useReview(view.visibleKinds.includes("review"));
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
-  const devServers = useDevServers(classicWb ? wbView.visibleKinds.includes("servers") : serversOpen);
+  const devServers = useDevServers(view.visibleKinds.includes("servers"));
   // What `selectSurface(next)` means in the workbench. "document" is the
-  // way back: beside a surface it closes the surface half (the tile the doc
-  // pin made); alone it brings the set's plan — or Home's door — forward.
-  // A surface opens in a tab of its own, or beside the document while the
-  // doc pin preference is on; the drafter and the review are one pane per
+  // way back: it brings the set's plan — or Home's door — forward. A surface
+  // opens in a tab of its own, or, from a tile (the plan beside a surface),
+  // in the tile's surface half; the drafter and the review are one pane per
   // set (App keeps which document / repo they show). "chat" is a companion
   // chat pane and never opens from here (the room's own routes do).
-  const paneInitFor = (kind: Exclude<MainSurface, "document" | "chat">): PaneInit => {
+  const paneInitFor = (kind: Exclude<Surface, "document" | "chat">): PaneInit => {
     switch (kind) {
       case "browser": return { kind, data: { workspace: "regular" } };
       case "drafter": return { kind, data: { draftId: drafterDraftId ?? "" } };
@@ -2378,9 +2233,9 @@ function App() {
       default: return { kind, data: {} };
     }
   };
-  openInWorkbenchRef.current = (next: MainSurface) => {
+  openInWorkbenchRef.current = (next: Surface) => {
     const state = wb.getState();
-    const { key, set, tab, panes } = activePanes(state);
+    const { key, set, tab } = activePanes(state);
     if (next === "chat") return;
     if (next === "document") {
       // Never closes a pane (a surface's own ✕ does that): the set's Plan
@@ -2405,15 +2260,15 @@ function App() {
     }
     // From a door tab the destination takes the door's place.
     if (convertDoorPane(paneInitFor(next))) return;
-    const doc = panes.find((p) => isDocumentKind(p.kind));
-    if (docPinnedPref && doc && tab && set && panes.length <= 2) {
-      const other = panes.find((p) => p.id !== doc.id);
-      if (other?.kind === next) {
-        wb.dispatch({ type: "focusPane", paneId: other.id });
+    // From the tile, the surface half becomes the next surface: the plan
+    // stays beside it (D24 — the tile is the tab's own layout, not a pin).
+    const tile = tileOf(state);
+    if (tile && tab && set) {
+      if (tile.other.kind === next) {
+        wb.dispatch({ type: "focusPane", paneId: tile.other.id });
         return;
       }
-      if (other) wb.dispatch({ type: "closePane", paneId: other.id });
-      wb.dispatch({ type: "splitPane", paneId: doc.id, direction: splitVertical ? "column" : "row", pane: paneInitFor(next) });
+      wb.dispatch({ type: "replacePane", paneId: tile.other.id, pane: paneInitFor(next) });
       return;
     }
     const init = paneInitFor(next);
@@ -2423,7 +2278,7 @@ function App() {
   // panes is a pure reparent, which no ResizeObserver sees, so the key is
   // the only thing that moves the native webview.
   const browserHeld = useWorkbench(wb, (s) => singletonHolder(s, "browser", browserHolder));
-  const wbLayoutKey = `${useWorkbench(wb, selectWbLayoutKey)}|${browserHeld}`;
+  const wbLayoutKey = `${useWorkbench(wb, selectLayoutKey)}|${browserHeld}`;
   // An agent asking for a code review (a `/redline-code-review` curl holding
   // for feedback) is news — never a move.
   // The review surface waits for you: a notice says so once, a footer chip
@@ -2435,7 +2290,7 @@ function App() {
   reviewNewsRef.current = reviewNews;
   const tellReview = useCallback(() => {
     const message = "Review ready";
-    const there = mainSurfaceRef.current === "review";
+    const there = stageSurfaceRef.current === "review";
     if (!there && reviewNewsRef.current) return;
     // Already on the review surface, it is on screen: only the OS is told.
     if (!there) {
@@ -2445,7 +2300,7 @@ function App() {
         message,
         tone: "info",
         action: { label: "Open", onAction: () => selectSurfaceRef.current("review") },
-        ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+        ...(stageSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
       });
     }
     void import("./lib/osNotice")
@@ -2465,8 +2320,8 @@ function App() {
   // Over once you go to the review surface, or once the agent stops
   // waiting on a review nobody opened.
   useEffect(() => {
-    if (mainSurface === "review") setReviewNews(null);
-  }, [mainSurface]);
+    if (stageSurface === "review") setReviewNews(null);
+  }, [stageSurface]);
   useEffect(() => {
     if (!codeReview.holdActive) setReviewNews(null);
   }, [codeReview.holdActive]);
@@ -2689,12 +2544,6 @@ function App() {
   }, [finishWallClose]);
   const closeTabRequest = useCallback((tabId: string) => void requestClose({ tabId }), [requestClose]);
   const closeFromInside = useCallback(() => {
-    // The flow shell (until W2) has pages but no tabs: a browser page, or
-    // nothing — never the window.
-    if (!classicWb) {
-      if (mainSurfaceRef.current === "browser") window.dispatchEvent(new CustomEvent("redline:browser-close-page"));
-      return;
-    }
     const { set, tab } = activePanes(wb.getState());
     if (!set || !tab) return;
     const focused = set.panes[tab.focusedPaneId];
@@ -2713,14 +2562,11 @@ function App() {
     else wb.dispatch({ type: "closeTab", tabId: tab.id });
   }, []);
   // Every event the native menu emits for the workbench has exactly one
-  // listener, here, in both shells (flow keeps them until W2; its tab
-  // actions are no-ops there): File ▸ New Tab, Reopen Closed Tab, Close,
-  // Close Window, and the Tabs submenu. BrowserPane keeps only menu-print;
+  // listener, here: File ▸ New Tab, Reopen Closed Tab, Close, Close Window,
+  // and the Tabs submenu. BrowserPane keeps only menu-print;
   // browser_signals.js forwards the rest from a page.
   useEffect(() => {
-    const tabs = (action: WorkbenchAction) => {
-      if (classicWb) wb.dispatch(action);
-    };
+    const tabs = (action: WorkbenchAction) => wb.dispatch(action);
     const subs = [
       listen("menu-new-tab", () => openDoorTabRef.current()),
       listen("menu-close-tab", closeFromInside),
@@ -2795,7 +2641,7 @@ function App() {
     // default first and keeps it.
     const onSplitKey = (e: KeyboardEvent) => {
       const dir = splitKeyOf(e);
-      if (!dir || e.defaultPrevented || !classicWb) return;
+      if (!dir || e.defaultPrevented) return;
       const { set, tab } = activePanes(wb.getState());
       if (!set || !tab) return;
       e.preventDefault();
@@ -2809,7 +2655,7 @@ function App() {
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keydown", onZoomKey, true);
     window.addEventListener("keydown", onSplitKey);
-    if (classicWb) void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
+    void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
       for (const p of subs) void p.then((un) => un());
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
@@ -2861,26 +2707,21 @@ function App() {
     openFolders,
     sidebarTab,
     linkNav,
-    activeFile: folderActiveFile,
     openFolder,
     selectSessions,
     selectFolder,
     setActiveFile,
   } = useFolderWorkspaces();
-  // The document plate wears three faces — the Front Door, a plan, and the
-  // folder explorer's file viewer — and every site below used to re-derive
-  // which one from `sidebarTab.kind === "folder" && activeFile`. Naming it
-  // once is what lets the conversation dock tell a plan (which has a
-  // discussion) from a file (which has none).
-  // Under the workbench a file is a pane: the focused file pane's path, and
-  // the plate's face follows the focused pane (a door tab in a session is
-  // the door; a plan beside a browser is the plan).
-  const activeFile = classicWb ? wbView.activeFile : folderActiveFile;
-  const wbPlateMode: DocumentPlateMode = wbView.focusedKind === "file" ? "file" : wbView.focusedKind === "door" ? "door" : activeId ? "plan" : "door";
-  const plateMode = classicWb ? wbPlateMode : documentPlateMode(sidebarTab, activeId, activeFile);
+  // The document plate wears three faces — the Front Door, a plan, and a
+  // file — and the conversation dock tells a plan (which has a discussion)
+  // from a file (which has none) by it. A file is a pane: the focused file
+  // pane's path, and the plate's face follows the focused pane (a door tab
+  // in a session is the door; a plan beside a browser is the plan).
+  const activeFile = view.activeFile;
+  const plateMode = plateFace(view, activeId);
   const plateModeRef = useRef(plateMode);
   plateModeRef.current = plateMode;
-  const currentDockScope = dockScope(mainSurface, plateMode);
+  const currentDockScope = dockScope(stageSurface, plateMode);
   dockScopeRef.current = currentDockScope;
 
   // ── Sessions and their terminals ──────────────────────────────────────────
@@ -2995,8 +2836,8 @@ function App() {
       status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
   }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds]);
-  // The strip's right-hand cluster: the doc pin as a contextual entry —
-  // tile the session's plan beside the surface in this tab, or untile it.
+  // The strip's right-hand cluster: the tile as a contextual entry — the
+  // session's plan beside the surface in this tab, or the surface alone.
   const stageTile = (() => {
     const { panes } = activePanes(wb.getState());
     const doc = panes.find((p) => isDocumentKind(p.kind));
@@ -3013,15 +2854,8 @@ function App() {
       aria-label={stageTile.tiled ? "Untile the plan" : "Tile the plan alongside"}
       aria-pressed={stageTile.tiled}
       onClick={() => {
-        setSplitRatio(0.5);
-        setImmersiveBroken(true);
-        if (stageTile.tiled) {
-          setDocPinned(false);
-          wb.dispatch({ type: "closePane", paneId: stageTile.docId });
-        } else if (activeId) {
-          setDocPinned(true);
-          wb.dispatch({ type: "splitPane", paneId: stageTile.surfaceId, direction: splitVertical ? "column" : "row", pane: { kind: "plan", data: { sessionId: activeId, version: null } }, before: true });
-        }
+        if (stageTile.tiled) wb.dispatch({ type: "closePane", paneId: stageTile.docId });
+        else if (activeId) wb.dispatch({ type: "splitPane", paneId: stageTile.surfaceId, direction: "row", pane: { kind: "plan", data: { sessionId: activeId, version: null } }, before: true });
       }}
     >
       <Columns2 size={16} aria-hidden />
@@ -3029,49 +2863,30 @@ function App() {
   ) : null;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
-  const plateAtRest = mainSurface === "document" && plateMode === "door";
+  const plateAtRest = stageSurface === "document" && plateMode === "door";
 
 
-  // ---- Immersive surfaces ---------------------------------------------------
+  // ---- The shell's shape ----------------------------------------------------
   //
-  // Surface masks are derived from the current visit rather than a saved
-  // layout snapshot. The discussion preference also closes on entry, so
-  // leaving a masked surface does not reopen it. The names
-  // below are the ORIGINAL flag names, so every read site downstream
-  // (layoutFlagsRef, computePaneLayout, the JSX guards, browserVisible, the
-  // useResizablePane wiring) reads the effective value with no diff at all.
-  // A read that sits ABOVE this block is a TypeScript error, never a silently
-  // wrong value.
+  // The persisted flags, through the responsive poses. The names below are
+  // what every read site downstream (layoutFlagsRef, computePaneLayout, the
+  // JSX guards, browserVisible, the useResizablePane wiring) reads; a read
+  // that sits ABOVE this block is a TypeScript error, never a silently wrong
+  // value.
   // The window's width, committed once a resize settles (`onResizeSession`
   // below). Each side pane's max is "up to the other pane", and it decides
   // the responsive poses (D18).
   const [winWidth, setWinWidth] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
-  const immersive = isImmersive({
-    surface: mainSurface,
-    broken: immersiveBroken,
-    enabled: workspaceImmersive(workspace),
-  });
-  const baseShape = effectiveShape(
-    {
-      sidebarCollapsed: sidebarCollapsedPref,
-      paneCollapsed: paneCollapsedPref,
-      paneFullscreen: paneFullscreenPref,
-      // Structural under the workbench: a document face shares the tab
-      // with a surface. The preference still says what the NEXT surface
-      // does (tile beside the document, or take a tab of its own).
-      docPinned: classicWb ? wbView.docPinned : docPinnedPref,
-    },
-    immersive,
-  );
-  // W4: no surface masks the side columns any more. The sidebar and the rail
-  // stay however the user left them on every pane (⌘B / ⌘⌥B); what a surface
-  // with no document in front still changes is only the arrival rule — a plan
-  // arriving there waits in a notice instead of taking the screen. Review is
-  // not such a surface: its rail holds the review threads, and a plan there
-  // comes forward as on a document.
-  const surfaceInFront = mainSurface !== "document" && mainSurface !== "review" && !baseShape.docPinned && workspaceImmersive(workspace);
+  // No surface masks the side columns (W4). The sidebar and the rail stay
+  // however the user left them on every pane (⌘B / ⌘⌥B); what a surface with
+  // no document in front still changes is only the arrival rule — a plan
+  // arriving there waits in a notice instead of taking the screen (the
+  // manifest's `layout.immersive: false` opts out). Review is not such a
+  // surface: its rail holds the review threads, and a plan there comes
+  // forward as on a document. Neither is the tile, whose plan is on screen.
+  const surfaceInFront = stageSurface !== "document" && stageSurface !== "review" && !view.hasDocument && workspaceImmersive(workspace);
   const paneMaskedRef = useRef(surfaceInFront);
   paneMaskedRef.current = surfaceInFront;
   // Responsive poses (D18, workbench/poses.ts): below 1100 px the rail folds
@@ -3080,13 +2895,12 @@ function App() {
   // preference applies again. A resize never writes the preference.
   const [narrowOpen, setNarrowOpen] = useState<NarrowOpen>(NO_NARROW_OPEN);
   useEffect(() => setNarrowOpen((open) => settleNarrowOpen(open, winWidth)), [winWidth]);
-  const pose = responsivePose({ winWidth, sidebarCollapsed: baseShape.sidebarCollapsed, paneCollapsed: baseShape.paneCollapsed, narrowOpen });
+  const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen });
   const poseRef = useRef(pose);
   poseRef.current = pose;
   const { sidebarCollapsed, paneCollapsed } = pose;
   // A folded rail is never fullscreen underneath.
-  const paneFullscreen = baseShape.paneFullscreen && !paneCollapsed;
-  const docPinned = baseShape.docPinned;
+  const paneFullscreen = paneFullscreenPref && !paneCollapsed;
   /** Fold or open a side column: the narrow opening while narrow, else the
    *  user's preference. Every gesture goes through these two. */
   const setRailFolded = useCallback((folded: boolean) => {
@@ -3097,13 +2911,9 @@ function App() {
     if (poseRef.current.sidebarNarrow) setNarrowOpen((o) => (o.sidebar === !folded ? o : { ...o, sidebar: !folded }));
     else setSidebarCollapsed(folded);
   }, [setSidebarCollapsed]);
-  const docVisible = mainSurface === "document" || docPinned;
+  // A document face on screen: the plate alone, or the tile's plan half.
+  const docVisible = stageSurface === "document" || view.hasDocument;
 
-  // Breaking out. While immersive a persisted flag is masked, so a bare
-  // `setPaneCollapsed(false)` changes nothing on screen — every gesture that
-  // OPENS something clears the mask first. The rule: immersive hides, the user
-  // unhides, and the user wins for the rest of that visit. Nothing here writes
-  // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
     setSidebarFolded(false);
   }, [setSidebarFolded]);
@@ -3118,9 +2928,7 @@ function App() {
   const sessionCwdRef = useRef<string | null>(null);
   sessionCwdRef.current = session?.projectPath || null;
   const revealTerm = useCallback(() => {
-    setImmersiveBroken(true);
     setTerminalMounted(true);
-    if (!classicWb) return;
     const state = wb.getState();
     const set = state.sets[state.activeKey];
     if (set && Object.values(set.panes).some((p) => p.kind === "terminals")) wb.dispatch({ type: "openSurface", kind: "terminals" });
@@ -3146,7 +2954,7 @@ function App() {
   // browser each come back to the tab they were left on.
   const [railMemoryStored, setRailMemory] = usePersistedState<RailMemory>(RAIL_MEMORY_KEY, {});
   const railMemory = useMemo(() => parseRailMemory(railMemoryStored), [railMemoryStored]);
-  const railKind: PaneKind = wbView.focusedKind ?? "door";
+  const railKind: PaneKind = view.focusedKind ?? "door";
   const railKindRef = useRef(railKind);
   railKindRef.current = railKind;
   const railTabs = railTabsFor(railKind);
@@ -3163,7 +2971,7 @@ function App() {
   // Sections for the drafter voice walkthrough — parsed backend-side from
   // the mirrored markdown, only while Talk shows the draft's voice.
   useEffect(() => {
-    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
+    if (!(dockOpen && stageSurface === "drafter" && drafterDraftId)) return;
     let alive = true;
     void invoke<Section[]>("parse_markdown_sections", {
       markdown: drafterMarkdown,
@@ -3173,7 +2981,7 @@ function App() {
     return () => {
       alive = false;
     };
-  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
+  }, [dockOpen, stageSurface, drafterDraftId, drafterMarkdown]);
   /** The drafter's Comments toggle and a new comment: its threads in the
    *  rail's Discussion. */
   const showDrafterDiscussion = useCallback(() => {
@@ -3217,18 +3025,6 @@ function App() {
     };
   }, [toggleSidebar, togglePane]);
 
-  // The chrome's hover reveal. The header can't simply vanish — it is the
-  // window-drag region and the traffic lights float over it — so immersive
-  // swaps it for a slim hull rail, and pointing at the rail slides the real
-  // bar back (see components/HullRail.tsx). One state for both bars: the
-  // chrome returns as a unit. `openMenuCount` is already tracked for
-  // `browserVisible`; here it stops a header dropdown from being torn out
-  // from under the pointer.
-  const chrome = useEdgeReveal({
-    enabled: immersive,
-    menusOpen: openMenuCount,
-  });
-  const chromeRevealed = chrome.revealed;
 
   // A3 snap-back: one gesture returns the shell to its canonical resting
   // arrangement — the shape a fresh install's doors open onto — and a second
@@ -3251,21 +3047,15 @@ function App() {
       window.innerHeight,
       workspaceLayout(workspace),
     );
-    // Snap-back is the immersive escape hatch, so it drops the mask on the way
-    // through (the canonical branch also lands on the document, which re-arms
-    // it). Everything below reads the *Pref flags, not the masked ones: the
-    // at-rest cycle has to describe the user's real layout, or ⌘⇧0 from an
-    // immersive surface would read "already closed" and do the wrong half of
-    // the cycle.
-    setImmersiveBroken(true);
+    // Everything below reads the *Pref flags, not the posed ones: the at-rest
+    // cycle has to describe the user's real layout, not a narrow window's.
     if (
       isLayoutAtRest(
         {
           sidebarCollapsed: sidebarCollapsedPref,
           paneCollapsed: paneCollapsedPref,
           paneFullscreen: paneFullscreenPref,
-          docPinned: docPinnedPref,
-          surface: mainSurface,
+          surface: stageSurface,
         },
         target,
       )
@@ -3294,7 +3084,6 @@ function App() {
     setPaneWidth(target.paneWidth);
     setPaneCollapsed(false);
     setPaneFullscreen(false);
-    setDocPinned(false);
     selectSurface(target.surface);
   }, [
     workspace,
@@ -3304,14 +3093,12 @@ function App() {
     setPaneWidth,
     setPaneCollapsed,
     setPaneFullscreen,
-    setDocPinned,
     // The at-rest check reads the live persisted flags; snapBackRef exists
     // precisely so the mount-once ⌘⇧0 listener sees this fresh closure.
     sidebarCollapsedPref,
     paneCollapsedPref,
     paneFullscreenPref,
-    docPinnedPref,
-    mainSurface,
+    stageSurface,
   ]);
   snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
@@ -3324,7 +3111,6 @@ function App() {
   // loses one for a terminal that is gone and no longer the session's (a
   // restore into a fresh PTY).
   useEffect(() => {
-    if (!classicWb) return;
     const state = wb.getState();
     for (const [sessionId, terminalId] of sessionTerminals) {
       const key = planKey(sessionId);
@@ -3420,10 +3206,9 @@ function App() {
     (anchor: string | undefined) => {
       tourRevealRestore.current?.();
       tourRevealRestore.current = null;
-      if (anchor === "terminal" && classicWb) {
+      if (anchor === "terminal") {
         // The spotlight needs its target on screen: the set's wall comes
-        // forward (a reveal, so it breaks the immersive mask like any
-        // other), and the tab the user was on comes back when the step
+        // forward, and the tab the user was on comes back when the step
         // moves on.
         const before = wb.getState();
         const key = before.activeKey;
@@ -3554,7 +3339,6 @@ function App() {
    *  terminal is its Agent tab (where its questions are), unless the raw
    *  PTY is what was asked for. */
   const showTerminal = useCallback((id: string, focus = false, raw = false) => {
-    setImmersiveBroken(true);
     setTerminalMounted(true);
     const state = wb.getState();
     const owner = state.owners[id];
@@ -3615,7 +3399,7 @@ function App() {
   }, [shellReady, terminalMounted]);
 
   // A wall on screen needs its terminals now, not at the next idle beat.
-  const wallOnScreen = classicWb && wbView.visibleKinds.includes("terminals");
+  const wallOnScreen = view.visibleKinds.includes("terminals");
   useEffect(() => {
     if (wallOnScreen) setTerminalMounted(true);
   }, [wallOnScreen]);
@@ -3623,7 +3407,7 @@ function App() {
   // so no wall points at a PTY that is not there; once the layer has said
   // which are live, never before.
   useEffect(() => {
-    if (!classicWb || !liveTermIds) return;
+    if (!liveTermIds) return;
     const state = wb.getState();
     const sessions = (Object.keys(state.sets) as SessionKey[]).map(sessionIdOf).filter((sid): sid is string => sid !== null);
     wb.dispatch({ type: "prune", liveSessions: sessions, livePtys: liveTermIds });
@@ -3779,16 +3563,10 @@ function App() {
   const handleOpenFile = useCallback(
     (path: string, mode: OpenFileMode = "preview") => {
       setActiveFile(path);
-      // Under the workbench a file opens as a pane in the current set (the
-      // one already open with that path comes forward): previewed, pinned
-      // or in a tab of its own (W4's Files rail rules).
-      if (classicWb) wb.dispatch({ type: "openFile", path, mode });
-      // If a non-document surface fills the center pane, the opened file would
-      // load hidden behind it — switch to the document, unless the user has
-      // pinned it (the file is already visible in the tile).
-      else if (mainSurface !== "document" && !docPinned) {
-        selectSurface("document");
-      }
+      // A file opens as a pane in the current set (the one already open with
+      // that path comes forward): previewed, pinned or in a tab of its own
+      // (W4's Files rail rules).
+      wb.dispatch({ type: "openFile", path, mode });
       if (sidebarTab.kind === "folder") {
         folderFileRef.current.set(sidebarTab.id, path);
         if (activeTermId) {
@@ -3799,11 +3577,11 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId, mainSurface, docPinned, selectSurface],
+    [setActiveFile, sidebarTab, activeTermId],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
-    if (classicWb) closeSurfacePane("file");
+    closeSurfacePane("file");
     if (sidebarTab.kind === "folder") {
       folderFileRef.current.set(sidebarTab.id, null);
       if (activeTermId) {
@@ -4139,8 +3917,8 @@ function App() {
     sidebarTab,
     activeFile,
     activeId,
-    mainSurface,
-    docPinned,
+    stageSurface,
+    view.hasDocument,
     docPadR,
     docWide,
     docMeasure,
@@ -4393,8 +4171,7 @@ function App() {
     max: sidebarMaxW,
     // Drag the document over the sidebar past its hard stop → snap it shut.
     onCollapse: () => setSidebarFolded(true),
-    // Drag the divider of a collapsed sidebar to re-open it as a drawer —
-    // including a sidebar that is only collapsed because immersive says so.
+    // Drag the divider of a collapsed sidebar to re-open it as a drawer.
     collapsed: sidebarCollapsed,
     onExpand: revealSidebar,
   });
@@ -4409,8 +4186,7 @@ function App() {
     onLiveSize: (w) => applyLiveLayout({ paneWidth: w }),
     min: RAIL_MIN_W,
     max: paneMaxW,
-    // Same for the comment pane on the right edge. Its drag-from-edge expand
-    // is the escape hatch that keeps Code Review workable while immersive.
+    // Same for the rail on the right edge.
     onCollapse: () => setRailFolded(true),
     collapsed: paneCollapsed,
     onExpand: revealPane,
@@ -4455,7 +4231,7 @@ function App() {
       // Sets whose session is gone go with it (a joined room's mirrored set
       // stays while joined); terminals are not the workbench's yet (W3).
       // Never the active set, and never a set newer than this read.
-      if (classicWb) {
+      {
         const state = wb.getState();
         const live = list.map((s) => s.sessionId);
         const joined = activeIdRef.current && isJoinedSessionId(activeIdRef.current) ? activeIdRef.current.split(":")[1] : null;
@@ -4619,8 +4395,8 @@ function App() {
       // within.
       // A reload keeps the set it was on (`wbReload`): no held plan and no
       // landing moves it; its own session loads.
-      const held = wbReload && classicWb ? sessionIdOf(wb.getState().activeKey) : boot?.heldSessionId ?? null;
-      if (!(wbReload && classicWb)) setActiveId(held);
+      const held = wbReload ? sessionIdOf(wb.getState().activeKey) : boot?.heldSessionId ?? null;
+      if (!wbReload) setActiveId(held);
       await loadSession(held);
       if (held) markOnce("rl:session-ready");
       // Landing: "last" (default) keeps the persisted surface — today's
@@ -4631,11 +4407,11 @@ function App() {
       const target = resolved
         ? initialSurface(
             harnessWorkspace(resolved.manifest, harnessDeltaNow),
-            mainSurfaceRef.current,
+            stageSurfaceRef.current,
           )
         : initialSurface(
             ws,
-            mainSurfaceRef.current,
+            stageSurfaceRef.current,
             list[0]?.projectPath ?? null,
           );
       // Warm what boot is about to show while the doors are still parting:
@@ -4643,7 +4419,7 @@ function App() {
       // resting tab). Dynamic imports — the size budget never sees them.
       prefetchSurfaceChunk(target);
       void loadSessionSidebar().catch(() => {});
-      if (target !== mainSurfaceRef.current && !(wbReload && classicWb)) {
+      if (target !== stageSurfaceRef.current && !wbReload) {
         selectSurfaceRef.current(target);
       }
       // Boot has settled — the next surface switch (if soon) is this
@@ -4766,7 +4542,7 @@ function App() {
           message,
           tone: "info",
           action: { label, onAction: openArrival },
-          ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+          ...(stageSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
         });
         // A door that sent this very launch is never "writing", caret in its
         // box or not: its ⏎ asked for this plan, so it arrives on screen —
@@ -4775,12 +4551,12 @@ function App() {
         // another door and is typing in it is busy — the launch door retires
         // quietly, the plan's set gets its Plan tab without being selected
         // (D1's "elsewhere"), and the row's pulse carries the news.
-        const launchDoor = classicWb && !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId ? doorLaunchTabRef.current : null;
+        const launchDoor = !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId ? doorLaunchTabRef.current : null;
         const wbNow = wb.getState();
         // The launch's own set (its Agent tab, and the door it came through):
         // it becomes the plan's set, the door its Plan tab (D1: selected
         // when the user is on it, inserted quietly when not).
-        const launchSetKey = classicWb && payload.launchId ? launchKey(payload.launchId) : null;
+        const launchSetKey = payload.launchId ? launchKey(payload.launchId) : null;
         const launchSet = launchSetKey && wbNow.sets[launchSetKey] ? launchSetKey : null;
         const ownLaunch = !!launchSet && wbNow.activeKey === launchSet;
         const ownDoorTab = !!launchDoor && launchDoor.key === wbNow.activeKey && wbNow.sets[launchDoor.key]?.activeTabId === launchDoor.tabId;
@@ -4815,7 +4591,7 @@ function App() {
         const focus = arrivalFocus({
           activeId,
           sessionId: payload.sessionId,
-          mainSurface: mainSurfaceRef.current,
+          surface: stageSurfaceRef.current,
           plateMode: plateModeRef.current,
           viewedVersion: viewedVersionRef.current,
           writing,
@@ -4850,7 +4626,7 @@ function App() {
           // No toast says so, so the island does, to a screen reader.
           // From a resting door tab the plan springs out of its box, and
           // the door tab it came through retires.
-          if (classicWb && payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId) {
+          if (payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId) {
             const from = boxOf(".rl-frontdoor-focus .rl-fd-island");
             if (from) setPlanSwap({ launchId: payload.launchId, from });
             retireDoorLaunchTab(payload.launchId);
@@ -4862,7 +4638,7 @@ function App() {
           // Someone elsewhere comes to the plan itself, not the Agent tab
           // the set was showing (D1 selects the Plan tab only for the user
           // already on the set).
-          if (classicWb && !ownLaunch) wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(payload.sessionId) });
+          if (!ownLaunch) wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(payload.sessionId) });
           announceDoor(arrivalMessage(title, revision));
           return;
         }
@@ -5548,7 +5324,7 @@ function App() {
   const tocEligible =
     !joinedActive &&
     sessionReady &&
-    mainSurface === "document" &&
+    stageSurface === "document" &&
     displaySections.length > 0;
   const tocDocked = tocEligible && tocOpen;
 
@@ -5582,7 +5358,7 @@ function App() {
     // views moves the text column's left edge from "centred" to the pane's edge
     // without resizing the scroller the observer watches, so the measurement has
     // to be asked for rather than waited on.
-    deps: [tocDocked, tocEligible, mainSurface, activeId, activeFile, docWide, docMeasure],
+    deps: [tocDocked, tocEligible, stageSurface, activeId, activeFile, docWide, docMeasure],
   });
 
   // The conversation dock's contexts. It sits at PLATE level — a sibling of
@@ -5604,7 +5380,7 @@ function App() {
     const inputs = {
       voiceEnabled,
       chatEnabled,
-      surface: mainSurface,
+      surface: stageSurface,
       plateMode,
       activeId: planDiscussable ? activeId : null,
       planTitle: activeSummary?.planTitle ?? null,
@@ -5628,7 +5404,7 @@ function App() {
   }, [
     voiceEnabled,
     chatEnabled,
-    mainSurface,
+    stageSurface,
     plateMode,
     planDiscussable,
     activeId,
@@ -5738,7 +5514,7 @@ function App() {
   const [tabRequest, setTabRequest] = useState<TabRequest | null>(null);
   const navigateTo = useCallback(
     (t: NavTarget) => {
-      selectSurfaceRef.current(t.surface as MainSurface);
+      selectSurfaceRef.current(t.surface as Surface);
       if (isKnownTab(t.surface, t.tab))
         setTabRequest({ tab: t.tab!, nonce: Date.now() });
     },
@@ -7047,7 +6823,7 @@ function App() {
     // for in the foreground it is selected, and the door tab it came
     // through follows it (it becomes the Plan tab on arrival); a
     // background launch gets its set without moving anyone.
-    if (classicWb) {
+    {
       const key = launchKey(launchId);
       if (req.background) wb.dispatch({ type: "ensureDefaults", key, defaults: { agentTerminalId: terminalId } });
       else {
@@ -8117,8 +7893,8 @@ function App() {
   // someone is typing in. The draft id only names a place while the Drafter
   // is showing. Off it, the id still changes — a first launch mints one in an
   // effect — and that must not read as anything at all.
-  const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
-  const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}:${doorTrip}`;
+  const islandSurfaceKey = `${stageSurface}:${activeId ?? ""}:${stageSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
+  const doorNavKey = `${stageSurface}:${stageSurface === "drafter" ? drafterDraftId ?? "" : ""}:${doorTrip}`;
   const contextChips = surfaceChips(activeSurface, {
     page: browserIslandPage,
     tasks: !!browserDock.cartId,
@@ -8186,7 +7962,7 @@ function App() {
     if (!prompt || frontDoorLaunchingRef.current) return;
     // From the browser the session starts in the background: the page stays
     // up, and the door's flight pill is how you go and watch it.
-    const browser = mainSurface === "browser";
+    const browser = stageSurface === "browser";
     const project = projectOverride ?? resolveFrontDoorProject(text);
     frontDoorLaunchingRef.current = true;
     setFrontDoorLaunching(true);
@@ -8540,8 +8316,8 @@ function App() {
   // a wall, a file or a hidden tab's door must never turn typing meant for
   // them (a tile's ▾ filter, a terminal) into a door.
   const landingTypeEligible =
-    mainSurface === "document" &&
-    (!classicWb || wbView.focusedKind === "door") &&
+    stageSurface === "document" &&
+    view.focusedKind === "door" &&
     !loading &&
     !activeId &&
     !joinedActive &&
@@ -8559,14 +8335,8 @@ function App() {
   // anything — it would only ever show on a virgin install. This is that way.
   const openFrontDoor = useCallback(() => {
     setFrontDoorDest("plan");
-    // Under the workbench "Plan a build" is a door tab in the active set.
-    if (classicWb) {
-      openDoorTab();
-      return;
-    }
-    setDoorCompact(false);
-    setFrontDoorOpen(true);
-    setFrontDoorFocus(n => n + 1);
+    // "Plan a build" is a door tab in the active set.
+    openDoorTab();
   }, [openDoorTab]);
   // Fresh view of it for the mount-once ⌘⇧N listener.
   openFrontDoorRef.current = openFrontDoor;
@@ -8622,7 +8392,7 @@ function App() {
     () =>
       buildCommands({
         surfaces: headerSurfaceList,
-        currentSurface: mainSurface,
+        currentSurface: stageSurface,
         sessions: summaries.map((s) => ({
           id: s.sessionId,
           title: s.planTitle || s.projectName || "Untitled plan",
@@ -8688,10 +8458,6 @@ function App() {
           toggleSidebar,
           toggleDiscussion: togglePane,
           toggleTerminal: revealTerm,
-          // The palette's word for "give me the panels back on this surface"
-          // (and, pressed again on the same visit, hide them again). It flips
-          // the break-out bit only — the persisted layout is never touched.
-          toggleImmersive: () => setImmersiveBroken(b => !b),
           setTheme: (name) => {
             if (isThemeName(name)) onThemeChange(name);
           },
@@ -8714,7 +8480,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       headerSurfaceList,
-      mainSurface,
+      stageSurface,
       summaries,
       activeId,
       theme,
@@ -9013,7 +8779,7 @@ function App() {
       setBrowserOpenRequest({ url, nonce: Date.now() });
       return;
     }
-    if (doorOpenTargets.some((t) => t.id === id)) selectSurface(id as MainSurface);
+    if (doorOpenTargets.some((t) => t.id === id)) selectSurface(id as Surface);
   };
   const setDoorDestination = (next: LaunchDestination) => {
     setFrontDoorDest(next);
@@ -9070,14 +8836,14 @@ function App() {
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
                 // The browser's card is Plan alone: a page has no Drafter or
                 // Chat of its own to grow into.
-                allowedDestinations={card && mainSurface === "browser" ? ["plan"] : undefined}
+                allowedDestinations={card && stageSurface === "browser" ? ["plan"] : undefined}
                 // A door tab's Open targets, and the destination the pane
                 // remembers (a door opened from a browser pane starts on
                 // Browser); the global default follows every pick.
-                openTargets={where === "door" && classicWb ? doorOpenTargets : undefined}
-                onOpenTarget={where === "door" && classicWb ? openDoorTarget : undefined}
-                destination={card ? cardDestination : where === "door" && classicWb ? (doorPaneDestination ?? frontDoorDest) : frontDoorDest}
-                onDestinationChange={card ? growCardTo : where === "door" && classicWb ? setDoorDestination : setFrontDoorDest}
+                openTargets={where === "door" ? doorOpenTargets : undefined}
+                onOpenTarget={where === "door" ? openDoorTarget : undefined}
+                destination={card ? cardDestination : where === "door" ? (doorPaneDestination ?? frontDoorDest) : frontDoorDest}
+                onDestinationChange={card ? growCardTo : where === "door" ? setDoorDestination : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -9165,7 +8931,7 @@ function App() {
   // Localhost ports beside it, and each session's terminals
   // in the shared status vocabulary — its agent's terminal from
   // `useSessionTerminals`, its state from the CLI's own hooks.
-  const sidebarPlace = !classicWb ? null : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
+  const sidebarPlace = view.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
   // Read off the Localhost scan (see `ptyKey` below for when it runs).
   // Sorted, deduped and kept by value: a scan that finds the same servers
   // (each 15 s while Localhost is up, in whatever order lsof lists them)
@@ -9305,7 +9071,7 @@ function App() {
       setSendError(null);
       setSendConfirm({ markdown: body, initialProject: guessProjectForPlan(body, projectOptions) ?? folder ?? lastLaunchProject, missionHandoff: { missionId, handoffId, destination } });
     },
-    onClose: () => (classicWb ? closeSurfacePane("browser") : selectSurface("document")),
+    onClose: () => closeSurfacePane("browser"),
     // Drop a plan/prompt drafted while browsing into a fresh Redline plan
     // session: close the browser overlay, confirm the target repo, then
     // launch the plan in the terminal (see handler).
@@ -9503,11 +9269,6 @@ function App() {
           relaunch.
         </div>
       )}
-      {/* Immersive: the header becomes a hull rail until the pointer asks for
-          it back. Reveal REFLOWS the plate down rather than floating over it —
-          a native webview composites above all React DOM, so an overlaid
-          header on the browser surface would simply be invisible. */}
-      <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
       <Header
         onOpenIntegrationHooks={hookConflicts.openDialog}
         session={session}
@@ -9568,7 +9329,6 @@ function App() {
         onSnapBack={snapBack}
         onOpenPalette={() => setPaletteOpen(true)}
       />
-      </ChromeSlot>
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
         <Suspense fallback={null}>
@@ -9771,7 +9531,7 @@ function App() {
               line, which is the opposite of what zoom is for. */}
           <div
             className="rl-surface-pane flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col relative"
-            data-main-surface={mainSurface}
+            data-main-surface={stageSurface}
             // The docked Contents rail's width, for what sits beside it
             // outside the plan's scroller: the Plan pane's notices.
             style={{ "--rl-doc-zoom": docZoom, "--rl-toc-docked": tocDocked ? `${tocRailW}px` : "0px" } as React.CSSProperties}
@@ -9784,7 +9544,7 @@ function App() {
           {(() => {
             // Under the workbench the rail and its button belong to a Plan
             // pane on screen; another tab has no document to index.
-            if (!tocEligible || (classicWb && !wbView.visibleKinds.includes("plan"))) return null;
+            if (!tocEligible || !view.visibleKinds.includes("plan")) return null;
             return tocOpen ? (
               <div
                 ref={tocRailRef}
@@ -10174,7 +9934,7 @@ function App() {
                     // back to.
                     // Back to the Front Door, which is the Document surface's
                     // resting state and always has been.
-                    onExit={() => (classicWb ? closeSurfacePane("drafter") : selectSurface("document"))}
+                    onExit={() => closeSurfacePane("drafter")}
                     saveState={drafterSaveState}
                     consumeSeed={consumeLandingSeed}
                     registerLiveMarkdown={registerDrafterLiveMarkdown}
@@ -10210,7 +9970,7 @@ function App() {
                         }
                       }).catch(error => setToast(`Couldn't open a terminal: ${String(error)}`, 6000));
                     }}
-                    onClose={() => (classicWb ? closeSurfacePane("review") : selectSurface("document"))}
+                    onClose={() => closeSurfacePane("review")}
                     focusPath={reviewFocus}
                   />
                 </Suspense>
@@ -10240,15 +10000,11 @@ function App() {
                   <MemorySurface
                     activeSessionId={session?.sessionId ?? null}
                     activeSessionName={session?.projectName ?? null}
-                    tabRequest={mainSurface === "memory" ? tabRequest : null}
+                    tabRequest={stageSurface === "memory" ? tabRequest : null}
                   />
                 </ErrorBoundary>
               </Suspense>
             );
-            // Exactly one surface owns the pane; a non-document surface splits
-            // against the document only while the doc pin is on, with the exact
-            // same SplitPane (orientation toggle, ratio and fold-to-edge
-            // divider) the browser has always used.
             const planBody = (
           <div
             ref={docScrollerRef}
@@ -10324,12 +10080,7 @@ function App() {
                   </>
                 }
               />
-            ) : joinedActive ? null : !classicWb && sidebarTab.kind === "folder" ? (
-              <EmptyState
-                title="Browsing files"
-                body="Select a file from the tree to view it here."
-              />
-            ) : !shellReady || (activeId && !sessionReady) ? (
+            ) : joinedActive ? null : !shellReady || (activeId && !sessionReady) ? (
               // Mid-choreography the plate stays quietly blank — a "Loading…"
               // flash inside the parting doors reads as a glitch, and the
               // plate's own fade already covers the wait.
@@ -10388,15 +10139,6 @@ function App() {
           </article>
           </div>
               );
-            // The plate's file face (flow and the legacy centre); under the
-            // workbench a file is its own pane, below.
-            const documentBody =
-              plateMode === "file" && activeFile ? (
-                <Suspense fallback={null}>
-                  <FileViewer path={activeFile} onClose={handleCloseFile} onSaved={toastSaved} />
-                </Suspense>
-              ) : planBody;
-            const browserBody = <PersistentPortalSlot key="browser" name="browser" host={browserHost} />;
             // What the editor mounts with, resolved HERE rather than pushed at
             // it every 400ms. The session cache is strictly fresher than
             // `drafterLoaded` by construction, and reading it at the mount site
@@ -10414,7 +10156,7 @@ function App() {
               <SpringSwap
                 from={swapFrom}
                 onArrived={() => setSwapFrom(null)}
-                leaving={swapFrom ? documentBody : null}
+                leaving={swapFrom ? planBody : null}
               >
                 <div className="relative flex h-full min-h-0 flex-col">
                   {drafterBody}
@@ -10423,29 +10165,11 @@ function App() {
                 </div>
               </SpringSwap>
             );
-            // The surface dispatch — a lenient record over the bodies this
-            // build ships, not a closed ternary: a manifest can name any
-            // surface (a harness pack, a future workspace.json), and an id
-            // this build can't render resolves to no body — the document —
-            // never to a type error. The bodies are the consts built above,
-            // so the record costs what the ternary cost.
-            const surfaceBodies: Record<string, ReactNode | undefined> = {
-              browser: browserBody,
-              drafter: drafterSurface,
-              review: reviewBody,
-              servers: serversBody,
-              memory: memoryBody,
-              // No `chat` entry: the room is a conversation, and conversations
-              // live in the dock now. `"chat"` stays in the `MainSurface` union
-              // for one release (a downgrade must still read its own persisted
-              // key) and resolves here to no body — the document — which is
-              // exactly what the lenient record is for.
-            };
             // The workbench: the active set's tabs over these same bodies,
             // each pane in a kind-named boundary (WorkbenchStage). Singleton
             // bodies (the browser, the companion chat) mount once, in their
             // portals; a pane shows only their slot.
-            if (classicWb) {
+            {
               planBodyNow = planBody;
               const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
                 swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
@@ -10520,7 +10244,7 @@ function App() {
                           planMarks={own ? pendingComments.length : 0}
                           // The plan is a tab of this set: open while it is on
                           // screen, and its card opens it.
-                          planOpen={wbView.visibleKinds.includes("plan")}
+                          planOpen={view.visibleKinds.includes("plan")}
                           onOpenPlan={agentPaneHandlers.onOpenPlan}
                           projectPath={projectPath}
                           planMarkdown={own ? latest?.rawPlanMarkdown ?? null : null}
@@ -10562,24 +10286,6 @@ function App() {
                 </Suspense>
               );
             }
-            const secondaryBody =
-              mainSurface === "document"
-                ? null
-                : (surfaceBodies[mainSurface] ?? null);
-            if (secondaryBody && docPinned)
-              return (
-                <SplitPane
-                  vertical={splitVertical}
-                  ratio={splitRatio}
-                  onRatioChange={setSplitRatio}
-                  onDraggingChange={setSplitDragging}
-                  first={documentBody}
-                  second={secondaryBody}
-                />
-              );
-            if (secondaryBody) return secondaryBody;
-            // No secondary pane open → the document is the default full view.
-            return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{documentBody}</SpringSwap> : documentBody;
           })()}
           {/* Floating document zoom + line-width control — pinned to the pane
               (doesn't scroll with the plan). A document always has it; the only
@@ -10594,11 +10300,11 @@ function App() {
               always the right answer and disappearing never is.
               `column-reverse` so the order still reads + above − with the mode
               toggle on top. */}
-          {(mainSurface === "document" ? docSurfaceActive : drafterOpen) &&
+          {(stageSurface === "document" ? docSurfaceActive : drafterOpen) &&
             plateMode !== "file" &&
-            // A document on screen: the Plan pane or the drafter, under the
-            // workbench — never over an Agent tab or a browser.
-            (!classicWb || wbView.visibleKinds.includes("plan") || wbView.visibleKinds.includes("drafter")) && (
+            // A document on screen: the Plan pane or the drafter — never over
+            // an Agent tab or a browser.
+            (view.visibleKinds.includes("plan") || view.visibleKinds.includes("drafter")) && (
             <div
               ref={zoomCtrlRef}
               className={`rl-doc-zoom absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
@@ -10807,12 +10513,7 @@ function App() {
             attention={railAttention}
             talkKey={dockContext?.key ?? null}
             fullscreen={paneFullscreen}
-            onToggleFullscreen={() => {
-              // Effective-value toggle, same rule as the pane's collapse:
-              // immersive masks fullscreen off, so ⤢ means "go fullscreen".
-              setImmersiveBroken(true);
-              setPaneFullscreen(!paneFullscreen);
-            }}
+            onToggleFullscreen={() => setPaneFullscreen(!paneFullscreen)}
             onCollapse={() => {
               setPaneFullscreen(false);
               setRailFolded(true);
@@ -11139,7 +10840,7 @@ function App() {
       >
       {/* Same swap at the bottom — no native constraint here, so the footer
           hides outright behind a SHELL_EDGE strip of hull. */}
-      <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
+      <Suspense fallback={null}>
       <Footer
         planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
         onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
@@ -11172,9 +10873,9 @@ function App() {
         backend={session?.backend ?? null}
         // A Plan pane on screen carries the verbs in its own footer; this
         // bar keeps the status (W6 slims it to that).
-        planVerbs={!(classicWb && wbView.visibleKinds.includes("plan"))}
+        planVerbs={!view.visibleKinds.includes("plan")}
       />
-      </ChromeSlot></Suspense>
+      </Suspense>
       </ErrorBoundary>
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}
@@ -11317,10 +11018,10 @@ function App() {
         </Suspense>
       )}
       <MonochatIsland
-        clearanceKey={`${immersive}:${chromeRevealed}:${bootAnimating}`}
+        clearanceKey={`${bootAnimating}`}
         // The door rests on a door pane that is on screen and focused.
-        landing={plateAtRest && shellReady && !joinedActive && wbView.focusedKind === "door"}
-        onPillClick={classicWb ? openDoorTab : undefined}
+        landing={plateAtRest && shellReady && !joinedActive && view.focusedKind === "door"}
+        onPillClick={openDoorTab}
         pill
         surfaceKey={doorNavKey}
         onVisibilityChange={setDoorVisible}
@@ -11393,7 +11094,7 @@ function App() {
               onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
-      {classicWb && activeId && createPortal(
+      {activeId && createPortal(
         planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBodyNow}</SpringSwap> : planBodyNow,
         planHost,
       )}
@@ -11421,10 +11122,9 @@ function App() {
                   // the terminal dock. The GRID key (tile count + rows) stands
                   // where tab count used to: a new terminal that lands untiled
                   // changes no geometry, while a tile row changes everything.
-                  // Immersive entry and every chrome reveal move the slot as
-                  // surely as a pane toggle does, and the native webview only
-                  // re-reads its rect when this key changes.
-                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${immersive}|${chromeRevealed}`}
+                  // The native webview only re-reads its rect when this key
+                  // changes.
+                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}`}
                   // The pane's four panels render into the app's one
                   // conversation column, through a portal — everything they
                   // need (tabs, missions, the linked thread) is the pane's own

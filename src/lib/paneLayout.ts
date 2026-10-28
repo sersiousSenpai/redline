@@ -74,8 +74,6 @@ export interface CanonicalLayout {
   paneCollapsed: boolean;
   paneFullscreen: boolean;
   surface: "document";
-  docPinned: boolean;
-  splitRatio: number;
 }
 
 /** An override must still be a sane pane size ON THIS WINDOW — off-range
@@ -109,19 +107,17 @@ export function canonicalLayout(
     paneCollapsed: false,
     paneFullscreen: false,
     surface: "document",
-    docPinned: false,
-    splitRatio: 0.5,
   };
 }
 
 /** The live layout flags that define the shell's SHAPE — which plates are
- *  open, fullscreen, pinned, and which surface owns the pane. Widths are
- *  deliberately not part of this: see isLayoutAtRest. */
+ *  open or fullscreen, and what the active tab shows (a document beside a
+ *  surface is that surface: `workbench/view.ts`). Widths are deliberately
+ *  not part of this: see isLayoutAtRest. */
 export interface RestingShapeInput {
   sidebarCollapsed: boolean;
   paneCollapsed: boolean;
   paneFullscreen: boolean;
-  docPinned: boolean;
   surface: string;
 }
 
@@ -145,7 +141,6 @@ export function isLayoutAtRest(
     current.sidebarCollapsed === canonical.sidebarCollapsed &&
     current.paneCollapsed === canonical.paneCollapsed &&
     current.paneFullscreen === canonical.paneFullscreen &&
-    current.docPinned === canonical.docPinned &&
     current.surface === canonical.surface
   );
 }

@@ -15,7 +15,7 @@
 // to just land there. The state is a tiny app_settings JSON blob; the logic
 // here is pure so it tests without a backend.
 
-import type { MainSurface } from "./mainSurface";
+import type { Surface } from "../config/workspace";
 import type { Workspace } from "../config/workspace";
 import {
   currentLanding,
@@ -64,7 +64,7 @@ export function serializeNudgeState(state: NudgeState): string {
 }
 
 /** Record this launch's first post-boot surface switch. */
-export function recordLaunch(state: NudgeState, surface: MainSurface): NudgeState {
+export function recordLaunch(state: NudgeState, surface: Surface): NudgeState {
   return {
     ...state,
     launches: [...state.launches, surface].slice(-NUDGE_HISTORY),
@@ -79,7 +79,7 @@ export function dismissSuggestion(state: NudgeState, id: string): NudgeState {
 export interface LandingSuggestion {
   /** Stable identity — `landing:<surface>` — so a dismissal retires it. */
   id: string;
-  surface: MainSurface;
+  surface: Surface;
   message: string;
 }
 

@@ -293,7 +293,7 @@ describe("boot-path JS contract", () => {
   });
 
   // The workbench (W1): the store and the persisted state are read on the
-  // first frame, so `store`, `persist`, `model` and `legacy` are static; the
+  // first frame, so `store`, `persist`, `model` and `view` are static; the
   // reducer (28 kB of actions no first frame dispatches) reaches the store
   // through a loader, and the stage with its tab strip is a lazy chunk
   // fetched as the app boots. Either coming back static is the regression.
@@ -468,14 +468,22 @@ describe("boot-path JS contract", () => {
     expect(app).toContain("storeActiveHarness(localStorage, resolved)");
   });
 
-  it("the surface dispatch is a lenient record, not a closed ternary", () => {
-    // Manifests (workspace.json, a harness pack) name surfaces as strings;
-    // dispatch over a Record lets an id this build can't render degrade to
-    // no body instead of failing a closed union (A5).
-    expect(app).toContain(
-      "const surfaceBodies: Record<string, ReactNode | undefined>",
-    );
-    expect(app).toContain("surfaceBodies[mainSurface]");
+  it("an unknown surface or pane degrades to nothing, never to a type error", () => {
+    // Manifests (workspace.json, a harness pack) name surfaces as strings
+    // (A5); the stored workbench names pane kinds. Both are untrusted: the
+    // manifest's ids are filtered to the surfaces this build renders before
+    // they reach the door's Open list, and a stored pane of a kind this
+    // build has no body for is dropped by the parser. What reaches the
+    // centre is the closed `PaneKind` union, dispatched by kind (W6: the old
+    // surface record and the adapter are gone).
+    const workspace = readFileSync(join(process.cwd(), "src/config/workspace.ts"), "utf8");
+    expect(workspace).toContain(".filter(isSurface)");
+    const persist = readFileSync(join(process.cwd(), "src/workbench/persist.ts"), "utf8");
+    expect(persist).toContain("!isPaneKind(raw.kind)");
+    expect(app).not.toContain("surfaceBodies");
+    expect(app).not.toContain("legacyView");
+    expect(existsSync(join(process.cwd(), "src/workbench/legacy.ts"))).toBe(false);
+    expect(existsSync(join(process.cwd(), "src/lib/mainSurface.ts"))).toBe(false);
   });
 
   it("plate fallbacks stay quiet — null, never a spinner", () => {

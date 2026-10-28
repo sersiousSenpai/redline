@@ -6,7 +6,7 @@ import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow, 
 const at = (over: Partial<ArrivalState>): ArrivalState => ({
   activeId: null,
   sessionId: "B",
-  mainSurface: "document",
+  surface: "document",
   plateMode: "door",
   ...over,
 });
@@ -28,17 +28,17 @@ describe("arrivalFocus", () => {
   it("flashes a new version while you look back at an older one", () => {
     expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", viewedVersion: 2 }))).toBe("flash");
     // Off the plate there is no older version on screen to keep.
-    expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", viewedVersion: 2, mainSurface: "browser" }))).toBe("focus");
+    expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", viewedVersion: 2, surface: "browser" }))).toBe("focus");
   });
 
   it("lands a new version of the selected plan in place, even mid-sentence: nothing else moves", () => {
     expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", writing: true }))).toBe("focus");
-    expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", writing: true, mainSurface: "drafter" }))).toBe("focus");
+    expect(arrivalFocus(at({ activeId: "B", plateMode: "plan", writing: true, surface: "drafter" }))).toBe("focus");
   });
 
   it("focuses the selection on a masked surface (the caller leaves the surface alone)", () => {
-    for (const mainSurface of ["browser", "memory", "servers"] as const) {
-      expect(arrivalFocus(at({ activeId: "A", plateMode: "plan", mainSurface }))).toBe("focus");
+    for (const surface of ["browser", "memory", "servers"] as const) {
+      expect(arrivalFocus(at({ activeId: "A", plateMode: "plan", surface }))).toBe("focus");
     }
   });
 
@@ -50,8 +50,8 @@ describe("arrivalFocus", () => {
 
   it("flashes while you are writing, wherever you are", () => {
     expect(arrivalFocus(at({ writing: true }))).toBe("flash");
-    expect(arrivalFocus(at({ writing: true, mainSurface: "browser" }))).toBe("flash");
-    expect(arrivalFocus(at({ writing: true, activeId: "A", plateMode: "plan", mainSurface: "drafter" }))).toBe("flash");
+    expect(arrivalFocus(at({ writing: true, surface: "browser" }))).toBe("flash");
+    expect(arrivalFocus(at({ writing: true, activeId: "A", plateMode: "plan", surface: "drafter" }))).toBe("flash");
   });
 });
 
@@ -65,7 +65,7 @@ describe("your own launch from the door", () => {
     // The open door always counts as writing; a handoff wins over that.
     expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true }))).toBe("handoff");
     expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, activeId: "A", plateMode: "plan" }))).toBe("handoff");
-    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, mainSurface: "browser" }))).toBe("handoff");
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, surface: "browser" }))).toBe("handoff");
   });
 
   it("is the launch the open door is showing, with nothing new begun there", () => {

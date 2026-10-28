@@ -6,8 +6,12 @@ const drafter = readFileSync("src/components/PromptDrafter.tsx", "utf8");
 describe("panel mask wiring", () => {
   it("no surface masks the side columns: the panel breaks and the narrow masks are gone (W4)", () => {
     for (const gone of ["setPanelBreaks", "panelMask(", "platePaneMask(", "paneCollapseOnMask(", "maskPanels(", "panelsMasked(", "immersiveHintSeen"]) expect(app).not.toContain(gone);
-    // The shape on screen is the user's, straight from the persisted flags.
-    expect(app).toContain("const docPinned = baseShape.docPinned;");
+    // W6: the inert immersive overlay and the doc pin went with the adapter —
+    // no shape mask, no hull rail, no break-out bit, no stored pin.
+    for (const gone of ["effectiveShape", "isImmersive", "immersiveBroken", "ChromeSlot", "useEdgeReveal", "baseShape", "docPinned", "redline.doc.pinned"]) expect(app).not.toContain(gone);
+    // The shape on screen is the user's, straight from the persisted flags
+    // through the responsive poses.
+    expect(app).toContain("const paneFullscreen = paneFullscreenPref && !paneCollapsed;");
   });
   it("a plan arrival never opens the discussion", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
@@ -33,9 +37,9 @@ describe("panel mask wiring", () => {
   });
   it("an arriving plan waits in a notice only while a surface with no document is in front (W4)", () => {
     // The arrival rule outlived the masks: the browser, Localhost, Memory,
-    // Runs and the drafter defer; the document, a pinned document and Review
-    // (whose rail holds its threads) do not.
-    expect(app).toContain('const surfaceInFront = mainSurface !== "document" && mainSurface !== "review" && !baseShape.docPinned && workspaceImmersive(workspace);');
+    // and the drafter defer; the document, the tile (the plan beside a
+    // surface) and Review (whose rail holds its threads) do not.
+    expect(app).toContain('const surfaceInFront = stageSurface !== "document" && stageSurface !== "review" && !view.hasDocument && workspaceImmersive(workspace);');
     expect(app).toContain("paneMaskedRef.current = surfaceInFront;");
   });
   it("the rail's Talk is the conversation's one host: the dock column and the Discuss pill are gone (W4)", () => {
@@ -72,7 +76,7 @@ describe("panel mask wiring", () => {
     expect(launch).toContain('if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending)');
   });
   it("responsive poses fold the side columns on a narrow window, and every fold gesture goes through them (D18)", () => {
-    expect(app).toContain("const pose = responsivePose({ winWidth, sidebarCollapsed: baseShape.sidebarCollapsed, paneCollapsed: baseShape.paneCollapsed, narrowOpen });");
+    expect(app).toContain("const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen });");
     expect(app).toContain("const { sidebarCollapsed, paneCollapsed } = pose;");
     // Gestures edit the narrow opening while narrow, the preference otherwise.
     for (const name of ["revealSidebar", "revealPane", "toggleSidebar", "togglePane"]) {

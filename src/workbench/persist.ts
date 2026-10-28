@@ -38,11 +38,14 @@ import type { WorkbenchStore } from "./store";
 
 export const WORKBENCH_KEY = "redline.workbench.v1";
 
-/** App's keys this model replaces; read by `migrateToWorkbenchOnce`. */
+/** App's keys this model replaced; read once by `migrateToWorkbenchOnce`,
+ *  then removed by `retireLegacyKeys`. */
 export const LEGACY_MAIN_SURFACE_KEY = "redline.mainSurface";
 export const LEGACY_DOC_PINNED_KEY = "redline.doc.pinned";
 export const LEGACY_SPLIT_VERTICAL_KEY = "redline.split.vertical";
 export const LEGACY_SPLIT_RATIO_KEY = "redline.split.ratio";
+/** The four per-pane booleans `redline.mainSurface` replaced (pre-07/09). */
+const LEGACY_PANE_KEYS = ["redline.doc.open", "redline.browser.open", "redline.drafter.open", "redline.review.open"];
 
 export const WRITE_DEBOUNCE_MS = 250;
 
@@ -358,9 +361,9 @@ const SURFACE_KINDS = ["browser", "drafter", "review", "servers", "memory", "cha
 
 /** One-time: Home's first tab from what App persisted — `redline.mainSurface`
  *  (a surface beside the door when `doc.pinned`, split by `split.*`), else a
- *  door. Idempotent on the workbench key; the legacy keys are left for App,
- *  which still reads them while the two models coexist. Returns the state
- *  written, or null when there was nothing to do. */
+ *  door. Idempotent on the workbench key; `retireLegacyKeys` removes what it
+ *  read once it has run. Returns the state written, or null when there was
+ *  nothing to do. */
 export function migrateToWorkbenchOnce(storage: Pick<Storage, "getItem" | "setItem">, opts: { draftKey?: string; tabIds?: string[]; paneIds?: string[] } = {}): WorkbenchState | null {
   try {
     if (storage.getItem(WORKBENCH_KEY) != null) return null;
@@ -406,4 +409,17 @@ export function migrateToWorkbenchOnce(storage: Pick<Storage, "getItem" | "setIt
     sets: { home: { order: [tabId], activeTabId: tabId, tabs: { [tabId]: { id: tabId, root, focusedPaneId } }, panes, closed: [] } },
   };
   return writeWorkbench(storage, state) ? state : null;
+}
+
+/** Every boot, after `migrateToWorkbenchOnce`: the keys the workbench
+ *  replaced are gone, so nothing can read a stale surface or doc pin back
+ *  (the workbench is the one record of what the centre shows). */
+export function retireLegacyKeys(storage: Pick<Storage, "removeItem">): void {
+  for (const key of [LEGACY_MAIN_SURFACE_KEY, LEGACY_DOC_PINNED_KEY, LEGACY_SPLIT_VERTICAL_KEY, LEGACY_SPLIT_RATIO_KEY, ...LEGACY_PANE_KEYS]) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      /* storage unavailable — nothing to retire */
+    }
+  }
 }

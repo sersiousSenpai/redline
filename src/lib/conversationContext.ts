@@ -25,8 +25,8 @@
 // a surface is testable without mounting anything.
 
 import type { BrowserDockState, ChatPill } from "./browseChatState";
-import type { DocumentPlateMode } from "./documentPlate";
-import { MAIN_SURFACE_KEY } from "./mainSurface";
+import type { DocumentKind } from "../workbench/model";
+import { LEGACY_MAIN_SURFACE_KEY as MAIN_SURFACE_KEY } from "../workbench/persist";
 
 /** The conversation kinds the dock can hold. These are the backend's own
  *  `thread_table` kinds (db.rs) minus the ones that are not dock
@@ -97,7 +97,7 @@ export interface ConversationInputs {
   surface: string;
   /** Which face the document plate is showing — a file viewer and the Front
    *  Door are not a plan, and neither has a plan conversation. */
-  plateMode: DocumentPlateMode;
+  plateMode: DocumentKind;
   /** The selected plan review session. */
   activeId: string | null;
   planTitle: string | null;
@@ -264,7 +264,7 @@ const DOCK_SEED_KEY = "redline.conversation.dockSeed";
  *  at Home, where the chat lives now.
  *
  *  Idempotent by construction: it only ever fires on the literal stored value
- *  `"chat"`, and it rewrites that value. `"chat"` stays in the `MainSurface`
+ *  `"chat"`, and it rewrites that value. `"chat"` stays in the `Surface`
  *  union for one release so a downgrade still reads its own key. */
 export function migrateChatSurfaceOnce(storage: Storage): void {
   try {
@@ -293,7 +293,7 @@ export function takeDockSeed(storage: Storage): boolean {
 /** In-memory conversation visibility, scoped to the surface family. */
 export type DockScope = "home" | "plan" | "drafter" | "browser";
 export type DockOpenBy = Partial<Record<DockScope, boolean>>;
-export function dockScope(surface: string, plateMode: DocumentPlateMode): DockScope | null {
+export function dockScope(surface: string, plateMode: DocumentKind): DockScope | null {
   if (surface === "document") return plateMode === "door" ? "home" : plateMode === "plan" ? "plan" : null;
   return surface === "drafter" || surface === "browser" ? surface : null;
 }

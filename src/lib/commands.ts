@@ -147,8 +147,6 @@ export interface CommandDeps {
     toggleSidebar: () => void;
     toggleDiscussion: () => void;
     toggleTerminal: () => void;
-    /** Show / hide the periphery on an immersive (non-document) surface. */
-    toggleImmersive: () => void;
     setTheme: (name: string) => void;
     setFont: (name: string) => void;
     zoomReset: () => void;
@@ -309,13 +307,6 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
         title: "Show the terminals",
         group: "Layout",
         run: actions.toggleTerminal,
-      },
-      {
-        id: "toggle-immersive",
-        title: "Show / hide the panels on this surface",
-        group: "Layout",
-        keys: keysFor("immersive"),
-        run: actions.toggleImmersive,
       },
     {
       id: "zoom-reset",

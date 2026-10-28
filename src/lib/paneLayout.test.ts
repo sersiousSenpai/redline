@@ -198,8 +198,6 @@ describe("canonicalLayout", () => {
     expect(c.sidebarWidth).toBe(CANONICAL_SIDEBAR_W);
     expect(c.paneWidth).toBe(CANONICAL_PANE_W);
     expect(c.surface).toBe("document");
-    expect(c.docPinned).toBe(false);
-    expect(c.splitRatio).toBe(0.5);
     expect(c.sidebarCollapsed).toBe(false);
     expect(c.paneCollapsed).toBe(false);
     expect(c.paneFullscreen).toBe(false);
@@ -242,7 +240,6 @@ describe("isLayoutAtRest", () => {
       sidebarCollapsed: c.sidebarCollapsed,
       paneCollapsed: c.paneCollapsed,
       paneFullscreen: c.paneFullscreen,
-      docPinned: c.docPinned,
       surface: c.surface,
     };
   };
@@ -257,8 +254,10 @@ describe("isLayoutAtRest", () => {
       { sidebarCollapsed: true },
       { paneCollapsed: true },
       { paneFullscreen: true },
-      { docPinned: true },
+      // A tab with a surface in it, alone or tiled beside the plan, is not
+      // the resting document.
       { surface: "browser" },
+      { surface: "review" },
     ];
     for (const flip of flips) {
       expect(isLayoutAtRest({ ...atRest(), ...flip }, canonical)).toBe(false);

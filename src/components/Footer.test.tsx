@@ -171,6 +171,6 @@ describe("one set of plan verbs on screen", () => {
   it("App ties it to a Plan pane being on screen", () => {
     const app = readFileSync("src/App.tsx", "utf8");
     const footer = app.slice(app.indexOf("<Footer\n"), app.indexOf("/>", app.indexOf("<Footer\n")));
-    expect(footer).toMatch(/planVerbs=\{!\(classicWb && wbView\.visibleKinds\.includes\("plan"\)\)\}/);
+    expect(footer).toMatch(/planVerbs=\{!view\.visibleKinds\.includes\("plan"\)\}/);
   });
 });

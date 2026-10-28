@@ -65,12 +65,6 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar (as ⌘B)", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the rail (as ⌘⌥B)", group: "Layout", wired: false },
-  // Not a chord: on an immersive surface the periphery is hidden and the way
-  // back is the top-edge hull rail (or ⌘⇧0, which lands on the document).
-  // Documented here because the cheat sheet is where a user goes looking for
-  // "how do I get the panels back" — the REVIEW_KEYMAP below already uses
-  // gesture caps ("click", "drag") the same way.
-  { id: "immersive", keys: ["hover"], label: "Show the panels on an immersive surface", group: "Layout", wired: false },
   { id: "zoom-in", keys: ["⌘", "+"], label: "Zoom the document in", group: "Document", wired: false },
   { id: "zoom-out", keys: ["⌘", "−"], label: "Zoom the document out", group: "Document", wired: false },
   { id: "zoom-reset", keys: ["⌘", "0"], label: "Reset the zoom", group: "Document", wired: false },
