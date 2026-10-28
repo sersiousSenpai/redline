@@ -34,6 +34,7 @@ const TerminalSettings = settingsRow("TerminalSettings");
 const TransparencySettings = settingsRow("TransparencySettings");
 const LintPicker = settingsRow("LintPicker");
 const AlertSettings = settingsRow("AlertSettings");
+const AutoSaveSetting = settingsRow("AutoSaveSetting");
 
 export interface SettingsGearProps {
   onOpenIntegrationHooks?: () => void;
@@ -96,6 +97,7 @@ export function SettingsGear({
       icon={icon}
       terminal={<TerminalSettings />}
       transparency={<TransparencySettings />}
+      autoSave={<AutoSaveSetting />}
       onOpenIntegrationHooks={onOpenIntegrationHooks}
       mode={<ModeToggle mode={mode} onChange={onModeChange} />}
       theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}

@@ -5,6 +5,7 @@
 // only while it is open, so nothing on the boot path needs them. Reached
 // through `settingsRow` (SettingsMenu), never imported statically.
 export { AlertSettings } from "./AlertSettings";
+export { AutoSaveSetting } from "./AutoSaveSetting";
 export { FontPicker } from "./FontPicker";
 export { LintPicker } from "./LintPicker";
 export { ModeToggle } from "./ModeToggle";

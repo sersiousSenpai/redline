@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import {
@@ -30,6 +30,15 @@ import {
   resolveDiskChange,
   saveKeyBinding,
 } from "../lib/codeEditor";
+import {
+  AUTO_SAVE_DELAY_MS,
+  AUTO_SAVE_MAX_BYTES,
+  createAutoSaveTimer,
+  shouldAutoSave,
+  useAutoSaveMode,
+  utf8Bytes,
+  type AutoSaveTrigger,
+} from "../lib/autoSave";
 import { redlineCmTheme } from "./cmTheme";
 import { DiskChangeBanner, DiskCompare, type DiskChange } from "./DiskChangeBanner";
 
@@ -62,9 +71,13 @@ interface CodeEditorProps {
   initialScrollTop?: number;
   /** Leave edit mode (back to the read-only CodeView). */
   onDone: () => void;
-  /** Called with the saved path after a successful write. */
+  /** Called with the saved path after a deliberate save (⌘S, Save,
+   *  Overwrite). An auto-save shows its own quiet "Saved" instead. */
   onSaved?: (path: string) => void;
 }
+
+/** How long the "Saved" acknowledgement holds before it fades. */
+const SAVED_FLASH_MS = 1200;
 
 // A real editor for code files in the folder viewer (markdown keeps its
 // textarea path in FileViewer). Mounts *prepared* — content and grammar were
@@ -75,6 +88,12 @@ interface CodeEditorProps {
 // disk changes under a clean buffer silently reload (CodeView's live-reload
 // contract), disk changes under a dirty buffer raise a banner. No merge —
 // Save is last-writer-wins.
+//
+// Auto-save (Settings ▸ Auto-save, lib/autoSave.ts) writes after a second's
+// pause or on leaving the editor. It never writes over a disk change: the
+// banner, a Compare, or a change answered with Keep editing pause it until a
+// deliberate save, and every auto-save re-reads the disk first so a change the
+// watcher has not reported yet raises the banner instead.
 function CodeEditor({
   path,
   prepared,
@@ -87,38 +106,151 @@ function CodeEditor({
   /** The content as of the last load/save — the dirty + echo baseline. */
   const savedRef = useRef<string>("");
   const latestPath = useRef(path);
+  /** Bumped as each editor view goes away: a write that outlives its view
+   *  (a leave-save on unmount, a file switch mid-write) still lands on disk
+   *  but touches no state of the next one. */
+  const epochRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   /** Disk content waiting behind the conflict banner (dirty buffer). */
   const [conflict, setConflict] = useState<DiskChange | null>(null);
   /** Compare: the buffer as it was when Compare was pressed, against disk. */
   const [comparing, setComparing] = useState<string | null>(null);
+  /** The disk moved under this buffer and no deliberate save answered it. */
+  const [diverged, setDiverged] = useState(false);
+  /** The buffer is past save_text_file's cap: manual save only. */
+  const [large, setLarge] = useState(false);
+  const [mode] = useAutoSaveMode();
+  /** What the auto-save policy reads, current as of the last render. */
+  const live = useRef({ mode, conflict: false, comparing: false, diverged: false });
+  live.current = { mode, conflict: conflict != null, comparing: comparing != null, diverged };
+  const [flash, setFlash] = useState(false);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+  }, []);
 
   const isDirty = useCallback(() => {
     const view = viewRef.current;
     return !!view && view.state.doc.toString() !== savedRef.current;
   }, []);
 
+  /** Write `content` to `at`. `auto` writes skip `onSaved` (no toast per
+   *  pause); a failure keeps the buffer dirty and shows the one-liner. */
+  const write = useCallback((at: string, content: string, auto: boolean, epoch: number) => {
+    const attached = () => epochRef.current === epoch;
+    if (attached()) {
+      savingRef.current = true;
+      setSaving(true);
+    }
+    return invoke<string>("save_text_file", { path: at, content })
+      .then((saved) => {
+        if (!auto) onSaved?.(saved);
+        if (!attached()) return;
+        savedRef.current = content;
+        const now = viewRef.current?.state.doc.toString();
+        setDirty(now != null && now !== content);
+        setConflict(null);
+        setComparing(null);
+        setDiverged(false);
+        setError(null);
+        setFlash(true);
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlash(false), SAVED_FLASH_MS);
+        // Typed during the write: the debounce takes it from here.
+        if (now != null && now !== content && live.current.mode === "delay") timer.edited();
+      })
+      .catch((e) => {
+        if (attached()) setError(String(e));
+      })
+      .finally(() => {
+        if (!attached()) return;
+        savingRef.current = false;
+        setSaving(false);
+      });
+    // `timer` is stable (created once below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onSaved]);
+
   const save = useCallback(() => {
     const view = viewRef.current;
     if (!view || latestPath.current !== path) return;
-    const content = view.state.doc.toString();
-    setSaving(true);
-    void invoke<string>("save_text_file", { path, content })
-      .then((saved) => {
-        savedRef.current = content;
-        setDirty(false);
-        setConflict(null);
-        setComparing(null);
-        setError(null);
-        onSaved?.(saved);
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setSaving(false));
-  }, [path, onSaved]);
+    timer.cancel();
+    void write(path, view.state.doc.toString(), false, epochRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, write]);
   const saveRef = useRef(save);
   saveRef.current = save;
+
+  /** The auto-save: the policy, then a fresh read of the disk, then the
+   *  write — or the banner, when the disk moved since the last read. */
+  const autoSave = useCallback((trigger: AutoSaveTrigger, epoch = epochRef.current) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const at = latestPath.current;
+    const content = view.state.doc.toString();
+    const base = savedRef.current;
+    const ok = shouldAutoSave({
+      ...live.current,
+      trigger,
+      dirty: content !== base,
+      saving: savingRef.current,
+      bytes: utf8Bytes(content),
+    });
+    if (!ok) return;
+    const attached = () => epochRef.current === epoch;
+    savingRef.current = true;
+    void invoke<FileContent>("read_text_file", { path: at })
+      .then((f) => {
+        if (f.tooLarge || f.isBinary || f.content == null) {
+          throw new Error("Auto-save paused: the file on disk is no longer editable text. ⌘S to save anyway.");
+        }
+        if (f.content === base) return write(at, content, true, epoch);
+        // The disk moved since the last read: never overwrite it.
+        if (!attached()) return;
+        savingRef.current = false;
+        if (f.content === content) {
+          savedRef.current = content;
+          setDirty(viewRef.current?.state.doc.toString() !== content);
+          return;
+        }
+        setDiverged(true);
+        setConflict({ content: f.content, at: Date.now() });
+      })
+      .catch((e) => {
+        if (!attached()) return;
+        savingRef.current = false;
+        setError(e instanceof Error ? e.message : `Auto-save paused: ${String(e)}`);
+      });
+  }, [write]);
+  const autoSaveRef = useRef(autoSave);
+  autoSaveRef.current = autoSave;
+  const [timer] = useState(() =>
+    createAutoSaveTimer({ delayMs: AUTO_SAVE_DELAY_MS, fire: (t) => autoSaveRef.current(t) }),
+  );
+
+  // Turning auto-save off mid-edit drops a pending write; turning it on
+  // starts the clock on edits already in the buffer.
+  useEffect(() => {
+    if (mode === "delay" && isDirty()) timer.edited();
+    else if (mode !== "delay") timer.cancel();
+  }, [mode, timer, isDirty]);
+
+  // Leaving the window (another app, a hidden window) is a focus change too.
+  useEffect(() => {
+    const leave = () => timer.left();
+    const hidden = () => {
+      if (document.visibilityState === "hidden") timer.left();
+    };
+    window.addEventListener("blur", leave);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("blur", leave);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, [timer]);
 
   // Build the editor over the prepared content. A layout effect with zero IPC:
   // the view exists (with its grammar already in the compartment) before the
@@ -130,6 +262,8 @@ function CodeEditor({
     setDirty(false);
     setConflict(null);
     setComparing(null);
+    setDiverged(false);
+    setLarge(false);
     if (!hostRef.current) return;
     savedRef.current = prepared.content;
     // Kept as a Compartment so a future live-reconfigure (e.g. retrying a
@@ -163,17 +297,37 @@ function CodeEditor({
           redlineCmTheme(),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) {
-              setDirty(u.state.doc.toString() !== savedRef.current);
+              const text = u.state.doc.toString();
+              const nowDirty = text !== savedRef.current;
+              setDirty(nowDirty);
+              setLarge(utf8Bytes(text) > AUTO_SAVE_MAX_BYTES);
+              if (!nowDirty) timer.cancel();
+              else if (live.current.mode === "delay") timer.edited();
             }
           }),
         ],
       }),
     });
     viewRef.current = view;
+    // Focus leaving the editor (its own search panel aside): a pane or tab
+    // switch, a click into the rail, the Done button.
+    const onFocusOut = (e: FocusEvent) => {
+      const next = e.relatedTarget;
+      if (next instanceof Node && view.dom.contains(next)) return;
+      timer.left();
+    };
+    view.dom.addEventListener("focusout", onFocusOut);
     if (initialScrollTop) view.scrollDOM.scrollTop = initialScrollTop;
     view.focus();
 
     return () => {
+      view.dom.removeEventListener("focusout", onFocusOut);
+      // The editor going away (Done, a file switch, the pane closing) is the
+      // last focus change: a leave-save that outlives the view.
+      timer.cancel();
+      autoSaveRef.current("leave");
+      epochRef.current++;
+      savingRef.current = false;
       viewRef.current?.destroy();
       viewRef.current = null;
     };
@@ -201,11 +355,15 @@ function CodeEditor({
           });
           setDirty(false);
         } else {
+          // The banner shows and auto-save pauses until a deliberate save
+          // (Keep editing clears the banner, not the pause).
+          timer.cancel();
+          setDiverged(true);
           setConflict({ content: f.content, at: Date.now() });
         }
       })
       .catch(() => {});
-  }, [path, isDirty]);
+  }, [path, isDirty, timer]);
   useLiveFile(path, onDiskChange);
 
   const takeDisk = useCallback(() => {
@@ -218,6 +376,7 @@ function CodeEditor({
     setDirty(false);
     setConflict(null);
     setComparing(null);
+    setDiverged(false);
   }, [conflict]);
 
   const btn = (primary?: boolean): React.CSSProperties => ({
@@ -230,6 +389,10 @@ function CodeEditor({
     borderRadius: "3px",
     padding: "2px 8px",
   });
+
+  /** Leaving now would auto-save (Done reads "Done", not "Discard"). */
+  const leaveSaves = mode !== "off" && conflict == null && comparing == null && !diverged && !large;
+  const paused = mode !== "off" && (diverged || large);
 
   return (
     // Opaque as a whole (not just the host div): this component renders as an
@@ -244,7 +407,7 @@ function CodeEditor({
         className="flex items-center justify-end gap-2 px-6 py-1.5 shrink-0"
         style={{ fontSize: "12px", borderBottom: "1px solid var(--color-rule)" }}
       >
-        {error && (
+        {error ? (
           <span
             className="truncate"
             style={{ color: "var(--color-warning)", marginRight: "auto" }}
@@ -252,18 +415,38 @@ function CodeEditor({
           >
             {error}
           </span>
-        )}
-        {dirty && !error && (
+        ) : dirty ? (
           <span
             aria-label="Unsaved changes"
-            title="Unsaved changes (⌘S to save)"
+            title={
+              paused
+                ? large
+                  ? "Unsaved changes. Past the 2 MB cap: ⌘S to save"
+                  : "Unsaved changes. The file changed on disk: auto-save waits for ⌘S"
+                : "Unsaved changes (⌘S to save)"
+            }
             style={{ color: "var(--color-ink-muted)", marginRight: "auto" }}
           >
-            ● edited
+            ● edited{paused ? " · auto-save paused" : ""}
+          </span>
+        ) : (
+          // The dirty dot's acknowledgement: opacity only, never a spinner.
+          <span
+            role="status"
+            aria-hidden={!flash}
+            data-autosave-flash
+            style={{
+              color: "var(--color-ink-muted)",
+              marginRight: "auto",
+              opacity: flash ? 1 : 0,
+              transition: "opacity 300ms ease-out",
+            }}
+          >
+            Saved
           </span>
         )}
         <button type="button" onClick={onDone} disabled={saving} style={btn()}>
-          {dirty ? "Discard & close" : "Done"}
+          {dirty && !leaveSaves ? "Discard & close" : "Done"}
         </button>
         <button
           type="button"

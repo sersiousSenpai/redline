@@ -38,6 +38,8 @@ interface SettingsMenuProps {
   font: ReactNode;
   terminal?: ReactNode;
   transparency?: ReactNode;
+  /** Auto-save — when the file pane's editor writes (see AutoSaveSetting). */
+  autoSave?: ReactNode;
   lint: ReactNode;
   /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
   agents: ReactNode;
@@ -84,6 +86,7 @@ export function SettingsMenu({
   font,
   terminal,
   transparency,
+  autoSave,
   lint,
   agents,
   surfaces,
@@ -188,6 +191,7 @@ export function SettingsMenu({
             <Row label="Font">{font}</Row>
             {terminal && <Row label="Terminal">{terminal}</Row>}
             {transparency && <Row label="Transparency">{transparency}</Row>}
+            {autoSave && <Row label="Auto-save">{autoSave}</Row>}
             <Row label="Linting">{lint}</Row>
             <Row label="Agent Seats">{agents}</Row>
             <Row label="Surfaces">{surfaces}</Row>
