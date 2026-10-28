@@ -536,16 +536,6 @@ function SessionConversation(props: SessionConversationProps) {
   };
   const drawerRows = useMemo(() => (view.outbox.length === 0 ? queue : [...view.outbox, ...queue]), [view.outbox, queue]);
 
-  // A card held open here is the terminal needing you — a held question
-  // fires no Notification hook, so without this its row, its tab dot, the
-  // top bar's count and ⌘⇧J all read "working" (`lib/openAsks`).
-  const asksOpen = view.openAsks.length > 0;
-  useEffect(() => {
-    if (terminalId) setTerminalAsking(terminalId, asksOpen);
-  }, [terminalId, asksOpen]);
-  useEffect(() => () => {
-    if (terminalId) setTerminalAsking(terminalId, false);
-  }, [terminalId]);
 
   // ── What it says ──
   // The agent's CLI is gone from its terminal: the wall's derivation reads
@@ -586,6 +576,18 @@ function SessionConversation(props: SessionConversationProps) {
   const showWorking = !!status && status.kind !== "plan-ready" && (working || status.kind === "needs-you");
   // The CLI holds a dialog of its own with no card behind it.
   const terminalAsk = view.openAsks.length === 0 && view.readiness?.ready === false && view.readiness.blocker === "native_dialog";
+  // A card held open here is the terminal needing you — a held question
+  // fires no Notification hook, so without this its row, its tab dot, the
+  // top bar's count and ⌘⇧J all read "working" (`lib/openAsks`). So is the
+  // CLI's own dialog with no card behind it: a question released to the
+  // terminal as this pane went out of sight is still a question (the last
+  // walk's row flipping to WORKING seconds after leaving it). Unmounting
+  // withdraws nothing: the terminal's next transition, an answer typed
+  // into it, or its agent leaving does (TerminalTabs).
+  const asksOpen = view.openAsks.length > 0 || terminalAsk;
+  useEffect(() => {
+    if (terminalId) setTerminalAsking(terminalId, asksOpen);
+  }, [terminalId, asksOpen]);
   // A dialog the CLI holds with no card behind it may be its own "Ready to
   // code?" (ExitPlanMode's proceed prompt): read the terminal's recent
   // output while it waits, and put the "Ready to build this plan?" card up

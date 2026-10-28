@@ -13,7 +13,12 @@
 //
 // A card only exists while its conversation is subscribed (the daemon arms
 // one for a bound, watched terminal; `convo::open_ask`), so the pane that
-// shows it is the one that publishes it; unmounting withdraws it.
+// shows it is the one that publishes it — and the CLI's own dialog it was
+// released to as the pane went out of sight. Unmounting withdraws nothing:
+// a question does not stop waiting because its pane closed. What ends it
+// is what the terminal says next (`asksRetired`, run by TerminalTabs): a
+// newer transition that is not itself a need, an answer typed into the
+// terminal, the PTY exiting, or its agent leaving.
 
 type Listener = () => void;
 
@@ -47,4 +52,21 @@ export function subscribeAskingTerminals(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/** The open asks a terminal's newer transitions retire: `attention` is the
+ *  latest hook per terminal, `gone` the terminals whose PTY or agent has
+ *  left. A newer needs-you keeps it (the TUI's own card notifying, 7 s
+ *  after it appears); any other newer transition is the agent past it. */
+export function asksRetired(
+  open: ReadonlyMap<string, number>,
+  attention: ReadonlyMap<string, { at: number; kind: string }>,
+  gone: (terminalId: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  for (const [id, since] of open) {
+    const entry = attention.get(id);
+    if (gone(id) || (entry && entry.at > since && entry.kind !== "needs-you")) out.push(id);
+  }
+  return out;
 }

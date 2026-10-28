@@ -138,9 +138,18 @@ export function deriveTermState(s: TermSignals): TermState {
   return "idle";
 }
 
-/** Loud states want you now: they glow, count in the footer and notify. */
+/** Loud states want your attention: a tile glows for them and they notify
+ *  (a finished turn's notification is its news). */
 export function isLoud(s: TermState): boolean {
   return s === "needs-you" || s === "your-turn";
+}
+
+/** Needs you: the agent is blocked on you — a permission, a question, a
+ *  dialog, or a plan held for your review. The one rule `workbench/status`
+ *  folds every surface's "needs" from, and what ⌘⇧J walks; a finished turn
+ *  is not in it. */
+export function needsYouState(s: TermState): boolean {
+  return s === "needs-you" || s === "held";
 }
 
 /** Quiet states are safe to take off the wall (see tilePolicy's parking). */
@@ -302,15 +311,17 @@ export function attentionText(entry: TermAttention | undefined): string | null {
   return null;
 }
 
-/** The loud terminals among `ids`, oldest transition first — the order ⌘⇧J
- *  walks and the footer counts. Ties keep `ids` order (stable sort). */
+/** The terminals among `ids` that need you (`needsYouState`), oldest
+ *  transition first — the order ⌘⇧J walks and the footer counts. A
+ *  finished turn is not among them: ⌘⇧J never lands on a finished build.
+ *  Ties keep `ids` order (stable sort). */
 export function loudOldestFirst(
   ids: readonly string[],
   states: ReadonlyMap<string, TermState>,
   attention: ReadonlyMap<string, TermAttention>,
 ): string[] {
   return ids
-    .filter((id) => isLoud(states.get(id) ?? "idle"))
+    .filter((id) => needsYouState(states.get(id) ?? "idle"))
     .sort((a, b) => (attention.get(a)?.at ?? 0) - (attention.get(b)?.at ?? 0));
 }
 

@@ -11,12 +11,15 @@ import type { TermState } from "../lib/termState";
 
 export type PaneStatus = "needs" | "working" | "idle" | "exited";
 
-/** A terminal's state in the shared vocabulary. A held plan and a your-turn
- *  are both the agent waiting on you; running and serving are work. */
+/** A terminal's state in the shared vocabulary. Needs you is an agent
+ *  blocked on you — a permission, a question, a dialog, a plan held for
+ *  your review; a finished turn (your-turn) is not: the build is done and
+ *  waits on nobody, so its row, its dot, the top bar's count and ⌘⇧J all
+ *  let it go (the last walk's finished rows at NEEDS YOU under a "0 need
+ *  you"). Running and serving are work. */
 export function paneStatusOf(state: TermState | null | undefined): PaneStatus {
   switch (state) {
     case "needs-you":
-    case "your-turn":
     case "held":
       return "needs";
     case "working":
@@ -78,7 +81,22 @@ export function terminalStatus(id: string, src: TerminalStatusSources): PaneStat
   if (known) return paneStatusOf(known.state);
   if (src.held?.has(id)) return "needs";
   const kind = src.attention?.get(id);
-  if (kind === "needs-you" || kind === "your-turn") return "needs";
+  if (kind === "needs-you") return "needs";
   if (kind === "working") return "working";
   return "idle";
+}
+
+/** THE needs-you set: the terminals among `ids` whose status is "needs",
+ *  each read by `terminalStatus` — the one value a row, a tab dot, the top
+ *  bar's "N need you" and ⌘⇧J all read. A terminal gone from the live list
+ *  is never in it. */
+export function needsYouTerminals(ids: Iterable<string>, src: TerminalStatusSources): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (terminalStatus(id, src) === "needs") out.push(id);
+  }
+  return out;
 }

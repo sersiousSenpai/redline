@@ -673,17 +673,20 @@ describe("reach", () => {
 
   // The Dock badge and the OS notifications are App's now, across every kind
   // of agent (hooks/useAttentionAlerts.test.tsx); the wall reports the count.
-  it("counts what needs you for the footer, oldest first", async () => {
+  it("counts what needs you for the footer — a finished turn is not a need", async () => {
     const counts: number[] = [];
     await mount({ onNeedsYouChange: (n) => counts.push(n) });
     const a = await open();
     const b = await open(true);
     await emit(needsYou(b, 5));
-    await emit(yourTurn(a, 6, "Done."));
     const last = <T,>(xs: T[]) => xs[xs.length - 1];
-    expect(last(counts)).toBe(2);
-    await click(`[data-type="${b}"]`);
     expect(last(counts)).toBe(1);
+    // A finished build waits on nobody: the count stays (the last walk).
+    await emit(yourTurn(a, 6, "Done."));
+    expect(last(counts)).toBe(1);
+    // Typing an answer into it answers it.
+    await click(`[data-type="${b}"]`);
+    expect(last(counts)).toBe(0);
   });
 
   it("⌘⇧J names the terminals that need you, oldest first, walking on from the focused tile; the host shows each", async () => {

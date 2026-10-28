@@ -250,10 +250,10 @@ describe("putAck / mergeProcs", () => {
 });
 
 describe("⌘⇧J order", () => {
-  it("lists loud terminals oldest transition first", () => {
-    const states = new Map<string, TermState>([["a", "your-turn"], ["b", "needs-you"], ["c", "working"], ["d", "needs-you"]]);
-    const attention = new Map([["a", turn("a", 30)], ["b", needs("b", 10)], ["d", needs("d", 20)]]);
-    expect(loudOldestFirst(["a", "b", "c", "d"], states, attention)).toEqual(["b", "d", "a"]);
+  it("lists the terminals that need you oldest transition first, never a finished turn", () => {
+    const states = new Map<string, TermState>([["a", "your-turn"], ["b", "needs-you"], ["c", "working"], ["d", "needs-you"], ["e", "held"]]);
+    const attention = new Map([["a", turn("a", 30)], ["b", needs("b", 10)], ["d", needs("d", 20)], ["e", working("e", 40)]]);
+    expect(loudOldestFirst(["a", "b", "c", "d", "e"], states, attention)).toEqual(["b", "d", "e"]);
   });
 
   it("cycles the whole list by visit, never-visited first, whatever has focus", () => {

@@ -78,7 +78,7 @@ import {
   type AttentionAck,
   type TermState,
 } from "../lib/termState";
-import { getAskingTerminals, subscribeAskingTerminals } from "../lib/openAsks";
+import { asksRetired, getAskingTerminals, setTerminalAsking, subscribeAskingTerminals } from "../lib/openAsks";
 import type { TermAttention, TermProc } from "../types";
 import { iconFor } from "../lib/repoIcon";
 import { useRepoIcons } from "../hooks/useRepoIcons";
@@ -824,6 +824,9 @@ export const TerminalTabs = memo(
   const handleUserData = useCallback((id: string, data: string) => {
     // `exit` / Ctrl-D end the session on purpose (lib/userStops).
     noteTerminalInput(id, data);
+    // An answer typed into the terminal answers the dialog an Agent pane
+    // was holding up as needing you (`lib/openAsks`).
+    if (isAnswerInput(data)) setTerminalAsking(id, false);
     // Typing into a shell an agent left is the reviewer using it: no
     // longer an agent that stopped.
     setPresence((prev) => {
@@ -1131,6 +1134,13 @@ export const TerminalTabs = memo(
   }, [tabs, attention, acks, procs, heldTerminalIds, exited, asking, presence]);
   const statesRef = useRef(termStates);
   statesRef.current = termStates;
+  // An open ask outlives its pane (`lib/openAsks`); what the terminal says
+  // next retires it: a newer transition that is not a need, the PTY
+  // exiting, its agent leaving.
+  useEffect(() => {
+    const gone = (id: string) => exited.has(id) || agentLeft(presence.get(id), attention.get(id)) || agentGone(attention.get(id), acks.get(id));
+    for (const id of asksRetired(asking, attention, gone)) setTerminalAsking(id, false);
+  }, [asking, attention, exited, presence, acks]);
   // Keyed on what the host reads, so an OSC title or a cwd tick that moved
   // no state and no label never reaches it.
   const statusKey = tabs.map((t) => `${t.id}\u0001${termStates.get(t.id) ?? "idle"}\u0001${identity.byId.get(t.id)?.label ?? ""}`).join("\u0002");
@@ -1174,7 +1184,7 @@ export const TerminalTabs = memo(
         attention,
       ).map((id) => ({
         id,
-        state: termStates.get(id) === "needs-you" ? "needs-you" : "your-turn",
+        state: "needs-you",
         at: attention.get(id)?.at ?? asking.get(id) ?? 0,
         label: identity.byId.get(id)?.label ?? "terminal",
         text: attentionText(attention.get(id)),

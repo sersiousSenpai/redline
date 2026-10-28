@@ -368,7 +368,8 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, retireLegacyKeys } from "./workbench/persist";
 import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
-import { terminalStatus, wallStatus } from "./workbench/status";
+import { needsYouTerminals, terminalStatus, wallStatus } from "./workbench/status";
+import type { NeedReason } from "./lib/sessionGroups";
 import { HOME_KEY, activeSessionOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
@@ -2685,11 +2686,29 @@ function App() {
       l.working && terminalKinds.has(l.terminalId) && termStatuses.has(l.terminalId) && terminalStatus(l.terminalId, { states: termStatuses }) !== "working" ? { ...l, working: false } : l),
     [flowLaunches, terminalKinds, terminalTitles, termStatuses],
   );
-  // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
-  const { working: hookWorking, needs: flowNeeds } = useMemo(
+  // Live terminal ids. Null until the dock first reports — an absent report
+  // must never read as "the terminal is gone".
+  const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
+  // Its spinners, from the CLIs' own hooks.
+  const { working: hookWorking, needs: hookNeeds } = useMemo(
     () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
     [sessionTerminals, terminalAttention, flowLaunches],
   );
+  // Its "Needs you": a row needs you exactly when its terminal is in the
+  // one needs-you set (`terminalStatus` says "needs"), whatever its last
+  // hook said — a permission answered in the card, a build that finished,
+  // an agent that died are not; an open question and a held plan are. The
+  // hook's reason names which, when it has one.
+  const flowNeeds = useMemo(() => {
+    const out: Record<string, NeedReason> = {};
+    const src = { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds };
+    const read = (key: string, terminalId: string) => {
+      if (terminalStatus(terminalId, src) === "needs") out[key] = hookNeeds[key] ?? "Question";
+    };
+    for (const [sessionId, terminalId] of sessionTerminals) read(`plan:${sessionId}`, terminalId);
+    for (const l of flowLaunches) read(`launch:${l.terminalId}`, l.terminalId);
+    return out;
+  }, [sessionTerminals, flowLaunches, hookNeeds, termStatuses, terminalKinds, heldTermIds, liveTermIds]);
   // A row spins only while its terminal reads "working" the way its tab dot
   // and its nested row do (`terminalStatus`): the hooks' `working` outlives a
   // turn held on your review (the CLI is blocked in the hook, no Stop comes)
@@ -3012,9 +3031,6 @@ function App() {
   ]);
   snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
-  // Live terminal ids. Null until the dock first reports — an absent report
-  // must never read as "the terminal is gone".
-  const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
   // A session's terminal, learnt: its set (when it has one) gets an Agent
   // tab for it — quietly, beside the plan, and once: the set remembers the
   // terminal (`agentsFilled`), so a tab the user closed stays closed — and
@@ -3090,35 +3106,24 @@ function App() {
   liveTermIdsRef.current = liveTermIds;
   // How many dock terminals need you (TerminalTabs owns which): the footer
   // chip, and whether ⌘⇧J has anywhere to go.
-  const [wallNeedYou, setTermNeedYou] = useState(0);
-  // Until the wall has reported (it mounts on an idle beat after a reload),
-  // the count — and ⌘⇧J's list — come from the hooks App re-read from the
-  // daemon's snapshot itself (`useSessionTerminals`), never from nothing:
-  // a reload must not make an agent that needs you unreachable.
-  const hookLoud = useMemo(() => {
-    const out: string[] = [];
-    for (const [id, kind] of terminalKinds) {
-      if (liveTermIds && !liveTermIds.includes(id)) continue;
-      const known = termStatuses.get(id);
-      if (known ? known.state === "needs-you" || known.state === "your-turn" : kind === "needs-you" || kind === "your-turn") out.push(id);
-    }
-    return out;
-  }, [terminalKinds, termStatuses, liveTermIds]);
+  const [, setTermNeedYou] = useState(0);
+  // THE needs-you set (`needsYouTerminals`): every live terminal whose one
+  // status (`terminalStatus` — the wall's derivation once it has reported,
+  // else the hooks App re-read from the daemon's snapshot, a held plan
+  // reading as needing you) is "needs". The rows, the tab dots, the top
+  // bar's "N need you" and ⌘⇧J all read this one value, so none of them
+  // can disagree (the last walk's NEEDS YOU rows under "0 need you", and
+  // ⌘⇧J landing on a finished build). A finished turn is not in it.
+  const hookLoud = useMemo(
+    () => needsYouTerminals([...termStatuses.keys(), ...terminalKinds.keys(), ...heldTermIds], { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds }),
+    [terminalKinds, termStatuses, liveTermIds, heldTermIds],
+  );
   const hookLoudRef = useRef(hookLoud);
   hookLoudRef.current = hookLoud;
-  const loudCount = termStatuses.size > 0 ? wallNeedYou : hookLoud.length;
-  // The top bar's "N need you" counts the agents blocked on you — a
-  // permission, a question, a dialog — never a finished turn: a build that
-  // finished is not waiting on anyone, and its your-turn kept the count up
-  // (the re-walk's "1 needs you" after the build). ⌘⇧J still walks both.
-  const termNeedYou = useMemo(() => {
-    if (termStatuses.size === 0) return hookLoud.filter((id) => terminalKinds.get(id) === "needs-you").length;
-    let n = 0;
-    for (const [id, status] of termStatuses) if (status.state === "needs-you" && (!liveTermIds || liveTermIds.includes(id))) n++;
-    return n;
-  }, [termStatuses, hookLoud, terminalKinds, liveTermIds]);
-  // ⌘⇧J walks every loud terminal (a your-turn too), so its gate is the
-  // loud count, not the top bar's.
+  const loudCount = hookLoud.length;
+  // The top bar's "N need you": the same set.
+  const termNeedYou = loudCount;
+  // ⌘⇧J's gate: the same set.
   const termNeedYouRef = useRef(loudCount);
   termNeedYouRef.current = loudCount;
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
