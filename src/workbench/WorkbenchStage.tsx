@@ -327,14 +327,16 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
     const el = containerRef.current;
     if (!el) return;
     // Captured, so a fast drag that leaves the 6px handle keeps tracking.
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture?.(e.pointerId);
     onDraggingChange?.(true);
     beginResizeSession();
     // The container cannot move during the drag: read it once, not per event.
     const rect = el.getBoundingClientRect();
     const size = column ? rect.height : rect.width;
     const origin = column ? rect.top : rect.left;
-    let pending = clampShare(ratio);
+    const start = clampShare(ratio);
+    let pending = start;
     const apply = rafCoalesce((r: number) => {
       if (firstRef.current) firstRef.current.style.flexBasis = `${r * 100}%`;
     });
@@ -343,19 +345,33 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
       pending = clampShare(size > 0 ? (pos - origin) / size : 0.5);
       apply(pending);
     };
-    const up = () => {
+    // Every way a drag ends ends it once: a release commits; a cancel (the
+    // OS took the pointer) or a lost capture puts the split back. Either
+    // way the resize session closes, or the webview would stay on its
+    // snapshot.
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
       apply.cancel();
+      const rest = commit ? pending : start;
       // The exact rest position lands before the commit: no frame where the
       // DOM and the state disagree.
-      if (firstRef.current) firstRef.current.style.flexBasis = `${pending * 100}%`;
+      if (firstRef.current) firstRef.current.style.flexBasis = `${rest * 100}%`;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      onRatioChange(pending);
+      window.removeEventListener("pointercancel", cancel);
+      handle.removeEventListener("lostpointercapture", cancel);
+      if (commit) onRatioChange(pending);
       onDraggingChange?.(false);
       endResizeSession();
     };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    handle.addEventListener("lostpointercapture", cancel);
   };
   return (
     <div ref={containerRef} className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`}>

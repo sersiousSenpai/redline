@@ -9,7 +9,9 @@
 //!   node scripts/app-visual-qa.mjs [--scene home,door-tab,plan,agent,agent-cli,browser,sidebar]
 //!       [--theme aurora,basic,studio] [--size 1440x900,1100x720,900x640]
 //!   (W6 adds: tour — the first-run tour walked card by card, each
-//!   anchored step lighting its region; tile — the plan beside Localhost,
+//!   anchored step lighting its region (a wall opened first from ⌘K);
+//!   tour-no-wall — the same with no wall: the terminals card is centred
+//!   and the tour opens no terminal; tile — the plan beside Localhost,
 //!   the one split; drafter — the door's Draft destination in place)
 //!       [--out docs/app-qa] [--probes fixtures/app-qa/probes.json]
 //!       [--keep-going] [--motion on] [--clock live]
@@ -56,7 +58,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -86,6 +88,7 @@ const SCENE = {
   "browser-newtab": { board: "workbench" },
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   tour: { board: "workbench" },
+  "tour-no-wall": { board: "workbench" },
   tile: { board: "workbench" },
   drafter: { board: "workbench" },
   "rail-plan-discussion": { board: "workbench" },
@@ -227,9 +230,25 @@ const DRIVES = {
   // that points at a region must find it and light it.
   tour: [
     ...SELECT_PLAN,
+    { do: "key", key: "k", modifiers: 4, why: "⌘K: the palette" },
+    { do: "waitFor", expr: "!!document.querySelector('input[placeholder^=\"Type a command\"]')", timeout: 8000, why: "the palette's box" },
+    { do: "click", css: ["input[placeholder^=\"Type a command\"]"], why: "the caret in the palette's box" },
+    { do: "type", text: "Show the terminals", why: "the palette's terminals command" },
+    { do: "key", key: "Enter", why: "a wall in this session, as the user asked" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-strip [data-tour=terminals-tab]')", timeout: 8000, why: "the set has a terminals tab" },
     { do: "emit", event: "menu-open-tutorial", payload: null, why: "Redline → Getting Started" },
     { do: "waitFor", expr: "!!document.querySelector('[data-rl-tour-step]')", timeout: 8000, why: "the tour's first card" },
     { do: "tour", shots: true, expectSteps: 12, why: "every anchored step lights its region" },
+  ],
+  // A first run with no wall: the terminals step is a centred card, and the
+  // tour opens no terminal (no PTY spawned, no Terminals tab left behind).
+  "tour-no-wall": [
+    ...SELECT_PLAN,
+    { do: "eval", expr: "window.__qaPtysBefore = window.__qa.terminals().length", why: "count the terminals" },
+    { do: "emit", event: "menu-open-tutorial", payload: null, why: "Redline → Getting Started" },
+    { do: "waitFor", expr: "!!document.querySelector('[data-rl-tour-step]')", timeout: 8000, why: "the tour's first card" },
+    { do: "tour", centred: ["terminal"], expectSteps: 12, why: "every other anchored step lights its region" },
+    { do: "waitFor", expr: "window.__qa.terminals().length === window.__qaPtysBefore && !document.querySelector('.rl-wb-strip [data-tour=terminals-tab]')", timeout: 3000, why: "no terminal was opened and no Terminals tab is left" },
   ],
   // D24: the one split — the plan beside a surface — is the tab's own
   // layout, its divider the tile's.
@@ -256,6 +275,7 @@ const DRIVES = {
     { do: "type", text: "A brief for the durable jobs queue", why: "a sentence" },
     { do: "key", key: "Enter", why: "⏎: the door tab becomes the drafter" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=drafter] .ProseMirror')", timeout: 20000, why: "the drafter's editor in its pane" },
+    { do: "waitFor", expr: "/A brief for the durable jobs queue/.test(document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=drafter] .ProseMirror')?.textContent ?? '') && [...document.querySelectorAll('.rl-wb-strip [role=tab]')].filter((t) => t.getAttribute('aria-selected') === 'true').every((t) => /Draft/.test(t.textContent)) && !document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=door]')", timeout: 20000, why: "the door converted in place: its tab is the Draft, and the sentence it sent is the document" },
     { do: "viewport", run: true, why: "back to the run's size" },
   ],
   sidebar: [
@@ -713,10 +733,17 @@ async function drive(scene) {
         if (!next) throw new Error(`Drive ${scene}: the tour's card at ${card.step} has no Next`);
         await mouse(next);
       }
-      const dark = run.tour.filter((t) => t.anchor && !(t.lit && t.found));
+      // `centred`: steps that must show as a centred card here (their
+      // region is not on screen and the tour must not make it so).
+      const centred = new Set(step.centred ?? []);
+      const wrong = run.tour.filter((t) => centred.has(t.step) && (t.lit || t.found));
+      if (wrong.length) throw new Error(`Drive ${scene}: ${wrong.map((t) => t.step).join(", ")} lit a region it should not have had`);
+      const dark = run.tour.filter((t) => t.anchor && !centred.has(t.step) && !(t.lit && t.found));
       rec.note = `${run.tour.length} steps, ${run.tour.filter((t) => t.lit).length} lit`;
       if (step.expectSteps && run.tour.length !== step.expectSteps) throw new Error(`Drive ${scene}: the tour has ${run.tour.length} steps, expected ${step.expectSteps}`);
       if (dark.length) throw new Error(`Drive ${scene}: ${step.why}: not lit: ${dark.map((t) => `${t.step} → [data-tour=${t.anchor}]${t.found ? "" : " (absent)"}`).join(", ")}`);
+    } else if (step.do === "eval") {
+      await cdp.evaluate(step.expr);
     } else if (step.do === "snapshot") {
       await quiesce(300, 4000);
       const file = shotName(scene, run.theme, run.size, step.name);

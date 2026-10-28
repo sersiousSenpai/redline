@@ -2727,7 +2727,8 @@ function App() {
     const { panes } = activePanes(wb.getState());
     const doc = panes.find((p) => isDocumentKind(p.kind));
     const surface = panes.find((p) => !isDocumentKind(p.kind) && p.kind !== "terminals" && p.kind !== "chat");
-    if (doc && surface) return { tiled: true as const, docId: doc.id };
+    // Named for what the document half is: the plan, a door or a file.
+    if (doc && surface) return { tiled: true as const, docId: doc.id, docName: doc.kind === "plan" ? "plan" : doc.kind === "door" ? "door" : "file" };
     if (!doc && surface && activeId) return { tiled: false as const, surfaceId: surface.id };
     return null;
   })();
@@ -2735,8 +2736,8 @@ function App() {
     <button
       type="button"
       className="rl-wb-right-btn"
-      title={stageTile.tiled ? "Untile the plan" : "Tile the plan alongside"}
-      aria-label={stageTile.tiled ? "Untile the plan" : "Tile the plan alongside"}
+      title={stageTile.tiled ? `Untile the ${stageTile.docName}` : "Tile the plan alongside"}
+      aria-label={stageTile.tiled ? `Untile the ${stageTile.docName}` : "Tile the plan alongside"}
       aria-pressed={stageTile.tiled}
       onClick={() => {
         if (stageTile.tiled) wb.dispatch({ type: "closePane", paneId: stageTile.docId });
@@ -3099,10 +3100,13 @@ function App() {
         if (tabId) wb.dispatch({ type: "selectTab", key, tabId });
       };
       if (anchor === "terminals-tab") {
-        // The spotlight needs its target on screen: the set's wall (and so
-        // its tab) comes forward.
-        revealTerm();
-        tourRevealRestore.current = backToTab;
+        // The set's wall (and so its tab) comes forward when it has one; with
+        // none the step is a centred card, as the Agent step is. The tour
+        // never opens a terminal nobody asked for.
+        if (findPane(before, "terminals")) {
+          wb.dispatch({ type: "openSurface", kind: "terminals" });
+          tourRevealRestore.current = backToTab;
+        }
       } else if ((anchor === "editor" || anchor === "plan-verbs") && activeId && findPane(before, "plan")) {
         // The plan and its verbs are the Plan tab's.
         wb.dispatch({ type: "openSurface", kind: "plan" });
@@ -3129,7 +3133,6 @@ function App() {
       setPaneCollapsed,
       revealSidebar,
       revealPane,
-      revealTerm,
     ],
   );
 

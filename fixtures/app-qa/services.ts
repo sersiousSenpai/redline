@@ -628,6 +628,10 @@ const CLAUDE_MODELS = [
   { slug: "haiku", displayName: "Haiku 4.5", description: "Fastest for quick answers", defaultEffort: null, efforts: [] },
 ];
 
+/** Drafts minted in this page (`bookshelf_new_draft`), by id. */
+const fixtureDrafts = new Map<string, { docJson: string | null; docMarkdown: string; projectPath: string | null; updatedAt: number }>();
+let fixtureDraftSeq = 0;
+
 const handlers: Record<string, Handler> = {
   // Boot: one snapshot decides the first frame (App's "Core bootstrap").
   bootstrap_state: () => ({
@@ -810,8 +814,20 @@ const handlers: Record<string, Handler> = {
   reduced_transparency: () => false,
 
   // The drafter's shelf and the share relay: empty, as on a fresh profile.
+  // A draft minted here (the door's Draft destination) keeps what is written
+  // to it, so the sentence the door sent is the document it opens.
   bookshelf_list: () => ({ folders: [], drafts: [] }),
-  drafter_get_doc: () => ({ docJson: null, docMarkdown: "", projectPath: null, updatedAt: 0 }),
+  bookshelf_new_draft: (a) => {
+    const id = `qa-draft-${++fixtureDraftSeq}`;
+    fixtureDrafts.set(id, { docJson: null, docMarkdown: "", projectPath: (a?.projectPath as string | null) ?? null, updatedAt: Date.now() });
+    return id;
+  },
+  drafter_set_doc: (a) => {
+    const id = String(a?.draftId);
+    fixtureDrafts.set(id, { docJson: (a?.docJson as string | null) ?? null, docMarkdown: String(a?.markdown ?? ""), projectPath: (a?.projectPath as string | null) ?? null, updatedAt: Date.now() });
+    return null;
+  },
+  drafter_get_doc: (a) => fixtureDrafts.get(String(a?.draftId)) ?? { docJson: null, docMarkdown: "", projectPath: null, updatedAt: 0 },
   get_relay_config: () => ({ displayName: "Imani", signaling: [] }),
   get_collab_requests: () => "[]",
   // A repo has no logo file: the dock draws its generated mark.

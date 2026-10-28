@@ -69,6 +69,8 @@ const WELCOME_OUT_MS = 100;
 const ROOM_RISE_MS = 260;
 /** The resting door's box gliding to the window's centre, and back. */
 const GLIDE_IN_MS = 340;
+/** The pill's hit target: the status bar's row (MonochatIsland.css). */
+const PILL_ROW_H = 28;
 const GLIDE_OUT_MS = 300;
 const GLIDE_EASE = "cubic-bezier(.2,.8,.2,1)";
 /** Engaged by a key, the box waits this long before it glides: the welcome
@@ -360,7 +362,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       // Centred on the status bar's row (W6: 28px). This fixed overlay
       // contributes no height and never moves the bar or the main viewport.
       const clearance = rect && rect.height > 0
-        ? window.innerHeight - (rect.top + rect.height / 2) - 20
+        ? window.innerHeight - (rect.top + rect.height / 2) - PILL_ROW_H / 2
         : 8;
       if (dock.current) dock.current.style.bottom = `${clearance}px`;
       layer.current?.style.setProperty("--portal-return-bottom", `${clearance + 4}px`);
