@@ -5300,6 +5300,14 @@ html[data-rl-resizing] [data-rl-pane] {
   min-height: 0;
   background: var(--color-paper);
 }
+/* Off screen, xterm's helper textareas leave the window too, so no hidden
+   text field can anchor macOS's input-source bubble (workbench/caret.ts). */
+.rl-wb-terminal-layer[data-offscreen] .xterm-helper-textarea {
+  position: fixed !important;
+  left: -9999px !important;
+  top: 0 !important;
+  opacity: 0 !important;
+}
 .rl-wall-empty {
   position: absolute;
   inset: 0;

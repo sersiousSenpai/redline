@@ -18,6 +18,7 @@ import { forwardRef, memo, useCallback, useLayoutEffect, useMemo, useRef, useSyn
 
 import { TerminalTabs, type TerminalTabsHandle } from "../components/TerminalTabs";
 import { useStageDock } from "../lib/stageDock";
+import { releaseHiddenCaret } from "./caret";
 import { activeTabOf, paneIdsOf, type Pane, type WallData, type WorkbenchState } from "./model";
 import { useWorkbench, type WorkbenchStore } from "./store";
 
@@ -110,11 +111,13 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
   // Chat view) takes the caret with it: xterm's helper textarea, hidden
   // with the layer, would otherwise keep focus — swallowing keys meant
   // elsewhere, and carrying macOS's input-source bubble to a stray spot
-  // mid-pane. The tab now shown places its own caret (WorkbenchStage).
+  // mid-pane. A blur alone left the bubble up (the re-walk): the focus goes
+  // to the shown tab's pane root, a real visible element (`caret.ts`), and
+  // the helper textareas sit off screen while the layer does
+  // (`data-offscreen`, styles.css).
   useLayoutEffect(() => {
     if (onScreen) return;
-    const held = document.activeElement;
-    if (held instanceof HTMLElement && layerRef.current?.contains(held)) held.blur();
+    releaseHiddenCaret(layerRef.current);
   }, [onScreen]);
 
   const onWallChange = useCallback(
@@ -132,6 +135,7 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
     <div
       ref={layerRef}
       className="rl-wb-terminal-layer"
+      data-offscreen={onScreen ? undefined : ""}
       // Off screen the layer is out of layout altogether; its terminals keep
       // running (each stashes its output unparsed until shown).
       style={onScreen ? undefined : { display: "none" }}
