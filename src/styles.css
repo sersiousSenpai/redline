@@ -3471,6 +3471,14 @@ html[data-rl-tile-drag] * {
 .rl-wb-tab-body[data-hidden] { content-visibility: hidden; visibility: hidden; pointer-events: none; }
 .rl-wb-pane { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 .rl-wb-door-plate { flex: 1; min-height: 0; background: var(--color-paper); }
+/* The plate's floating controls, seated for the workbench (W2): the
+   contents rail starts under the strip; in the Plan pane the header carries
+   Contents, and the rail and the zoom + width pill clear the pane's 28px
+   header and 44px footer — the pill yields, never hides. */
+.rl-surface-pane:has(> .rl-wb-stage) > .rl-toc-rail { top: 34px !important; }
+.rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-btn { display: none !important; }
+.rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-rail { top: 62px !important; bottom: 44px !important; }
+.rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-doc-zoom { bottom: 60px !important; }
 .rl-wb-pane-fallback { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-ink-muted); font-size: 13px; }
 
 html[data-rl-dock-caps] .rl-term-dock.rl-plate {

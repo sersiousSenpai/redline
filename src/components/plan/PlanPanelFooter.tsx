@@ -35,6 +35,7 @@ import type { ManualPlanState, PlanStateTarget } from "../PlanStateMenu";
 import { MenuSurface } from "../ui/MenuSurface";
 import { Spinner as Ring } from "../Spinner";
 import { ContextHint } from "./ContextHint";
+import "./plan.css";
 
 const PlanStateMenu = lazy(() =>
   import("../PlanStateMenu").then((m) => ({ default: m.PlanStateMenu })),
@@ -59,7 +60,9 @@ export interface PlanFooterBuildTarget {
 }
 
 export interface PlanPanelFooterProps {
-  pose: "split" | "full";
+  /** The flow stage's two poses, or the workbench's Plan tab (44px, 28px
+   *  verbs). */
+  pose: "split" | "full" | "pane";
   /** Who wrote the plan and answers a Send ("Claude", "Codex"). */
   author: string;
   /** The plan thread's comments: what the next Send carries is read off

@@ -42,7 +42,6 @@ import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
 import { EmptyState } from "./components/EmptyState";
 import { FrontDoor, BackendMenu as PlanningModelMenu } from "./components/FrontDoor";
-import { ReadinessStrip } from "./components/ReadinessStrip";
 import {
   applySeed,
   isEditableTarget,
@@ -179,8 +178,6 @@ const OnboardingTour = lazy(() =>
     default: m.OnboardingTour,
   })),
 );
-import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
-import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { PlanSearchBar, SelectionMenu } from "./components/SelectionMenu";
 // Off the boot path, but warmed by the boot effect: the sessions tab is the
 // sidebar's resting state, so its chunk is fetched under the parting doors
@@ -415,6 +412,9 @@ const loadSessionConversation = () => import("./components/agent/SessionConversa
 // The Agent pane: the session's conversation as a centre tab (W2), with
 // its header and the Chat | CLI toggle. Rides the conversation's chunk.
 const AgentPane = lazy(() => import("./components/agent/AgentPane"));
+// The Plan tab's chrome (header, notices, footer) around the one plan body.
+const loadPlanPane = () => import("./components/plan/PlanPane");
+const PlanPane = lazy(loadPlanPane);
 const FlowStage = lazy(loadFlowStage);
 const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
@@ -748,6 +748,7 @@ const wb = createWorkbenchStore(classicWb ? bootToHome(readWorkbench(localStorag
 if (classicWb) {
   persistWorkbench(wb, localStorage);
   void loadWorkbenchStage().catch(() => {});
+  void loadPlanPane().catch(() => {});
 }
 // `legacyView` builds a fresh object; the selector hands the same one back
 // for an unchanged state, or useSyncExternalStore would re-render App on
@@ -9669,9 +9670,99 @@ function App() {
     else if (dockReachable) openDiscussion();
     else setToast({ message: "Talk opens on the plan as soon as it arrives.", tone: "info" });
   };
+  // ── The plan's chrome: one set of bundles for the flow stage and the
+  // workbench's Plan pane (components/plan) — the footer's verbs, classic's
+  // notices, the ⋯ menu, the version pill and the contents toggle. The
+  // terminal they point at is the stage's in flow and the session's agent
+  // terminal under the workbench.
+  const planChromeTerminalId = flowShell ? stageTerminalId : activeId ? sessionTerminals.get(activeId) ?? null : null;
+  const planChromeAuthor = agentLabelFor(session?.backend ?? null);
+  const planViewing =
+    isViewingHistorical && viewedRevision && latest
+      ? {
+          viewing: viewedRevision.versionNumber,
+          latest: latest.versionNumber,
+          receivedAt: viewedRevision.receivedAt,
+          onGoToLatest: () => setViewedVersionNumber(null),
+        }
+      : null;
+  const planContents = { open: tocOpen, onToggle: tocEligible ? () => setTocOpen(!tocOpen) : null };
+  // A restore running or failed shows ITS terminal (the resumed CLI), else
+  // the session's; the notices offer it from both the running and the
+  // failed notice, as classic's banner did.
+  const restoreTerminalId = attemptHere?.terminalId ?? restoreFailure?.terminalId ?? null;
+  const planShowTerminal = planChromeTerminalId || restoreTerminalId
+    ? flowShell
+      ? () => setStage("terminal")
+      : () => { void showRawTerminal(restoreTerminalId ?? planChromeTerminalId); }
+    : null;
+  const planFooter = {
+    author: planChromeAuthor,
+    canSubmit,
+    canApprove,
+    waiting,
+    waitingAsk,
+    onSubmit: submitReview,
+    onApprove: approvePlan,
+    onApproveLater: () => void approvePlanLater(),
+    onBuildTeam: (scale: Scale) => void startTeamBuild(scale),
+    approval:
+      session?.status === "approved"
+        ? {
+            version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
+            runState: activeRunState,
+            runLive: isLiveRunState(activeRunState),
+            // A live run, or the plan's own agent at work in its
+            // terminal after Approve & build.
+            building:
+              isLiveRunState(activeRunState) ||
+              (activeRunState === null && !!planChromeTerminalId && terminalKinds.get(planChromeTerminalId) === "working"),
+          }
+        : null,
+    buildTargets,
+    onBuild: (id: string) => void buildApproved(id),
+    onReopen: () => void reopenApproved(),
+    planState: session ? { status: session.status, runState: activeRunState, held: activeHeld } : undefined,
+    onSetPlanState: session ? (state: ManualPlanState) => { void setPlanState(session.sessionId, state); } : undefined,
+    onMoveProject: session ? () => { void openMovePlan(session.sessionId); } : undefined,
+    progress: null,
+    terminals: planChromeTerminalId ? 1 : 0,
+    onShowTerminal: planShowTerminal ?? undefined,
+  };
+  // Classic's plan-pane notices, every one (components/plan/PlanNotices).
+  const planNotices = {
+    askModeViolation,
+    onDismissAskMode: () => setAskModeViolation(false),
+    warning,
+    onDismissWarning: () => setWarning(null),
+    detached: detached
+      ? {
+          restoring,
+          status: restoreStatus,
+          failure: restoreFailure?.error ?? null,
+          copy: detachedCopy,
+          decision: restoreDecision,
+          onHarness: (h: RestoreHarness) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),
+          blockers: restoreBlockers,
+          onFix: applyReadinessFix,
+          onRestore: restorePlanSession,
+          onCopyResume: copyRestoreCommand,
+          onDismiss: () => setDetachDismissed(true),
+        }
+      : null,
+    onViewPrior: setViewedVersionNumber,
+  };
+  // Classic's Download and Live Session menus, as the plan's ⋯.
+  const planMenu = {
+    onExport: exportRevision,
+    onExportDocx: exportRevisionDocx,
+    onSaveObsidian: saveRevisionToObsidian,
+    onShare: () => setShareOpen(true),
+    onInvite: surfaceEnabled(effectiveWorkspace, "collab") ? () => setInviteOpen(true) : null,
+    onMove: openMovePlan,
+  };
   const renderFlowStage = (planBody: ReactNode) => {
     if (stageTarget.kind === "start" || !flowConvoHost) return planBody;
-    const author = agentLabelFor(session?.backend ?? null);
     return (
       <Suspense fallback={null}>
         <ErrorBoundary region="session stage" fallback={surfaceFallback("session stage")}>
@@ -9684,83 +9775,12 @@ function App() {
             planBody={planBody}
             latestVersion={latest?.versionNumber ?? null}
             comments={threadComments}
-            viewing={
-              isViewingHistorical && viewedRevision && latest
-                ? {
-                    viewing: viewedRevision.versionNumber,
-                    latest: latest.versionNumber,
-                    receivedAt: viewedRevision.receivedAt,
-                    onGoToLatest: () => setViewedVersionNumber(null),
-                  }
-                : null
-            }
-            contents={{ open: tocOpen, onToggle: tocEligible ? () => setTocOpen(!tocOpen) : null }}
+            viewing={planViewing}
+            contents={planContents}
             width={{ wide: docWide, measure: docMeasure }}
-            footer={{
-              author,
-              canSubmit,
-              canApprove,
-              waiting,
-              waitingAsk,
-              onSubmit: submitReview,
-              onApprove: approvePlan,
-              onApproveLater: () => void approvePlanLater(),
-              onBuildTeam: (scale) => void startTeamBuild(scale),
-              approval:
-                session?.status === "approved"
-                  ? {
-                      version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
-                      runState: activeRunState,
-                      runLive: isLiveRunState(activeRunState),
-                      // A live run, or the plan's own agent at work in its
-                      // terminal after Approve & build.
-                      building:
-                        isLiveRunState(activeRunState) ||
-                        (activeRunState === null && !!stageTerminalId && terminalKinds.get(stageTerminalId) === "working"),
-                    }
-                  : null,
-              buildTargets,
-              onBuild: (id) => void buildApproved(id),
-              onReopen: () => void reopenApproved(),
-              planState: session ? { status: session.status, runState: activeRunState, held: activeHeld } : undefined,
-              onSetPlanState: session ? (state) => { void setPlanState(session.sessionId, state); } : undefined,
-              onMoveProject: session ? () => { void openMovePlan(session.sessionId); } : undefined,
-              progress: null,
-              terminals: stageTerminalId ? 1 : 0,
-              onShowTerminal: stageTerminalId ? () => setStage("terminal") : undefined,
-            }}
-            // Classic's plan-pane notices, every one (components/plan/PlanNotices).
-            notices={{
-              askModeViolation,
-              onDismissAskMode: () => setAskModeViolation(false),
-              warning,
-              onDismissWarning: () => setWarning(null),
-              detached: detached
-                ? {
-                    restoring,
-                    status: restoreStatus,
-                    failure: restoreFailure?.error ?? null,
-                    copy: detachedCopy,
-                    decision: restoreDecision,
-                    onHarness: (h) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),
-                    blockers: restoreBlockers,
-                    onFix: applyReadinessFix,
-                    onRestore: restorePlanSession,
-                    onCopyResume: copyRestoreCommand,
-                    onDismiss: () => setDetachDismissed(true),
-                  }
-                : null,
-              onViewPrior: setViewedVersionNumber,
-            }}
-            // Classic's Download and Live Session menus, as the plan's ⋯.
-            planMenu={{
-              onExport: exportRevision,
-              onExportDocx: exportRevisionDocx,
-              onSaveObsidian: saveRevisionToObsidian,
-              onShare: () => setShareOpen(true),
-              onInvite: surfaceEnabled(effectiveWorkspace, "collab") ? () => setInviteOpen(true) : null,
-              onMove: openMovePlan,
-            }}
+            footer={planFooter}
+            notices={planNotices}
+            planMenu={planMenu}
             feedback={
               session
                 ? {
@@ -10388,7 +10408,9 @@ function App() {
               BESIDE the plan rather than floating over it — responsive when the
               sidebar narrows the column. Gated by `tocEligible`. */}
           {(() => {
-            if (!tocEligible) return null;
+            // Under the workbench the rail and its button belong to a Plan
+            // pane on screen; another tab has no document to index.
+            if (!tocEligible || (classicWb && !wbView.visibleKinds.includes("plan"))) return null;
             return tocOpen ? (
               <div
                 ref={tocRailRef}
@@ -11001,8 +11023,9 @@ function App() {
                   focusNonce={focusNonce}
                   onHighlightClick={handleHighlightClick}
                   onBackToLatest={() => setViewedVersionNumber(null)}
-                  // Flow says it once, in the plan header's version pill.
-                  banner={!flowStageOwns}
+                  // The plan header's version pill says it once, in flow
+                  // and in the workbench's Plan pane.
+                  banner={!flowStageOwns && !classicWb}
                 />
               ) : (
                 <Suspense fallback={null}>
@@ -11112,8 +11135,34 @@ function App() {
                     // The island lands on this plate while the pane is on
                     // screen and focused (MonochatIsland reads the attribute).
                     return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.visible && ctx.focused ? "" : undefined} />;
-                  case "plan":
-                    return <Singleton host={planHost} pane={pane} ctx={ctx} holder={singletonHolder(wb.getState(), "plan", planHolder)} bring={setPlanHolder} />;
+                  case "plan": {
+                    // The holder (`singletonHolder`) shows the plan body
+                    // under its chrome — the header (Contents, version,
+                    // marks, ⋯), the notices, the footer's verbs; another
+                    // visible plan pane shows where the body went. The slot
+                    // alone while the chrome's chunk arrives.
+                    const holder = singletonHolder(wb.getState(), "plan", planHolder);
+                    const body = <Singleton host={planHost} pane={pane} ctx={ctx} holder={holder} bring={setPlanHolder} />;
+                    if (ctx.visible && holder !== pane.id) return body;
+                    return (
+                      <Suspense fallback={body}>
+                        <PlanPane
+                          sessionId={activeId}
+                          session={session}
+                          latestVersion={latest?.versionNumber ?? null}
+                          comments={threadComments}
+                          viewing={planViewing}
+                          contents={planContents}
+                          footer={planFooter}
+                          notices={planNotices}
+                          planMenu={planMenu}
+                          onShowTerminal={planShowTerminal}
+                        >
+                          {body}
+                        </PlanPane>
+                      </Suspense>
+                    );
+                  }
                   case "file":
                     return (
                       <Suspense fallback={null}>
@@ -11265,7 +11314,10 @@ function App() {
               `column-reverse` so the order still reads + above − with the mode
               toggle on top. */}
           {(mainSurface === "document" ? docSurfaceActive : drafterOpen) &&
-            plateMode !== "file" && (
+            plateMode !== "file" &&
+            // A document on screen: the Plan pane or the drafter, under the
+            // workbench — never over an Agent tab or a browser.
+            (!classicWb || wbView.visibleKinds.includes("plan") || wbView.visibleKinds.includes("drafter")) && (
             <div
               ref={zoomCtrlRef}
               className={`rl-doc-zoom absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
@@ -11653,291 +11705,6 @@ function App() {
               </div>
             ) : (
               <>
-            {askModeViolation && (
-              <AskModeViolationBanner
-                onDismiss={() => setAskModeViolation(false)}
-              />
-            )}
-            {warning && (
-              <ResolutionWarningBanner
-                warning={warning}
-                onDismiss={() => setWarning(null)}
-              />
-            )}
-            {detached && (
-              <div
-                role="alert"
-                className="rounded p-3 text-sm flex items-start gap-2"
-                style={{
-                  background: "var(--color-bg-elevated)",
-                  border: "1px solid var(--color-warning, #b45309)",
-                  color: "var(--color-ink)",
-                }}
-              >
-                <span style={{ flex: 1 }}>
-                  {restoring ? (
-                    /* The restore's own status, app-native. The terminal
-                       running it is deliberately off-screen: a resumed session
-                       replays its earlier user turns, so what is on that screen
-                       is Redline's own control traffic quoted back — valid
-                       history that reads as an accidental double-send. This
-                       banner is where the reviewer learns what is happening,
-                       and the button below is the way to the machinery. */
-                    <>
-                      <strong>Reopening this plan…</strong> {restoreStatus}
-                      <span
-                        className="block"
-                        style={{
-                          marginTop: "4px",
-                          color: "var(--color-ink-muted)",
-                          fontSize: "12px",
-                        }}
-                      >
-                        The original {restoreDecision.label} conversation and
-                        your Redline comments are kept — this re-presents the
-                        plan it was holding, it doesn&rsquo;t revise it.
-                      </span>
-                      <span
-                        className="flex flex-wrap gap-2"
-                        style={{ marginTop: "8px" }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void showRawTerminal(attemptHere?.terminalId ?? null)
-                          }
-                          disabled={!attemptHere?.terminalId}
-                          title="Open the terminal this restore is running in."
-                          className="rounded px-2 py-1"
-                          style={{
-                            background: "transparent",
-                            color: "var(--color-ink-muted)",
-                            border: "1px solid var(--color-rule)",
-                            cursor: attemptHere?.terminalId
-                              ? "pointer"
-                              : "default",
-                            fontSize: "12px",
-                            opacity: attemptHere?.terminalId ? 1 : 0.6,
-                          }}
-                        >
-                          Show raw terminal
-                        </button>
-                      </span>
-                    </>
-                  ) : restoreFailure ? (
-                    /* A restore that died stays on screen and stays
-                       actionable. Reverting to the plain detached banner is
-                       indistinguishable from never having clicked, which is how
-                       one silently-dead restore became three live claudes. */
-                    <>
-                      <strong>Couldn&rsquo;t reopen this plan.</strong>{" "}
-                      {restoreFailure.error}
-                      <span
-                        className="flex flex-wrap gap-2"
-                        style={{ marginTop: "8px" }}
-                      >
-                        <button
-                          type="button"
-                          onClick={restorePlanSession}
-                          className="rounded px-2 py-1"
-                          style={{
-                            background: "var(--color-anchor-bg)",
-                            color: "var(--color-anchor-text)",
-                            border: "1px solid var(--color-rule)",
-                            cursor: "pointer",
-                            fontSize: "12px",
-                            fontWeight: 600,
-                          }}
-                        >
-                          Retry
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void showRawTerminal(restoreFailure.terminalId)
-                          }
-                          disabled={!restoreFailure.terminalId}
-                          title="Open the terminal this restore was running in."
-                          className="rounded px-2 py-1"
-                          style={{
-                            background: "transparent",
-                            color: "var(--color-ink-muted)",
-                            border: "1px solid var(--color-rule)",
-                            cursor: restoreFailure.terminalId
-                              ? "pointer"
-                              : "default",
-                            fontSize: "12px",
-                            opacity: restoreFailure.terminalId ? 1 : 0.6,
-                          }}
-                        >
-                          Show raw terminal
-                        </button>
-                        <button
-                          type="button"
-                          onClick={copyRestoreCommand}
-                          className="rounded px-2 py-1"
-                          style={{
-                            background: "transparent",
-                            color: "var(--color-ink-muted)",
-                            border: "1px solid var(--color-rule)",
-                            cursor: "pointer",
-                            fontSize: "12px",
-                          }}
-                        >
-                          Copy resume command
-                        </button>
-                      </span>
-                    </>
-                  ) : (
-                  <>
-                  {/* Named for the harness that actually left. A Codex reviewer
-                      told "the Claude Code session ended" is being pointed at a
-                      process they never started — the sentence stops describing
-                      a recoverable state and starts reading as a bug. A legacy
-                      row claims neither name; see `detachedBannerCopy`. */}
-                  <strong>{detachedCopy.lede}</strong> {detachedCopy.body}
-                  <strong>Restore plan session</strong> reopens the same
-                  conversation and re-presents the plan for review. It runs in
-                  the background — nothing is retyped and nothing is lost.
-                  {/* The harness choice, for a row with no stored provenance.
-                      Shown ONLY then: asking a known-Codex reviewer which
-                      harness wrote their plan is asking them to confirm
-                      something Redline already knows, and getting it wrong
-                      sends `claude --resume` a thread id — which does not
-                      error, it silently starts a FRESH session. */}
-                  {restoreDecision.legacy && activeId && (
-                    <span
-                      className="flex items-center gap-2 flex-wrap"
-                      style={{ marginTop: "8px", fontSize: "12px" }}
-                    >
-                      <span style={{ color: "var(--color-ink-muted)" }}>
-                        Written in:
-                      </span>
-                      {(
-                        [
-                          ["claude-code", "Claude Code"],
-                          ["codex", "Codex"],
-                          ["cursor", "Cursor"],
-                          ["antigravity", "Antigravity"],
-                        ] as [RestoreHarness, string][]
-                      ).map(([value, label]) => {
-                        const on = restoreDecision.harness === value;
-                        return (
-                          <button
-                            key={value}
-                            type="button"
-                            aria-pressed={on && restoreDecision.chosen}
-                            onClick={() =>
-                              setHarnessChoices((prev) => ({
-                                ...prev,
-                                [activeId]: value,
-                              }))
-                            }
-                            className="rounded px-2 py-0.5"
-                            style={{
-                              background: on
-                                ? "var(--color-anchor-bg)"
-                                : "transparent",
-                              color: on
-                                ? "var(--color-anchor-text)"
-                                : "var(--color-ink-muted)",
-                              border: "1px solid var(--color-rule)",
-                              cursor: "pointer",
-                              fontSize: "11px",
-                              fontWeight: on ? 600 : 400,
-                            }}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </span>
-                  )}
-                  {/* What would stop the plan coming back, with the same fix
-                      the front door offers. Rendered before the click, not
-                      after: a restore that cannot complete spends a terminal,
-                      dismisses this banner, and leaves nothing to show for it. */}
-                  {restoreBlockers.length > 0 && (
-                    <span className="block">
-                      <ReadinessStrip
-                        items={restoreBlockers}
-                        onFix={applyReadinessFix}
-                      />
-                    </span>
-                  )}
-                  <span
-                    className="flex flex-wrap gap-2"
-                    style={{ marginTop: "8px" }}
-                  >
-                    {/* No "Restoring…" state here any more: an in-flight
-                        restore replaces this whole branch with its own status,
-                        so this button only ever renders when there is nothing
-                        running to double-click. */}
-                    <button
-                      type="button"
-                      onClick={restorePlanSession}
-                      disabled={restoreBlockers.length > 0}
-                      title={
-                        restoreBlockers.length > 0
-                          ? `${restoreBlockers[0].label} — restore can't bring the plan back until that's fixed.`
-                          : undefined
-                      }
-                      className="rounded px-2 py-1"
-                      style={{
-                        background: "var(--color-anchor-bg)",
-                        color: "var(--color-anchor-text)",
-                        border: "1px solid var(--color-rule)",
-                        cursor:
-                          restoreBlockers.length > 0 ? "default" : "pointer",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        opacity: restoreBlockers.length > 0 ? 0.6 : 1,
-                      }}
-                    >
-                      Restore plan session
-                    </button>
-                    <button
-                      type="button"
-                      onClick={copyRestoreCommand}
-                      disabled={restoreBlockers.length > 0}
-                      title={`For a ${restoreDecision.label} running in a terminal Redline doesn't own — copy the resume command to paste yourself.`}
-                      className="rounded px-2 py-1"
-                      style={{
-                        background: "transparent",
-                        color: "var(--color-ink-muted)",
-                        border: "1px solid var(--color-rule)",
-                        cursor:
-                          restoreBlockers.length > 0 ? "default" : "pointer",
-                        fontSize: "12px",
-                        opacity: restoreBlockers.length > 0 ? 0.6 : 1,
-                      }}
-                    >
-                      Copy resume command
-                    </button>
-                  </span>
-                  </>
-                  )}
-                </span>
-                {/* No dismiss while a restore is running: the banner IS the
-                    progress, and hiding it leaves the reviewer with a
-                    background terminal and no narrator. */}
-                {!restoring && (
-                <button
-                  type="button"
-                  onClick={() => setDetachDismissed(true)}
-                  aria-label="Dismiss"
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    color: "var(--color-ink-muted)",
-                    cursor: "pointer",
-                  }}
-                >
-                  ✕
-                </button>
-                )}
-              </div>
-            )}
             {commentComposer}
             {waiting && (
               <div

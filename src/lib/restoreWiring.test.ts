@@ -16,6 +16,7 @@ const read = (p: string) =>
 
 const app = read("App.tsx");
 const tabs = read("components/TerminalTabs.tsx");
+const notices = read("components/plan/PlanNotices.tsx");
 /** `restorePlanSession`'s body, from its declaration to the next top-level
  *  `const` at the same indentation. */
 const restoreBody = (() => {
@@ -71,9 +72,17 @@ describe("Show raw terminal", () => {
     expect(body).not.toContain("openSessionTerminal");
   });
 
-  it("is offered from both the running and the failed banner", () => {
-    expect(app).toContain("void showRawTerminal(attemptHere?.terminalId ?? null)");
-    expect(app).toContain("void showRawTerminal(restoreFailure.terminalId)");
+  it("is offered from both the running and the failed notice", () => {
+    // The Plan pane's notices (components/plan/PlanNotices) carry the restore
+    // now: App hands them the restore's own terminal while one runs or has
+    // failed, and the notice offers it in both states.
+    expect(app).toContain("const restoreTerminalId = attemptHere?.terminalId ?? restoreFailure?.terminalId ?? null;");
+    expect(app).toContain("void showRawTerminal(restoreTerminalId ?? planChromeTerminalId);");
+    const detached = notices.slice(notices.indexOf("function Detached("));
+    const running = detached.slice(detached.indexOf("if (d.restoring)"), detached.indexOf("if (d.failure)"));
+    const failed = detached.slice(detached.indexOf("if (d.failure)"), detached.indexOf("return (\n    <Notice title={d.copy.lede}"));
+    expect(running).toContain("onClick={d.onShowTerminal}");
+    expect(failed).toContain("onClick={d.onShowTerminal}");
   });
 });
 
@@ -94,19 +103,28 @@ describe("the arming precedes the command", () => {
 });
 
 describe("a failed restore stays actionable", () => {
-  it("offers Retry rather than reverting to the plain detached banner", () => {
+  it("offers Retry rather than reverting to the plain detached notice", () => {
     // Reverting silently is indistinguishable from never having clicked.
-    const start = app.indexOf("Couldn&rsquo;t reopen this plan.");
+    const start = notices.indexOf("Couldn't reopen this plan.");
     expect(start).toBeGreaterThan(-1);
-    const branch = app.slice(start, app.indexOf("</>", start));
-    expect(branch).toContain("{restoreFailure.error}");
-    expect(branch).toContain("onClick={restorePlanSession}");
+    const branch = notices.slice(start, notices.indexOf("</Notice>", start));
+    expect(branch).toContain("{d.failure}");
+    expect(branch).toContain("onClick={d.onRestore}");
     expect(branch).toContain("Retry");
     // …and a way out that doesn't need Redline's terminal at all.
-    expect(branch).toContain("onClick={copyRestoreCommand}");
+    expect(branch).toContain("onClick={d.onCopyResume}");
+    // App wires the notice to the real restore and its failure.
+    const bundle = app.slice(app.indexOf("const planNotices = {"), app.indexOf("onViewPrior: setViewedVersionNumber,"));
+    expect(bundle).toContain("failure: restoreFailure?.error ?? null,");
+    expect(bundle).toContain("onRestore: restorePlanSession,");
+    expect(bundle).toContain("onCopyResume: copyRestoreCommand,");
   });
 
   it("cannot be dismissed while it is still running", () => {
-    expect(app).toContain("{!restoring && (");
+    // The running notice IS the progress: it has no dismiss.
+    const detached = notices.slice(notices.indexOf("function Detached("));
+    const running = detached.slice(detached.indexOf("if (d.restoring)"), detached.indexOf("if (d.failure)"));
+    expect(running).toContain('<Notice title="Reopening this plan…">');
+    expect(running).not.toContain("onDismiss");
   });
 });

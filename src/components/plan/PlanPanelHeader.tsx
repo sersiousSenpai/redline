@@ -10,7 +10,11 @@
 //!   while an older version is on screen, "Full screen" on the right — now a
 //!   pressed toggle that puts the plan back beside the conversation.
 //!
-//! Contents is in both poses (document controls never hide): the split
+//! - **pane** (the workbench's Plan tab, RLPanePlan): the 28px row —
+//!   "☰ Contents · v3 · 2 marks", the version pill while an older version is
+//!   on screen, and the ⋯. No Full screen and no Close: the tab is the pane.
+//!
+//! Contents is in every pose (document controls never hide): the split
 //! header carries it as an icon beside Full screen, since 4c's header has no
 //! room on its left for a second label.
 
@@ -19,6 +23,7 @@ import { Ellipsis, FileText, List, Maximize2, Minimize2, X } from "lucide-react"
 
 import { MenuSurface } from "../ui/MenuSurface";
 import { VersionPill, type VersionPillProps } from "./VersionPill";
+import "./plan.css";
 
 /** One row of the plan's ⋯ menu. */
 export interface PlanMenuItem {
@@ -28,8 +33,10 @@ export interface PlanMenuItem {
   onPick: () => void;
 }
 
+export type PlanChromePose = "split" | "full" | "pane";
+
 export interface PlanPanelHeaderProps {
-  pose: "split" | "full";
+  pose: PlanChromePose;
   /** The latest version's number, or null before the plan has loaded. */
   version: number | null;
   /** Unsent marks on the latest version. */
@@ -39,8 +46,9 @@ export interface PlanPanelHeaderProps {
   /** The contents rail's toggle; null when the plan has no sections. */
   onToggleContents: (() => void) | null;
   contentsOpen: boolean;
-  onToggleFull: () => void;
-  onClose: () => void;
+  /** Absent in the pane pose, which has no full screen and no close. */
+  onToggleFull?: () => void;
+  onClose?: () => void;
   /** The plan's own actions — export, share, invite, move — in a ⋯ menu,
    *  where classic kept them in the header's Download and Live Session
    *  menus. Empty draws no ⋯. */
@@ -59,6 +67,7 @@ export function PlanPanelHeader({
   menu,
 }: PlanPanelHeaderProps) {
   const full = pose === "full";
+  const pane = pose === "pane";
   const meta = [
     version !== null ? `v${version}` : null,
     marks > 0 ? `${marks} mark${marks === 1 ? "" : "s"}` : null,
@@ -66,7 +75,7 @@ export function PlanPanelHeader({
   const fullLabel = full ? "Leave full screen: the plan goes back beside the conversation" : "Full screen: the conversation moves into the panel's Chat tab";
   return (
     <header className="rl-plan-head" data-pose={pose} data-plan-panel-header>
-      {full ? (
+      {full || pane ? (
         <button
           type="button"
           className="rl-plan-head-btn rl-plan-head-contents"
@@ -85,6 +94,7 @@ export function PlanPanelHeader({
           {meta && <span className="rl-plan-head-meta">{meta}</span>}
         </span>
       )}
+      {pane && meta && <span className="rl-plan-head-meta">· {meta}</span>}
 
       {/* The ⋯ on the right is matched on the left in the full pose, so the
           version pill stays centred between Contents and Full screen (5a). */}
@@ -97,7 +107,7 @@ export function PlanPanelHeader({
         </>
       )}
       {menu.length > 0 && <PlanMenu items={menu} />}
-      {!full && onToggleContents && (
+      {!full && !pane && onToggleContents && (
         <button
           type="button"
           className="rl-plan-head-btn rl-plan-head-icon-btn"
@@ -109,21 +119,23 @@ export function PlanPanelHeader({
           <List aria-hidden size={13} strokeWidth={2} />
         </button>
       )}
-      <button
-        type="button"
-        className="rl-plan-head-btn"
-        onClick={onToggleFull}
-        aria-pressed={full}
-        title={fullLabel}
-      >
-        {full ? (
-          <Minimize2 aria-hidden size={13} strokeWidth={2} />
-        ) : (
-          <Maximize2 aria-hidden size={13} strokeWidth={2} />
-        )}
-        Full screen
-      </button>
-      {!full && (
+      {!pane && (
+        <button
+          type="button"
+          className="rl-plan-head-btn"
+          onClick={onToggleFull}
+          aria-pressed={full}
+          title={fullLabel}
+        >
+          {full ? (
+            <Minimize2 aria-hidden size={13} strokeWidth={2} />
+          ) : (
+            <Maximize2 aria-hidden size={13} strokeWidth={2} />
+          )}
+          Full screen
+        </button>
+      )}
+      {!full && !pane && (
         <button
           type="button"
           className="rl-plan-head-btn rl-plan-head-close"
