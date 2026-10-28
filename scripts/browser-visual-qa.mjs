@@ -212,10 +212,6 @@ try {
     const savedHomeLayout = await cdp.evaluate("window.__qa.getState().layout");
     await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true)"); await settle();
     check(`${size}: the new tab presents the omnibox, Pick back up and Reading by subject`, await cdp.evaluate("!!document.querySelector('.rb-home [aria-label=\"Browse or search\"]') && !!document.querySelector('.rb-home [aria-label=\"Pick back up\"]') && !!document.querySelector('.rb-home [aria-label=\"Reading, by subject\"]')")); await screenshot(`${size}-homepage`);
-    // A pointer resting on the pill springs the compact card out.
-    const pill = await bounds('.rl-monochat-notch'); await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: pill.x + pill.width / 2, y: pill.y + pill.height / 2 }); await delay(1200); await settle(); const island = await bounds('.rl-monochat-float');
-    check(`${size}: the pill's compact card bounded to 640 wide over the mounted page`, island?.within && island.width <= 641 && island.height <= Math.min(420, height - 96) + 1 && await cdp.evaluate("!!document.querySelector('.rb-home') && !document.querySelector('[inert]:not(.rl-frontdoor-focus)')"), island);
-    await screenshot(`${size}-floating-island`); await key("Escape", "Escape", 27);
     await cdp.evaluate("window.__qa.setShowHome(false);window.__qa.setChatOpen(true)"); await settle();
     if (width === 1600) {
       await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
@@ -311,9 +307,6 @@ try {
       await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false }); await settle();
       check("live resize: four-page arrangement restored", await cdp.evaluate(`document.querySelectorAll('section[aria-label^=Page]').length===4 && JSON.stringify(window.__qa.getState().layout)===${JSON.stringify(savedLayout)}`));
       await cdp.evaluate("window.__qa.setTheme('basic')"); await settle(); await screenshot("1600x900-light-theme");
-      await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true)"); await settle();
-      const lightPill = await bounds('.rl-monochat-notch'); await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 20, y: 450 }); await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: lightPill.x + lightPill.width / 2, y: lightPill.y + lightPill.height / 2 }); await delay(1200); await settle(); await screenshot("1600x900-light-home-island");
-      await key("Escape","Escape",27); await cdp.evaluate("window.__qa.setShowHome(false);window.__qa.setChatOpen(true)"); await settle();
     }
   }
   // Mosaics: a saved uniform grid of live pages.

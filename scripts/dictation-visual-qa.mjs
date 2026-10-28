@@ -4,8 +4,8 @@
 // one scene per composer), speak through a scripted mic, and measure that
 // nothing in the composer moved by even a pixel while the strip showed and
 // nothing was written before the release, in four themes; then let go and
-// check the words landed. The compact card also has to stay a card, and keep
-// what was said in the shared draft when a tap outside closes it.
+// check the words landed. The compact composer (a conversation pane's own
+// box, D27) is one of the scenes.
 // Usage: node scripts/dictation-visual-qa.mjs [output-dir] (screenshots and
 // results.json; a temp folder by default).
 import { createServer } from "vite";
@@ -27,7 +27,7 @@ const THEMES = ["basic", "studio", "aurora", "silveraerogel"];
 const SAID = "rename the voice panel to talk panel";
 const SCENES = [
   { name: "door", field: "textarea[aria-label='Message Redline']", landed: "Rename the voice panel to talk panel" },
-  { name: "card", field: "#rl-monochat-card textarea", landed: "Rename the voice panel to talk panel" },
+  { name: "compact", field: "[data-compact-composer] textarea", landed: "Rename the voice panel to talk panel" },
   { name: "chat", field: "[data-chat-composer] textarea", landed: "Rename the voice panel to talk panel" },
   { name: "page-chat", field: "[data-browser-chat-composer] textarea", landed: "Rename the voice panel to talk panel" },
   { name: "comment", field: "textarea[placeholder=\"What's the feedback?\"]", landed: "Rename the voice panel to talk panel" },
@@ -136,27 +136,6 @@ async function run(scene, theme) {
   if (scene.turn) check(`${label}: what was said is sent as a turn on release, and never typed`, JSON.stringify(await sent()) === JSON.stringify([SAID]) && (await content(scene)) === "", await sent());
   else check(`${label}: the words land on release`, (await content(scene)) === scene.landed, await content(scene));
   check(`${label}: the strip goes`, !(await rect(".rl-dictation-strip")));
-  if (scene.name === "card") await card(label);
-}
-
-/** The compact card: dictating keeps it a card, and a tap outside while the
- *  mic is locked open closes it with the words kept in the draft. */
-async function card(label) {
-  check(`${label}: dictating never grows the card into the door`, (await cdp.evaluate("window.__qa.cardOpen() && !window.__qa.doorOpen()")));
-  await cdp.evaluate("window.__qa.clearDraft()"); await settle();
-  // Double tap: the mic stays open.
-  await key("rawKeyDown"); await key("keyUp"); await delay(80);
-  await key("rawKeyDown"); await key("keyUp"); await settle();
-  await emit("dictation-partial", { owner: "dictation", text: "and the scroll pin" });
-  await cdp.evaluate("window.__qaDictated = 'and the scroll pin'");
-  const plate = await rect(".qa-plate");
-  const at = { x: plate.x + 40, y: plate.y + 40 };
-  await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...at });
-  await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...at });
-  await delay(500); await settle();
-  check(`${label}: a tap outside closes the card`, !(await cdp.evaluate("window.__qa.cardOpen()")) && !(await cdp.evaluate("window.__qa.doorOpen()")));
-  check(`${label}: …and keeps what was said in the draft`, (await cdp.evaluate("window.__qa.draft()")) === "And the scroll pin", await cdp.evaluate("window.__qa.draft()"));
-  check(`${label}: …saying so on the strip`, (await cdp.evaluate("document.querySelector('.rl-dictation-text')?.textContent")) === "Kept in the draft");
 }
 
 try {

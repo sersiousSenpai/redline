@@ -516,7 +516,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
         </div>
       )}
       {onNewTab && (
-        <button type="button" className="rl-sb-newtab" aria-keyshortcuts="Meta+T" title="New tab (⌘T)" onClick={() => onNewTab()}>
+        <button type="button" className="rl-sb-newtab" data-tour="new-tab" aria-keyshortcuts="Meta+T" title="New tab (⌘T)" onClick={() => onNewTab()}>
           <Plus size={14} aria-hidden />
           <span>New tab</span>
           <kbd aria-hidden>⌘T</kbd>

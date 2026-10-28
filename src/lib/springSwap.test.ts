@@ -6,17 +6,12 @@ import { describe, expect, it } from "vitest";
 import {
   boxOf,
   fadeOutKeyframes,
-  flipBackKeyframes,
-  flipKeyframes,
   inverseTransform,
   shouldSwap,
   springInKeyframes,
   DOOR_CLOSE_MS,
-  DOOR_GROW_MS,
   FADE_OUT_MS,
-  ISLAND_EASE_IN,
   ISLAND_FADE_MS,
-  ISLAND_SPRING_MS,
   SWAP_MS,
   SWAP_SPRING,
   type SwapRect,
@@ -107,28 +102,13 @@ describe("springInKeyframes", () => {
   });
 });
 
-// The island's own flights (10/10 motion spec): out of the pill and back.
-describe("the island's flights", () => {
+// The door's own flights (10/10 motion spec; D27 took the pill they sprang
+// out of): it rises where it opens and fades as it goes.
+describe("the door's flights", () => {
   it("keeps the spec's timings and curves", () => {
     expect(SWAP_SPRING).toBe("cubic-bezier(0.34, 1.28, 0.64, 1)");
-    expect(ISLAND_SPRING_MS).toBe(420);
-    expect(DOOR_GROW_MS).toBe(380);
     expect(DOOR_CLOSE_MS).toBe(260);
-    expect(ISLAND_EASE_IN).toBe("cubic-bezier(0.4, 0, 1, 1)");
     expect(ISLAND_FADE_MS).toBe(120);
-  });
-
-  it("springs out of a box by transform alone, landing at identity", () => {
-    expect(flipKeyframes(ISLAND, HOST)).toEqual([
-      { transform: inverseTransform(ISLAND, HOST) },
-      { transform: "none" },
-    ]);
-  });
-
-  it("goes back into a box the same way, fading as it lands", () => {
-    const frames = flipBackKeyframes(ISLAND, HOST);
-    expect(frames[0]).toEqual({ transform: "none", opacity: 1 });
-    expect(frames[frames.length - 1]).toEqual({ transform: inverseTransform(ISLAND, HOST), opacity: 0 });
   });
 });
 

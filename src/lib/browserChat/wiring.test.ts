@@ -311,8 +311,8 @@ describe("the page chat's UI laws", () => {
     expect(fnBody(libRs, "browser_can_suspend")).toContain("is_targeted(");
     pinnedBy("src-tauri/src/browse.rs", "fn a_tab_a_running_turn_targets_stays_live");
   });
-  it("BC-37 the browser pill's hover composer launches a Plan only", () => {
-    const restricted = /pillComposerDestinations\(\s*"browser"\s*\)/.test(door) || /allowedDestinations=\{[^}]*\["plan"\]/.test(door);
-    expect(restricted, "the browser's compact composer must restrict destinations").toBe(true);
+  it("BC-R6 there is no pill and no hover composer over the browser (D27)", () => {
+    expect(door).not.toMatch(/onPillClick|compactOpen|renderMonochatComposer\("card"\)/);
+    expect(door).not.toContain("pillComposerDestinations");
   });
 });

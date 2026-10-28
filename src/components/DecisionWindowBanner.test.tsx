@@ -41,7 +41,7 @@ describe("the decision countdown", () => {
     expect(onExpire).toHaveBeenCalledTimes(1);
   });
 
-  it("rises over the open door and the pill's card, pressable and without taking the caret", () => {
+  it("rises over the open door, pressable and without taking the caret", () => {
     const event = { sessionId: "s", version: 3, deadlineMs: Date.now() + 20_000, windowSecs: 20 };
     const region = () => host.querySelector<HTMLElement>('[role="region"]')!;
     act(() => root.render(<DecisionWindowBanner event={event} onOpen={() => {}} onApprove={() => {}} onExpire={() => {}} />));
@@ -54,9 +54,9 @@ describe("the decision countdown", () => {
     expect(region().style.position).toBe("relative");
     expect(Number(region().style.zIndex)).toBe(RAISED_Z);
     expect(document.activeElement).toBe(before);
-    // Above both: the door's layer and the dock the card springs from.
+    // Above the door's layer (D27 took the pill's dock and its card).
     const island = readFileSync(join(process.cwd(), "src/components/MonochatIsland.css"), "utf8");
-    for (const selector of [".rl-frontdoor-focus", ".rl-frontdoor-dock"]) {
+    for (const selector of [".rl-frontdoor-focus"]) {
       const rule = new RegExp(`^\\${selector} \\{[^}]*z-index: (\\d+)`, "m").exec(island);
       expect(rule, selector).not.toBeNull();
       expect(RAISED_Z).toBeGreaterThan(Number(rule![1]));

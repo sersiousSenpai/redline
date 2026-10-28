@@ -3,12 +3,7 @@ import { createRoot } from "react-dom/client";
 import { createPortal, flushSync } from "react-dom";
 import BrowserTabRail from "../../src/components/BrowserTabRail";
 import BrowserHomePage from "../../src/components/BrowserHomePage";
-import { MonochatIsland } from "../../src/components/MonochatIsland";
-import { FrontDoor } from "../../src/components/FrontDoor";
-import { writeSharedDraft } from "../../src/hooks/useSharedDraft";
-import { FRONT_DOOR_TEXT_KEY } from "../../src/lib/frontDoor";
 import { fallbackGroups } from "../../src/lib/tabGroups";
-import type { LaunchDestination } from "../../src/lib/launch";
 import { BrowserChrome } from "../../src/components/BrowserChrome";
 import { BrowserDialog } from "../../src/components/BrowserSurfaces";
 import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "../../src/components/BrowserPagePanels";
@@ -44,10 +39,7 @@ function Fixture() {
   const { world: chatWorld, dispatch: dispatchChat } = useChatWorld({ workspace: "regular", tabs, activeId }, () => "qa-shared");
   const pageConversation = resolveConversation(chatWorld)!;
   const [organized, setOrganized] = useState(false), [showHome, setShowHome] = useState(false);
-  const [islandOpen, setIslandOpen] = useState(false);
   // The composer's text lives in the shared draft, as it does in App.
-  const clearDraft = () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "");
-  const [destination, setDestination] = useState<LaunchDestination>("plan");
   const [groups, setGroups] = useState(() => fallbackGroups(initialTabs));
   const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
   const [layout, setLayout] = useState<BrowserLayout>({ preset: "grid", tiles: initialTabs.map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: initialTabs[0].browseId });
@@ -62,7 +54,7 @@ function Fixture() {
   }, [surface, chatOpen]);
   useEffect(() => {
     const openMosaic = () => { setTabs(mosaicTabs.slice(0, 7)); setActiveId(mosaicTabs[0].id); setLayout({ preset: "grid", grid: { rows: 3, cols: 3 }, tiles: mosaicTabs.slice(0, 7).map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: mosaicTabs[0].browseId }); };
-    (window as any).__qa = { setOrganized, setShowHome, setIslandOpen, setSurface, setDialog, setChatKind, setChatOpen, setLayout, setTabs, openMosaic, host, getState: () => ({ surface, chatKind, chatOpen, layout, stageWidth, tabs }), setTheme: applyTheme };
+    (window as any).__qa = { setOrganized, setShowHome, setSurface, setDialog, setChatKind, setChatOpen, setLayout, setTabs, openMosaic, host, getState: () => ({ surface, chatKind, chatOpen, layout, stageWidth, tabs }), setTheme: applyTheme };
     document.documentElement.dataset.qaReady = "true";
   }, [host, surface, chatKind, chatOpen, layout, stageWidth, tabs]);
   const ids = visibleTileIds(layout, tabs.map((tab) => tab.browseId), tabs.find((tab) => tab.id === activeId)?.browseId ?? tabs[0].browseId, stageWidth);
@@ -100,10 +92,6 @@ function Fixture() {
         </div>
       </div> : surface === "room" ? <div className="qa-room"><PersistentPortalSlot host={host} name="chat-room"/></div> : <div className="qa-other"><h1>Surface switched</h1><p>The chat portal is detached and retains its mounted conversation.</p></div>}
     </main>
-    {surface === "browser" && <MonochatIsland busy={false} open={false} onOpenChange={noop} compactOpen={islandOpen} onCompactChange={setIslandOpen} surfaceKey={surface} context={tabs.find(tab => tab.id === activeId)?.title ?? "Browser"}
-      compact={islandOpen && <FrontDoor visible floating chips={<div className="rl-context-chips" role="group" aria-label="Attach context"><button aria-pressed="true">This page</button><button aria-pressed="false">Task list</button></div>} allowedDestinations={["plan", "run"]} autoFocusOnShow={false} choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} onResolvedProjectChange={noop} attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={clearDraft} refusal={null} onDrafter={noop} onRun={clearDraft} onChat={noop} chatEnabled={false} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""}/>}>
-      {null}
-    </MonochatIsland>}
     {createPortal(conversation, host)}
     {dialog === "layout" && <BrowserLayoutDialog layout={layout} available={tabs.length} tabs={tabs} activeBrowseId={pages[0]?.browseId} onChoose={(preset) => setLayout((old) => ({ ...old, preset, maximized: null }))} onSaveDefault={noop} onClose={() => setDialog("")}/>}
     {dialog === "bookmarks" && <BrowserBookmarksDialog bookmarks={Array.from({ length: 28 }, (_, i) => ({ title: `Saved source ${i + 1}: context and evidence for this investigation`, url: `https://example.test/long-source-path/${i}` }))} title={tabs[0].title} url={tabs[0].url} onSave={noop} onRemove={noop} onOpen={noop} onClose={() => setDialog("")}/>}

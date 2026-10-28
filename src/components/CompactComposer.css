@@ -1,0 +1,107 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* The compact composer (D27): the one box a conversation types in, the chat
+   pane's and the Agent pane's alike. It is the composer the footer pill's
+   card drew (one glass sheet, 14px corners, 14px in, the field at 15px over
+   one row of pill chips) and it sits where a conversation's composer
+   belongs: centred under the transcript, pinned to the pane's bottom, at the
+   design's measure (RLPaneAgent: min(720px, 100% - 64px)).
+
+   Two hosts, one look. A chat's FrontDoor drops its own glass and lift here
+   (the box is the glass), and a session's composer wears the box itself.
+   Inside it every menu is the same 32px pill (`.rl-composer-chip`'s), every
+   icon a 32px round button, and the one primary button keeps its slot —
+   send, queue or Stop — in ink, never a red: the palette has none. */
+
+.rl-compact-dock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  padding: 0 0 16px;
+}
+.rl-compact-composer {
+  box-sizing: border-box;
+  width: min(720px, calc(100% - 64px));
+  margin: 0 auto;
+  padding: 14px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: var(--color-glass-3);
+  color: var(--color-ink);
+}
+.rl-compact-composer:focus-within { --rl-glass-ring: var(--color-focus-rim); }
+/* A narrow host (the dock's column, a split): the gutters give way first. */
+.rl-compact-dock[data-pose="compact"] .rl-compact-composer { width: calc(100% - 24px); }
+
+/* A chat's composer is a FrontDoor: the box is its glass. Scrolls down only:
+   `overflow-y: auto` alone computes overflow-x to auto too, and the armed
+   send button's 1.04 scale would grow a horizontal scrollbar under it. */
+.rl-compact-composer .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; padding: 0; margin: 0; min-height: 0; max-height: none; overflow-x: hidden; opacity: 1; animation: none; justify-content: flex-start; }
+.rl-compact-composer .rl-floating-composer .rl-fd-island { padding: 4px 0 0; border: 0; background: transparent; box-shadow: none; border-radius: 0; backdrop-filter: none; -webkit-backdrop-filter: none; transform: none; }
+.rl-compact-composer .rl-fd-input { min-height: 40px; max-height: 160px; font-size: 15px; line-height: 1.5; padding: 3px 4px 10px; }
+.rl-compact-composer .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
+/* A chat's own menus (History, More) sit in the row as chips of it. */
+.rl-compact-composer .rl-composer-accessories { display: contents; }
+.rl-compact-composer .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
+.rl-compact-composer .rl-fd-strip { margin-top: 8px; }
+/* A fainter wash than the menus' 6%: on a low-contrast theme (Red Sand) the
+   heavier tint pulls the label under 4.5:1 (theme/doorContrast.test.ts). */
+.rl-compact-composer .rl-composer-chip:not(:hover, [aria-expanded=true]) { background: color-mix(in srgb, var(--color-ink) 2%, transparent); }
+
+/* The chips: one pill. The chat's mode picker and the session's mode, model,
+   folder and Talk chips take the composer menus' shape. */
+.rl-compact-composer .rl-chat-mode-picker > button,
+.rl-compact-composer .rl-convo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  min-height: 32px;
+  max-width: 260px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-ink) 2%, transparent);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 11px;
+}
+.rl-compact-composer .rl-chat-mode-picker > button:hover,
+.rl-compact-composer .rl-chat-mode-picker > button[aria-expanded="true"],
+.rl-compact-composer button.rl-convo-chip:hover,
+.rl-compact-composer .rl-convo-chip[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--color-info) 45%, transparent);
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  color: var(--color-ink);
+}
+.rl-compact-composer .rl-convo-chips { flex-wrap: wrap; gap: 7px; }
+
+/* The icons: + and the mic, round, quiet until pointed at. */
+.rl-compact-composer .rl-fd-tool:not(.is-wide),
+.rl-compact-composer .rl-convo-mic {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-ink-muted);
+}
+.rl-compact-composer .rl-fd-tool:not(.is-wide):hover:not(:disabled),
+.rl-compact-composer .rl-convo-mic:hover { background: var(--color-fill-1); color: var(--color-ink); }
+.rl-compact-composer .rl-fd-tool.is-hot,
+.rl-compact-composer .rl-convo-mic[data-hot] { background: var(--color-info); color: var(--color-on-info); }
+
+/* The one primary button: round, 32px. Stop is ink on the quiet fill — the
+   same quiet weight in both hosts, never a coloured alarm. */
+.rl-compact-composer .rl-fd-go,
+.rl-compact-composer .rl-send { width: 32px; height: 32px; border-radius: 50%; }
+.rl-compact-composer .rl-fd-go[data-state="stop"],
+.rl-compact-composer .rl-send[data-send="stop"] {
+  border-color: transparent;
+  background: var(--color-fill-3);
+  color: var(--color-ink);
+}

@@ -48,7 +48,7 @@ function sources(dir = join(process.cwd(), "src")): { rel: string; text: string 
 
 describe("the tour's anchors", () => {
   it("walk the new frame, in order", () => {
-    expect(TOUR_ANCHORS).toEqual(["landing", "tabs", "sessions", "agent-tab", "terminals-tab", "editor", "rail", "plan-verbs", "pill", "command", "settings"]);
+    expect(TOUR_ANCHORS).toEqual(["landing", "tabs", "sessions", "agent-tab", "terminals-tab", "editor", "rail", "plan-verbs", "new-tab", "command", "settings"]);
   });
 
   it("the tab strip, the Agent tab and the terminals tab are drawn by the stage", async () => {
@@ -71,21 +71,20 @@ describe("the tour's anchors", () => {
     expect(at("terminals-tab")[0].getAttribute("role")).toBe("tab");
   });
 
-  it("the rail's tabs and the status bar's pill are drawn by theirs", async () => {
+  it("the rail's tabs are drawn by the rail, and the status bar marks nothing (D27)", async () => {
     await act(async () =>
       root.render(
         <>
           <RightRail tabs={["discussion", "talk", "files", "changes"]} active="discussion" onSelect={() => {}} fullscreen={false} onToggleFullscreen={() => {}} onCollapse={() => {}}>
             <div />
           </RightRail>
-          <Footer comments={[]} sessionReady={false} waiting={false} waitingAsk={false} />
+          <Footer />
         </>,
       ),
     );
     expect(at("rail")).toHaveLength(1);
     expect(at("rail")[0].getAttribute("role")).toBe("tablist");
-    expect(at("pill")).toHaveLength(1);
-    expect(at("pill")[0].closest(".rl-app-footer")).not.toBeNull();
+    expect(host.querySelector(".rl-app-footer [data-tour]")).toBeNull();
   });
 
   it("each of the shell's anchors is carried by exactly the element it means", () => {
@@ -103,8 +102,12 @@ describe("the tour's anchors", () => {
     expect(carriers("command")).toEqual(["src/components/Header.tsx"]);
     expect(readFileSync("src/components/Header.tsx", "utf8")).toMatch(/className="rl-topbar-field"\s+data-tour="command"/);
     expect(carriers("settings")).toEqual(["src/components/SettingsMenu.tsx"]);
+    // The door step lights the sidebar's New tab (D27: the pill it pointed
+    // at left the status bar).
+    expect(carriers("new-tab")).toEqual(["src/components/SessionSidebar.tsx"]);
+    expect(readFileSync("src/components/SessionSidebar.tsx", "utf8")).toMatch(/-newtab" data-tour="new-tab" aria-keyshortcuts="Meta\+T"/);
     // No step points at a region nothing carries, and no region the old
     // frame had is still marked for a step that is gone.
-    for (const gone of ["footer", "discussion", "terminal", "snapback"]) expect(carriers(gone), gone).toEqual([]);
+    for (const gone of ["footer", "discussion", "terminal", "snapback", "pill"]) expect(carriers(gone), gone).toEqual([]);
   });
 });

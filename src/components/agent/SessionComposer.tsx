@@ -40,6 +40,7 @@ import type { ConvoMode, SwitchResult } from "./convo/types";
 import type { ModelFact } from "./convo/reducer";
 import { effortLabel, modeLabel, modelChipLabel } from "./convo/status";
 import "../ComposerMenu.css";
+import "../CompactComposer.css";
 
 export interface SessionComposerProps {
   terminalId: string | null;
@@ -125,7 +126,8 @@ export function SessionComposer(props: SessionComposerProps) {
   const state = sendState(working, !!text.trim());
 
   return (
-    <div ref={frameRef} className="rl-convo-composer rl-glass rl-glass-sheet" data-layout={layout}>
+    // On the stage it is the compact composer (D27), the chat pane's box.
+    <div ref={frameRef} className={`rl-convo-composer rl-glass rl-glass-sheet${stage ? " rl-compact-composer" : ""}`} data-layout={layout} data-compact-composer={stage || undefined}>
       <textarea
         ref={fieldRef}
         className="rl-convo-field"

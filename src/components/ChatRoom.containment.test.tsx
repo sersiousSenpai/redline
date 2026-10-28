@@ -110,7 +110,7 @@ describe("Home chat containment", () => {
     };
     function Workspace({ surface }: { surface: string }) {
       const [open, setOpen] = useState(true);
-      return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} onNewChat={() => {}} context={surface} busy={false}>
+      return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} onNewChat={() => {}} context={surface}>
         <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} onClose={() => {}}
           composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: accessories => <FrontDoor {...base} accessories={accessories}/> }}/>
       </MonochatIsland></>;

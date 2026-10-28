@@ -34,7 +34,7 @@
   min-width: 0;
 }
 .rl-convo[data-layout="stage"] .rl-convo-list {
-  width: min(720px, calc(100% - 32px));
+  width: min(720px, calc(100% - 64px));
   gap: 22px;
   padding: 36px 0 24px;
   font-size: var(--rl-text-conversation);
@@ -343,7 +343,7 @@
   align-items: center;
   min-width: 0;
 }
-.rl-convo[data-layout="stage"] .rl-convo-dock { padding: 0 0 20px; }
+.rl-convo[data-layout="stage"] .rl-convo-dock { padding: 0 0 16px; }
 .rl-convo[data-layout="column"] .rl-convo-dock { padding: 14px 18px 18px; }
 .rl-convo[data-layout="panel"] .rl-convo-dock { padding: 12px 14px 14px; }
 .rl-convo-dock > .rl-queue-anchor,
@@ -351,7 +351,7 @@
 .rl-convo-composer { box-sizing: border-box; width: 100%; }
 .rl-convo[data-layout="stage"] .rl-convo-dock > .rl-queue-anchor,
 .rl-convo[data-layout="stage"] .rl-convo-readiness,
-.rl-convo[data-layout="stage"] .rl-convo-composer { width: min(720px, calc(100% - 32px)); }
+.rl-convo[data-layout="stage"] .rl-convo-composer { width: min(720px, calc(100% - 64px)); }
 .rl-convo-readiness {
   margin: 0 0 8px;
   padding: 0 4px;
@@ -374,6 +374,10 @@
 .rl-convo-composer.rl-glass:focus-within { --rl-glass-ring: var(--color-focus-rim); }
 .rl-convo-composer.rl-glass[data-layout="column"],
 .rl-convo-composer.rl-glass[data-layout="panel"] { padding: 11px 12px 10px 14px; }
+/* On the stage it is the compact composer (D27, CompactComposer.css): the
+   chat pane's box, its 14px in and 14px corners, the field at 15px. */
+.rl-convo-composer.rl-glass.rl-compact-composer { gap: 10px; padding: 14px; border-radius: 14px; }
+.rl-convo-composer.rl-compact-composer .rl-convo-field { min-height: 24px; font-size: 15px; line-height: 1.5; }
 .rl-convo-field {
   display: block;
   width: 100%;
@@ -776,7 +780,7 @@ button.rl-convo-chip:hover,
   font-size: 12px;
   color: var(--color-ink-4);
 }
-.rl-convo[data-layout="stage"] .rl-convo-dock > .rl-work-drawer { width: min(720px, calc(100% - 32px)); }
+.rl-convo[data-layout="stage"] .rl-convo-dock > .rl-work-drawer { width: min(720px, calc(100% - 64px)); }
 .rl-work-drawer-head {
   display: flex;
   align-items: center;

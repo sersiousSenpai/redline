@@ -46,9 +46,6 @@
     "research": { "autoSend": true }
   },
   "replyActions": ["copy", "add-to-task-list", "add-to-mission", "continue-as"],
-  "pillComposerDestinations": {
-    "browser": ["plan"]
-  },
   "skill": {
     "name": "browse",
     "mustMention": [

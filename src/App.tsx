@@ -644,8 +644,8 @@ function isDetachError(err: unknown): boolean {
 // or handed back.
 // Under the workbench each door pane has a draft of its own; App keeps the
 // focused door's key here (set each render) so a launch reads and clears
-// the sentence of the door it came from. Home's first door and the footer
-// pill's card share the Front Door's key.
+// the sentence of the door it came from. Home's first door and a chat's
+// compact composer share the Front Door's key.
 let doorSentenceKey = FRONT_DOOR_TEXT_KEY;
 const getFrontDoorText = () => readSharedDraft(doorSentenceKey);
 const setFrontDoorText = (text: string) => writeSharedDraft(doorSentenceKey, text);
@@ -655,9 +655,9 @@ function App() {
   // The Front Door. Every launch starts with it SHUT: on the document's empty
   // plate it rests there instead — headline, composer and recents in the
   // plate's free area — without taking the caret (typing with nothing focused
-  // flows into it), and anywhere else there is only the footer pill. Opening
-  // it is always a gesture: the pill, Shift+Enter, ⌘J, ⌘⇧N, a press or a
-  // keystroke in the resting composer. The chat-surface seed is still
+  // flows into it). Opening it is always a gesture: Shift+Enter, ⌘J, ⌘⇧N, a
+  // press or a keystroke in the resting composer (D27 took the footer pill;
+  // ⌘T, the palette and the sidebar's New tab open a door tab). The chat-surface seed is still
   // consumed so its key can't linger.
   const [frontDoorOpen, setFrontDoorOpen] = useState(() => {
     takeDockSeed(localStorage);
@@ -696,9 +696,6 @@ function App() {
     if (frontDoorOpen) setDoorHandoff(false);
     else doorLaunchRef.current = null;
   }, [frontDoorOpen]);
-  // The pill's compact card, sprung out by a hover. Never open at launch and
-  // never re-opened by coming back to a surface.
-  const [doorCompact, setDoorCompact] = useState(false);
   // A place the user asked for on the surface they already stand on — a plan
   // from the palette, a recent, a chat's receipt, a notice's Open — is
   // navigation all the same. It is part of the door's navigation key
@@ -712,24 +709,13 @@ function App() {
   // same words twice are nudged apart so a screen reader reads them again.
   const [doorNews, setDoorNews] = useState("");
   const announceDoor = useCallback((text: string) => setDoorNews(news => news === text ? `${text}\u00a0` : text), []);
-  // One launch through the card at a time: a context read can make the
+  // One launch through the door at a time: a context read can make the
   // hand-off take a beat, and a second ⏎ inside it must not launch twice.
-  const [frontDoorLaunching, setFrontDoorLaunching] = useState(false);
   const frontDoorLaunchingRef = useRef(false);
   // The browser tab the card would quote, as the pane reports it.
   const [browserIslandPage, setBrowserIslandPage] = useState<BrowserIslandPage | null>(null);
   // The context chips the user flipped, for the surface they flipped them on.
   const [chipPresses, setChipPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  const [monochatBusy, setMonochatBusy] = useState(false);
-  const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
-  const reportMonochatActivity = useCallback((key: string, active: boolean) => setMonochatForks(previous => {
-    if (previous.has(key) === active) return previous;
-    const next = new Set(previous); if (active) next.add(key); else next.delete(key); return next;
-  }), []);
-  useEffect(() => {
-    const subscriptions = ["fork-delta", "fork-done", "fork-error", "fork-cancelled"].map(event => listen<{sessionId: string; commentId: string}>(event, message => reportMonochatActivity(`${message.payload.sessionId}:${message.payload.commentId}`, event === "fork-delta")));
-    return () => { subscriptions.forEach(subscription => { void subscription.then(dropListener); }); };
-  }, [reportMonochatActivity]);
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   // The selected session: the workbench's active set (`StageView.activeId`),
   // plus the collab joined key — a room with no session key of its own —
@@ -1505,7 +1491,7 @@ function App() {
   // Focus + seed handoff from the type-to-start listener (see lib/landing.ts).
   const [frontDoorFocus, setFrontDoorFocus] = useState(0);
   // ── The door tab (W1) ─────────────────────────────────────────────────
-  // ⌘T, the footer pill's click and "Plan a build" open a door tab in the
+  // ⌘T, the sidebar's New tab and "Plan a build" open a door tab in the
   // active set: a door pane with a draft of its own, the island landing on
   // it, the caret in its box. From a browser pane the door comes with the
   // Browser destination preselected. The pane ids ⌘T minted are remembered,
@@ -1536,7 +1522,7 @@ function App() {
       setSwapFrom(from);
     }
     wb.dispatch({ type: "replacePane", paneId: door.id, pane: init });
-    // The door's own draft leaves with it; the shared sentence stays the pill's.
+    // The door's own draft leaves with it; the shared sentence stays Home's.
     if (door.data.draftKey !== FRONT_DOOR_TEXT_KEY) writeSharedDraft(door.data.draftKey, "");
     return true;
   }, []);
@@ -1548,7 +1534,6 @@ function App() {
   const openDoorTabRef = useRef<() => void>(() => {});
   const openDoorTab = useCallback(() => {
     beginMeasure("wb:new-tab-caret");
-    setDoorCompact(false);
     const { set, tab } = activePanes(wb.getState());
     const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
     const paneId = newDoorPaneId();
@@ -1559,7 +1544,6 @@ function App() {
       paneId,
       data: { draftKey: doorDraftKey(paneId), ...(focused?.kind === "browser" ? { destination: "browser" as const } : {}) },
     });
-    setDoorCompact(false);
     setFrontDoorOpen(false);
     setFrontDoorFocus((n) => n + 1);
     // The measure ends when the caret rests in the door's box.
@@ -1587,7 +1571,7 @@ function App() {
     return true;
   }, []);
   // A door pane that has left the workbench (closed, converted, pruned)
-  // takes its draft with it; the shared sentence stays the pill's. Watched
+  // takes its draft with it; the shared sentence stays Home's. Watched
   // on the store, so every way a door goes — the strip's ×, ⌘W, Esc, the
   // launch's handoff — forgets its key.
   useEffect(() => {
@@ -2100,10 +2084,8 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // The palette's front-door toggle. An open compact card grows into the
-  // door, draft and all. (⌘J is the rail's Talk now, W4.)
+  // The palette's front-door toggle. (⌘J is the rail's Talk now, W4.)
   const toggleDoor = useCallback(() => {
-    setDoorCompact(false);
     setFrontDoorOpen(value => !value);
   }, []);
   // Visibility from the active tab's panes (a review beside a browser is on
@@ -2769,7 +2751,7 @@ function App() {
     </button>
   ) : null;
   // The Front Door is the plate at REST — no document, no draft, nothing of
-  // its own to cover — and that is where the door rests instead of the pill.
+  // its own to cover — and that is where the door rests.
   const plateAtRest = stageSurface === "document" && plateMode === "door";
 
 
@@ -3148,7 +3130,7 @@ function App() {
         // The plan and its verbs are the Plan tab's.
         wb.dispatch({ type: "openSurface", kind: "plan" });
         tourRevealRestore.current = backToTab;
-      } else if (anchor === "sessions" && sidebarCollapsed) {
+      } else if ((anchor === "sessions" || anchor === "new-tab") && sidebarCollapsed) {
         revealSidebar();
         tourRevealRestore.current = () => setSidebarFolded(true);
       } else if (anchor === "rail" && paneCollapsed) {
@@ -3298,12 +3280,6 @@ function App() {
     return id;
   }, [ensureTerminalReady, showTerminal]);
   openTerminalRef.current = openTerminal;
-  /** The open session's agent terminal, shown (the footer's working line). */
-  const showSessionTerminal = () => {
-    const id = session ? sessionTerminals.get(session.sessionId) : undefined;
-    if (id) showTerminal(id);
-    else revealTerm();
-  };
 
   // Mount the terminal dock once the shell is actionable and the main thread
   // is free. Idle, not immediate: xterm's chunk plus a PTY spawn plus the cwd
@@ -3359,7 +3335,6 @@ function App() {
   const jumpToNeedsYou = useCallback(() => {
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
-    setDoorCompact(false);
     // Across sessions: the one that needs you comes forward, its wall and
     // its tile with it, then the tile is hailed and takes the caret.
     void ensureTerminalReady().then((dock) => {
@@ -5394,7 +5369,7 @@ function App() {
   // or simply to another — the room folds back into the column rather than
   // quietly showing something else at plate scale.
   // One source of truth for the JSX and for the surrounding layout, so the
-  // dock, the divider and the pill can never disagree about whether the
+  // dock and the divider can never disagree about whether the
   // column is up.
   const voiceDocked = dockOpen && dockContext != null;
   const planVoiceOpen = voiceDocked && dockContext?.kind === "voice";
@@ -6938,7 +6913,6 @@ function App() {
     setFrontDoorProject({ path: initialProject });
     // A plan to launch, so the door's composer.
     setFrontDoorDest("plan");
-    setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(value => value + 1);
   };
@@ -7510,8 +7484,7 @@ function App() {
   // when the user may act.
   const tourActive =
     (tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating));
-  // The open door hides the page. The compact card does not: it is cut out
-  // of the webview (useNativeOverlayRegion), never laid over it.
+  // The open door hides the page.
   const browserOverlayActive =
     frontDoorOpen ||
     !!sendConfirm ||
@@ -7989,7 +7962,6 @@ function App() {
     const browser = stageSurface === "browser";
     const project = projectOverride ?? resolveFrontDoorProject(text);
     frontDoorLaunchingRef.current = true;
-    setFrontDoorLaunching(true);
     try {
       const r = await launchPlan({
         mode: "plan",
@@ -8029,13 +8001,9 @@ function App() {
       // hands off into the plan when it lands (`doorLaunchRef`).
       if (frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
       noteDoorLaunchTab(r.launchId);
-      // Handed off: the compact card shrinks back into the pill, which shows
-      // the work. The open door shows it in place.
-      setDoorCompact(false);
       announceDoor("Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
-      setFrontDoorLaunching(false);
     }
   };
 
@@ -8134,7 +8102,6 @@ function App() {
       // out of the island's box; a door with no tab of its own opens one.
       if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: chat.companionId } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: chat.companionId } });
       setFrontDoorOpen(false);
-      setDoorCompact(false);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
       setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface, context });
@@ -8161,7 +8128,6 @@ function App() {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
-    setDoorCompact(false);
     setFrontDoorOpen(false);
     // Its pane: the door tab it was picked in becomes it; otherwise the
     // set's pane for it comes forward, or opens.
@@ -8174,7 +8140,6 @@ function App() {
   const revealAlertRef = useRef<(target: AlertTarget) => void>(() => {});
   revealAlertRef.current = (target) => {
     setFrontDoorOpen(false);
-    setDoorCompact(false);
     if (target.type === "terminal") {
       showTerminal(target.terminalId, true);
       return;
@@ -8737,7 +8702,7 @@ function App() {
       </Suspense>
     );
 
-  const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
+  const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId }), [frontDoorBackend, chatId]);
 
   // The door's one flight pill: its own plan launch. Built once per launch,
   // not per render: the composer reads a new object as a new launch.
@@ -8786,19 +8751,8 @@ function App() {
   };
   // On screen in the dock's column — the same room, at column scale.
   const chatDocked = !chatPane && !!chatId && voiceDocked && dockContext?.kind === "companion";
-  // The compact card launches only in place — a plan. Elsewhere than the
-  // browser its menu also offers the Drafter and Chat, and picking either
-  // grows the card into the door, which takes that destination.
-  const cardDestination: LaunchDestination = "plan";
-  const growCardTo = (next: LaunchDestination) => {
-    setFrontDoorDest(next);
-    if (next !== "drafter" && next !== "chat") return;
-    setDoorCompact(false);
-    setFrontDoorOpen(true);
-  };
-  // One composer in three places — the door's own (resting or open), the
-  // compact card's, a chat's — and one sentence: each is a FrontDoor on the
-  // same shared draft, so what you typed in one is there in the next.
+  // One composer in two places — the door's own (resting or open) and a
+  // chat's compact composer (D27) — each a FrontDoor on its draft.
   // A door tab's Open target: the browser takes the sentence as an address
   // or a search; the others open at once with the sentence kept.
   const openDoorTarget = (id: string, text: string) => {
@@ -8817,10 +8771,9 @@ function App() {
     const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
     if (focused?.kind === "door") wb.dispatch({ type: "replacePane", paneId: focused.id, pane: { kind: "door", data: { ...focused.data, destination: next } } });
   };
-  const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
-    const card = where === "card";
-    const shown = where === "door" ? doorVisible : card ? doorCompact : !!chatPane || chatDocked;
-    const destination = where === "chat" ? "chat" : card ? cardDestination : frontDoorDest;
+  const renderMonochatComposer = (where: "door" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
+    const shown = where === "door" ? doorVisible : !!chatPane || chatDocked;
+    const destination = where === "chat" ? "chat" : frontDoorDest;
     return (
               <FrontDoor
                 visible={shellReady && shown}
@@ -8833,10 +8786,9 @@ function App() {
                   pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
                   onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
                 />}
-                // A hover never takes the caret: the card's composer waits
-                // for a click. The door's is the island's to focus — a pointer
-                // on the pill opens it quiet, anything else with the caret in
-                // it. A chat the room holds takes it on every summons.
+                // The door's composer is the island's to focus: every summons
+                // puts the caret in it. A chat the room holds takes it on
+                // every summons.
                 autoFocusOnShow={where === "chat" && !!chatPane}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
@@ -8864,16 +8816,13 @@ function App() {
                 onDrafter={drafterFromFrontDoor}
                 onChat={() => void chatFromFrontDoor()}
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                // The browser's card is Plan alone: a page has no Drafter or
-                // Chat of its own to grow into.
-                allowedDestinations={card && stageSurface === "browser" ? ["plan"] : undefined}
                 // A door tab's Open targets, and the destination the pane
                 // remembers (a door opened from a browser pane starts on
                 // Browser); the global default follows every pick.
                 openTargets={where === "door" ? doorOpenTargets : undefined}
                 onOpenTarget={where === "door" ? openDoorTarget : undefined}
-                destination={card ? cardDestination : where === "door" ? (doorPaneDestination ?? frontDoorDest) : frontDoorDest}
-                onDestinationChange={card ? growCardTo : where === "door" ? setDoorDestination : setFrontDoorDest}
+                destination={where === "door" ? (doorPaneDestination ?? frontDoorDest) : frontDoorDest}
+                onDestinationChange={where === "door" ? setDoorDestination : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -8886,14 +8835,13 @@ function App() {
                 // else: the plan keeps running in its tile and the composer —
                 // already blank, already usable — stays blank. No pay-back.
                 onCancelPending={() => setPendingLaunch(null)}
-                // The pill's other half: go watch it. Reveal the dock, focus
+                // The flight pill's other half: go watch it. Reveal the dock, focus
                 // the tile the plan is running in, and glow it once so the
                 // eye lands on the right one of fourteen.
                 onRevealPending={() => {
                   const p = frontDoorFlight;
                   if (!p) return;
                   setFrontDoorOpen(false);
-                  setDoorCompact(false);
                   showTerminal(p.terminalId);
                 }}
                 onCreateProject={createFrontDoorProject}
@@ -8905,7 +8853,7 @@ function App() {
                 draftKey={where === "door" ? doorSentenceKey : undefined}
                 consumeSeed={consumeLandingSeed}
                 // Recent chats — the contextual way back into a conversation,
-                // in the door alone: never in the compact card. Bounded: this
+                // in the door alone: never in a chat's composer. Bounded: this
                 // is a way in, not an index; the room's own `Chats ▾` holds the
                 // full list.
                 chats={where === "door" ? chats
@@ -9562,7 +9510,7 @@ function App() {
             onOpen={openDecisionForReview}
             onApprove={approveFromDecision}
             onExpire={dismissDecisionWindow}
-            raised={frontDoorOpen || doorCompact}
+            raised={frontDoorOpen}
           />
         </Suspense>
       )}
@@ -10276,31 +10224,15 @@ function App() {
           </div>
         )}
       >
-      {/* The status bar (W6): status around the Plan a build pill, and no
-          plan verbs — those are the Plan pane's own footer's. Its 28px are
-          held while its chunk lands, so the pill centres on the row from
-          the first frame. */}
+      {/* The status bar (W6, D27): Memory, a waiting review, the live
+          session and the bridge; no status text and no pill. Its 28px are
+          held while its chunk lands. */}
       <Suspense fallback={<div className="rl-app-footer rl-statusbar" aria-hidden />}>
       <Footer
-        comments={threadComments}
-        sessionReady={sessionReady}
-        version={latest?.versionNumber ?? null}
-        waiting={waiting}
-        waitingAsk={waitingAsk}
-        approval={
-          session?.status === "approved"
-            ? {
-                version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
-                runState: activeRunState,
-              }
-            : null
-        }
         memory={surfaceEnabled(effectiveWorkspace, "memory") ? footerMemory : null}
         live={surfaceEnabled(effectiveWorkspace, "collab") ? footerLive : null}
         reviewNews={reviewNews === "review" ? "Review ready" : null}
         onOpenReviewNews={() => selectSurface("review")}
-        onShowTerminal={showSessionTerminal}
-        backend={session?.backend ?? null}
         bridge={daemonState}
       />
       </Suspense>
@@ -10449,19 +10381,13 @@ function App() {
         clearanceKey={`${bootAnimating}`}
         // The door rests on a door pane that is on screen and focused.
         landing={plateAtRest && shellReady && !joinedActive && view.focusedKind === "door"}
-        onPillClick={openDoorTab}
-        pill
         surfaceKey={doorNavKey}
         plateKey={wbLayoutKey}
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
         onOpenChange={setFrontDoorOpen}
         handoff={doorHandoff}
-        compactOpen={doorCompact}
-        onCompactChange={setDoorCompact}
-        compact={doorCompact && renderMonochatComposer("card")}
         context={surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
-        busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
         announce={doorNews}
       >
         {renderMonochatComposer("door")}
@@ -10477,7 +10403,6 @@ function App() {
               onReviewChanges={projectPath => { setFrontDoorOpen(false); codeReview.setSource("uncommitted"); void codeReview.openReview(projectPath, "uncommitted"); selectSurface("review"); }}
               target={activeSurface}
               modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
-              onActivityChange={setMonochatBusy}
               // Keyed by the thread: the room's mode and harness
               // are stored per chat and `usePersistedState` reads
               // its key once, so switching conversations is a

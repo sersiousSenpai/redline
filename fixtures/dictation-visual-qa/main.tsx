@@ -6,7 +6,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { FrontDoor, type FrontDoorProps } from "../../src/components/FrontDoor";
-import { MonochatIsland } from "../../src/components/MonochatIsland";
+import { CompactComposer } from "../../src/components/CompactComposer";
 import { ChatRoom } from "../../src/components/ChatRoom";
 import { BrowserChat } from "../../src/components/BrowserChat";
 import { CommentComposer } from "../../src/components/CommentComposer";
@@ -55,20 +55,13 @@ function Panel({ width, children }: { width: number; children: React.ReactNode }
   </div>;
 }
 
-/** The compact card sprung out of the footer pill. */
-function Card() {
-  const [open, setOpen] = useState(false);
-  const [compact, setCompact] = useState(true);
-  useEffect(() => { Object.assign(qa, { cardOpen: () => compact, doorOpen: () => open }); }, [compact, open]);
-  return <>
-    <main className="qa-plate">The plan the card floats over.</main>
-    <footer className="rl-app-footer qa-footer"/>
-    <MonochatIsland clearanceKey="" landing={false} surfaceKey="document" onVisibilityChange={noop}
-      open={open} onOpenChange={setOpen} compactOpen={compact} onCompactChange={setCompact}
-      compact={compact && door({ welcome: false, visible: compact })} context="Auth rewrite" busy={false}>
-      {door({ welcome: true, visible: open })}
-    </MonochatIsland>
-  </>;
+/** The compact composer (D27): a conversation pane's own box, pinned to the
+ *  pane's bottom under its thread. */
+function Compact() {
+  return <div className="qa-room" style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+    <main className="qa-plate">The thread above the composer.</main>
+    <CompactComposer>{door({ welcome: false, visible: true })}</CompactComposer>
+  </div>;
 }
 
 /** A chat in the room: ChatRoom with the door's composer in chat mode. */
@@ -84,7 +77,7 @@ function Chat() {
 function Scene() {
   switch (scene) {
     case "door": return <main className="qa-plate qa-center">{door({ welcome: true })}</main>;
-    case "card": return <Card/>;
+    case "compact": return <Compact/>;
     case "chat": return <Chat/>;
     case "page-chat": return <Panel width={380}><BrowserChat conversation={{ kind: "tab", browseId: "b-1", title: "LiDAR-GS", targetLabel: "browser-b1", targetTitle: "LiDAR-GS", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }} workspace="regular" onClose={noop} onAddToMission={async () => true} onAddToCart={async () => true}/></Panel>;
     case "comment": return <Panel width={360}><div className="qa-pad"><CommentComposer type="feedback" sessionId="s-1" anchorId="A.1" selectedText="the anchor" charStart={0} charEnd={10} onCancel={noop} onSubmit={async () => {}}/></div></Panel>;

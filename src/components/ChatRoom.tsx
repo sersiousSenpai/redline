@@ -32,6 +32,7 @@ import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { modelInfo } from "../lib/modelInfo";
 import type { ChatProgressStatus } from "../lib/chatProgress";
 import { ChatContextChip } from "./ChatContextChip";
+import { CompactComposer } from "./CompactComposer";
 import { ideaNote, planFromReplyInstruction, type ChatContext } from "../lib/chatRoom";
 import { ChatModePicker, nextChatMode, type ChatMode, type BuildAssignee } from "./ChatModePicker";
 import { QueueTray, type QueueItem } from "./QueueTray";
@@ -582,7 +583,9 @@ export function ChatRoom({
   }, []);
   const compact = pose === "compact";
   const roomy = expanded && !compact;
-  const columnWidth = roomy ? 820 : 780;
+  // The thread's text column is the composer's measure (D27: 720px, the
+  // design's), plus the thread's own side padding.
+  const columnWidth = roomy ? 768 : 760;
 
   // Per-reply capture, so an idea does not evaporate with the scrollback.
   // All three reuse existing paths: the plan graduation, the Drafter seed and
@@ -742,8 +745,9 @@ export function ChatRoom({
 
       {/* Over the thread's reserved bottom, never taking height from it. */}
       <QueueTray rows={queueRows} onRemove={id => { void removeQueue(id); }} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
-      {/* The floating launch composer owns input when supplied. */}
-      {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel }) : <div
+      {/* The compact composer (D27) owns input when supplied: centred under
+          the thread, pinned to the room's bottom. */}
+      {composer ? <CompactComposer pose={compact ? "compact" : "full"}>{composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel })}</CompactComposer> : <div
         ref={composerFrameRef}
         data-chat-composer
         className="min-w-0 shrink-0 py-2.5"

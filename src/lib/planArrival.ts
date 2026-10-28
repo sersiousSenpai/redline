@@ -83,8 +83,9 @@ export function ownDoorLaunch(door: DoorAtArrival, launchId: string | null | und
 /** How long a keystroke keeps someone writing, as far as an arrival goes. */
 export const WRITING_MS = 5000;
 
-/** The island's two poses: the door's layer and the compact card. */
-const ISLAND = ".rl-frontdoor-focus, .rl-monochat-float";
+/** Where the caret is someone composing: the door's layer, and a
+ *  conversation's compact composer (D27, the chat and Agent panes'). */
+const ISLAND = ".rl-frontdoor-focus, [data-compact-composer]";
 
 /** A keystroke that counts as writing: into a text field, never the
  *  terminal — its caret is the shell's, and waiting at a prompt for the
@@ -94,7 +95,7 @@ export function isWritingKey(target: EventTarget | null): boolean {
 }
 
 /** Whether the user is writing when a plan arrives: the caret is in the
- *  island (the door or the compact card), or in a text field holding words,
+ *  door or a compact composer, or in a text field holding words,
  *  or they typed into one in the last WRITING_MS. */
 export function writingNow(active: Element | null, typedAt: number, now: number): boolean {
   if (now - typedAt < WRITING_MS) return true;

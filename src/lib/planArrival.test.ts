@@ -110,10 +110,10 @@ describe("writingNow", () => {
     expect(writingNow(null, NOW - WRITING_MS, NOW)).toBe(false);
   });
 
-  it("counts the caret anywhere in the door or the compact card, typed in or not", () => {
+  it("counts the caret anywhere in the door or a compact composer, typed in or not", () => {
     expect(writingNow(mount('<div class="rl-frontdoor-focus"><textarea data-focus></textarea></div>'), 0, NOW)).toBe(true);
     expect(writingNow(mount('<div class="rl-frontdoor-focus"><button data-focus>Plans</button></div>'), 0, NOW)).toBe(true);
-    expect(writingNow(mount('<div class="rl-monochat-float"><textarea data-focus></textarea></div>'), 0, NOW)).toBe(true);
+    expect(writingNow(mount('<div class="rl-compact-composer" data-compact-composer><textarea data-focus></textarea></div>'), 0, NOW)).toBe(true);
   });
 
   it("counts another text field only while it holds words", () => {

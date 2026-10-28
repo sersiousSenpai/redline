@@ -103,7 +103,7 @@ describe("the chat as a brainstorm room", () => {
     expect(user.textContent).not.toMatch(/\bYou\b/);
     expect(reply.getAttribute("data-room")).toBe("true");
     expect(reply.querySelector(".rl-reply-byline")?.textContent).toBe("Claude");
-    expect(host.querySelector<HTMLElement>("[data-chat-messages] > div")!.style.maxWidth).toBe("820px");
+    expect(host.querySelector<HTMLElement>("[data-chat-messages] > div")!.style.maxWidth).toBe("768px");
     expect(host.querySelector<HTMLTextAreaElement>("[data-chat-composer] textarea")!.style.fontSize).toBe("15px");
 
     turn.status = "streaming";

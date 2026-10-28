@@ -98,32 +98,13 @@ export function springInKeyframes(
   ];
 }
 
-/** The island's own flights (MonochatIsland, MonochatCard): the compact card
- *  and the door each spring out of the footer pill and go back into it. They
- *  run past 300 ms, so they move by transform alone (perf rule 6) — corners
- *  and fades ride in shorter or compositor-only animations beside them. */
-export const ISLAND_SPRING_MS = 420;
-/** The door growing out of the card, or out of the pill. */
-export const DOOR_GROW_MS = 380;
-/** The door going back toward the pill. */
+/** The door's own flights (MonochatIsland): it rises where it opens and
+ *  fades where it closes (D27 took the footer pill they used to spring out
+ *  of, and its compact card). Transform and opacity only (perf rule 6). */
+/** The door going away. */
 export const DOOR_CLOSE_MS = 260;
-/** Into the pill: quick, and accelerating into it — it is putting itself away. */
-export const ISLAND_EASE_IN = "cubic-bezier(0.4, 0, 1, 1)";
 /** What every one of these becomes under reduced motion: a plain crossfade. */
 export const ISLAND_FADE_MS = 120;
-
-/** Out of `from`'s box into the host's own: the FLIP, transform only. */
-export function flipKeyframes(from: SwapRect, host: SwapRect): Keyframe[] {
-  return [{ transform: inverseTransform(from, host) }, { transform: "none" }];
-}
-
-/** The way back: from the host's own box into `to`'s, fading as it lands. */
-export function flipBackKeyframes(to: SwapRect, host: SwapRect): Keyframe[] {
-  return [
-    { transform: "none", opacity: 1 },
-    { transform: inverseTransform(to, host), opacity: 0 },
-  ];
-}
 
 /** The outgoing door: back and away, gone well before the spring lands.
  *

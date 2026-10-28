@@ -466,12 +466,13 @@ describe("paint guard (perf rule 6)", () => {
   });
 
   it("the island's flights move by transform and opacity alone; its corners settle inside 300 ms", () => {
-    // The 10/10 motion spec: the card's 420 ms spring, the door's 380 ms grow
-    // and 260 ms fall back toward the pill. Nothing in them is allowlisted.
+    // The 10/10 motion spec: the door's rise, its glide on the plate and its
+    // 260 ms fade (D27 took the pill and its card, MonochatCard.tsx, with
+    // their springs). Nothing in them is allowlisted.
     const waapi = parseUsages(sources, parseKeyframes(sources)).filter(
-      (u) => u.where === "element.animate()" && /components\/Monochat(Card|Island)\.tsx$/.test(u.rel),
+      (u) => u.where === "element.animate()" && /components\/MonochatIsland\.tsx$/.test(u.rel),
     );
-    expect(waapi.length).toBeGreaterThanOrEqual(10);
+    expect(waapi.length).toBeGreaterThanOrEqual(9);
     for (const u of waapi) {
       const paint = [...(u.props ?? [])].filter((p) => !COMPOSITOR.has(p));
       if (paint.length) expect(u.ms, `${u.rel}:${u.line} repaints ${paint.join(", ")}`).not.toBeNull();

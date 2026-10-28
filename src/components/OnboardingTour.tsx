@@ -111,7 +111,7 @@ function KeyCap({ children }: { children: ReactNode }) {
 // The steps walk the workbench's frame (W6): the door tab's composer, the tab
 // strip, the sidebar's Places and project groups, the Agent tab, the
 // terminals tab, the plan, the right rail's tabs, the Plan pane's verbs, the
-// status bar's pill. Anchor hygiene: every `anchor` names a `data-tour` that a
+// sidebar's New tab. Anchor hygiene: every `anchor` names a `data-tour` that a
 // real element carries (OnboardingTour.anchors.test.tsx pins each one, and the
 // app fixture's `tour` scene finds each on screen); the theme/mode pickers
 // live INSIDE the Settings popover and exist only while it's open, so steps
@@ -273,15 +273,16 @@ const STEPS: TourStep[] = [
     ),
   },
   {
-    id: "pill",
-    anchor: "pill",
+    id: "new-tab",
+    anchor: "new-tab",
     placement: "top",
     title: "Plan a build from anywhere",
-    lead: <>The pill in the status bar is always one sentence away.</>,
+    lead: <>A new tab is always one sentence away.</>,
     body: (
       <>
-        Rest the pointer on it for a quick composer; click it for a new door
-        tab. <strong>Shift+Enter</strong> does the same from the keyboard.
+        <strong>New tab</strong> (or <strong>⌘T</strong>) opens a door beside
+        what you have open; <strong>Shift+Enter</strong> opens the full door
+        from anywhere outside a text field.
       </>
     ),
   },

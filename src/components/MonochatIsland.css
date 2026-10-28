@@ -1,25 +1,11 @@
 /* ── The Redline island ────────────────────────────────────────────────────
-   The pill centred in the footer row, and the two poses it opens: the
-   compact card it springs out on a hover (MonochatCard.css) and the door, the
-   full-page room below. Both layers are fixed: neither adds height nor moves
-   the footer. */
-.rl-frontdoor-dock { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 160px; height: 28px; z-index: 55; pointer-events: none; }
-.rl-monochat-notch { position: relative; display: grid; place-items: center; width: 160px; height: 28px; padding: 0; border: 0; border-radius: 14px; background: transparent; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
-.rl-monochat-notch[data-hidden="true"] { visibility: hidden; pointer-events: none; }
-/* The brand's mark and what the pill opens. The mark side is optically
-   tighter, so its padding is too. Working, the mark's strike spins
-   (`.rl-pulse-blades`); reduced motion keeps it still. */
-.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 3px; display: flex; align-items: center; justify-content: center; gap: 6px; width: 144px; height: 22px; padding: 0 12px 0 10px; border: 1px solid var(--color-rule); border-radius: 11px; color: var(--color-ink); font-size: 11.5px; font-weight: 500; letter-spacing: -0.003em; background: var(--color-bg-elevated); transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
-.rl-portal-membrane svg { display: block; flex: none; }
-.rl-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-monochat-notch:hover .rl-portal-membrane, .rl-monochat-notch:focus-visible .rl-portal-membrane { border-color: var(--color-info); }
-/* The hit target is the status bar's row (28px); the ring sits on the pill
-   itself, inside the row, so the bar never clips it. */
-.rl-monochat-notch:focus-visible { outline: none; }
-.rl-monochat-notch:focus-visible .rl-portal-membrane { outline: 1px solid var(--color-info); outline-offset: 1px; }
+   The door: the full-page room below, which ⇧⏎ (and ⌘J's door, the tour)
+   opens. Its layer is fixed: it adds no height and never moves the footer.
+   The footer pill and its compact card went with D27; the compact composer
+   lives on as the chat pane's own (`.rl-compact-composer`, ChatWorkbench.css). */
 .rl-frontdoor-focus { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center; pointer-events: none; visibility: hidden; }
-/* Closing, the door stays painted while it goes back toward the pill — inert
-   and see-through to the pointer from its first frame (MonochatIsland). */
+/* Closing, the door stays painted while it fades — inert and see-through to
+   the pointer from its first frame (MonochatIsland). */
 .rl-frontdoor-focus[data-visible="true"], .rl-frontdoor-focus[data-closing] { visibility: visible; }
 /* The paper always covers the WINDOW, even while the door keeps the plate's
    insets: engaging the door spreads the backdrop, never the box. A press on
@@ -55,8 +41,8 @@
 /* Reduced motion: nothing travels. The paper still comes and goes, as a
    120 ms crossfade (the room fades with it, and the welcome on a zoom);
    everything else is instant. */
-@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
-.rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
+@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus * { transition: none !important; animation: none !important; } }
+.rl-frontdoor-focus[data-reduced="true"] * { transition: none !important; animation: none !important; }
 .rl-frontdoor-focus[data-reduced="true"]::before { transition: opacity 120ms linear; }
 .rl-frontdoor-focus[data-reduced="true"] .rl-frontdoor-return { animation: rl-return-in 120ms linear backwards !important; }
 .rl-frontdoor-focus[data-reduced="true"] .rl-frontdoor-return[data-leaving] { animation: rl-return-out 120ms linear forwards !important; }

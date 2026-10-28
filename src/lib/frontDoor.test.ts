@@ -324,14 +324,14 @@ describe("the island never moves on its own", () => {
     expect(overlay).not.toContain("doorCompact");
   });
 
-  it("a hover never takes the caret; the island owns the door's on a summons, and a chat it holds takes it every time", () => {
+  it("the island owns the door's caret on a summons, and a chat it holds takes it every time", () => {
     const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
-    // The door's composer never focuses itself: a pointer on the pill opens
-    // the door quiet (10/11), every other summons puts the caret in — the
-    // island decides, in one place.
+    // The door's composer never focuses itself: every summons puts the caret
+    // in (D27 took the pill's quiet one) — the island decides, in one place.
     expect(door).toContain('autoFocusOnShow={where === "chat" && !!chatPane}');
     const island = readFileSync(join(process.cwd(), "src/components/MonochatIsland.tsx"), "utf8");
-    expect(island).toMatch(/if \(summon\.current === "quiet" && !heldChat\.current\) body\.current\?\.focus\(/);
+    expect(island).toMatch(/const field = composerIn\(body\.current\);\s*if \(field\) \{\s*field\.focus\(/);
+    expect(island).not.toContain('"quiet"');
     // The type-to-start handoff is the door's alone.
     expect(door).toContain('focusNonce={where === "door" ? frontDoorFocus : 0}');
     expect(app).not.toContain("doorSummonedQuiet");
@@ -360,12 +360,12 @@ describe("the island never moves on its own", () => {
   });
 
   it("tells a screen reader when a launch is handed off and a plan arrives", () => {
-    // The pill only shows "Working", and the plate quietly becomes the plan:
-    // neither is ever read out. The island's status line says both.
+    // The plate quietly becomes the plan, which is never read out: the
+    // island's status line says it.
     const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
     expect(island).toContain("announce={doorNews}");
     const launch = app.slice(app.indexOf("const launchFromFrontDoor = async"), app.indexOf("const drafterFromFrontDoor = () =>"));
-    expect(launch).toMatch(/setDoorCompact\(false\);\s*announceDoor\(/);
+    expect(launch).toMatch(/noteDoorLaunchTab\(r\.launchId\);\s*announceDoor\(/);
     expect(app).toContain("announceDoor(arrivalMessage(title, revision));");
     // A new version of the plan already selected says so, wherever it lands.
     expect(app).toContain("const revision = payload.sessionId === activeId;\n        const focus = arrivalFocus({");
