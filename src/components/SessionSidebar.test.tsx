@@ -266,6 +266,37 @@ describe("the grouped sidebar", () => {
     expect(full.onNewSession).not.toHaveBeenCalled();
   });
 
+  it("a session's own servers wear a ports chip on its status line; a click opens the URL, not the row", async () => {
+    const onOpenPort = vi.fn();
+    await renderWith({
+      sessions: [summary("a", 2, 0, { projectPath: "/Users/me/web" }), summary("b", 1, 0, { projectPath: "/Users/me/api" })],
+      servers: [
+        { port: 6006, url: "http://localhost:6006", projectPath: "/Users/me/web", projectName: "web", runCommand: "storybook" },
+        { port: 5173, url: "http://localhost:5173", projectPath: "/Users/me/web/app", projectName: "app", runCommand: "npm run dev" },
+      ],
+      onOpenPort,
+    });
+    const chip = planRow("Plan a").querySelector<HTMLElement>(".rl-sb-port")!;
+    expect(chip.textContent).toBe(":5173 +1");
+    expect(chip.title).toBe(":5173 · npm run dev\n:6006 · storybook");
+    expect(chip.getAttribute("role")).toBe("button");
+    expect(planRow("Plan b").querySelector(".rl-sb-port")).toBeNull();
+    await click(chip);
+    expect(onOpenPort).toHaveBeenCalledWith("http://localhost:5173");
+    expect(full.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("a summaries read that moved no server re-renders no row for its chip", async () => {
+    const sessions = [summary("a", 2, 0, { projectPath: "/Users/me/web" }), summary("b", 1, 0, { projectPath: "/Users/me/api" })];
+    const servers = () => [{ port: 5173, url: "http://localhost:5173", projectPath: "/Users/me/web", projectName: "web", runCommand: "vite" }];
+    const onOpenPort = vi.fn();
+    await renderWith({ sessions, servers: servers(), onOpenPort });
+    rowRenders.mockClear();
+    // A fresh session list (same rows) and a fresh, equal server list.
+    await renderWith({ sessions: [...sessions], servers: servers(), onOpenPort });
+    expect(rowRenders).not.toHaveBeenCalled();
+  });
+
   it("a terminal kept running after its wall closed stays under its session, says so, and a click brings it back; Home's sit under Home", async () => {
     const onSelectTerminal = vi.fn();
     await renderWith({

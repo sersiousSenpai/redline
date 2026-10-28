@@ -24,6 +24,8 @@ import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
 import type { PaneStatus } from "../workbench/status";
+import { portChips, type PortChip, type PortServer } from "../lib/sessionPorts";
+import { keepEqual } from "../lib/keepEqual";
 import {
   buildSidebar,
   itemKey,
@@ -137,6 +139,11 @@ export interface SessionSidebarProps {
   onSelectPlace?: (place: SidebarPlace) => void;
   /** Local dev servers' ports (":5173"), summarized on the Localhost place. */
   localhostPorts?: readonly string[];
+  /** The running dev servers (the Localhost scan, kept by value): each
+   *  session's own (lib/sessionPorts) are a chip on its row that opens the
+   *  server in the browser. */
+  servers?: readonly PortServer[];
+  onOpenPort?: (url: string) => void;
   /** Each plan's terminals, by session id; always shown under the row. */
   terminals?: Readonly<Record<string, readonly SidebarTerminal[]>>;
   /** Home's terminals (shells opened in Home, orphans), under Home. */
@@ -209,7 +216,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
     onSelectLaunch, needs, working, place, onSelectPlace, localhostPorts,
-    terminals, homeTerminals, onSelectTerminal, onNewTab,
+    terminals, homeTerminals, onSelectTerminal, onNewTab, servers, onOpenPort,
   } = props;
 
   // Home reads selected when it is the Place, or — with no Places — when
@@ -344,6 +351,14 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     (onNewPlan ?? onNewSession)?.();
   }, [onSelectPlace, onNewPlan, onNewSession]);
 
+  // Kept by value: a summaries read that moved no server keeps every row's
+  // chip object, so the memoized rows hold still.
+  const chipsRef = useRef<Record<string, PortChip>>({});
+  const sessionPorts = useMemo(
+    () => (chipsRef.current = keepEqual(chipsRef.current, portChips(servers ?? [], sessions))),
+    [servers, sessions],
+  );
+
   const archivedShown = archivedOpen || model.archived.some((item) => item.key === activeKey);
 
   const row = (item: SidebarItem) => {
@@ -365,6 +380,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           need={item.need}
           working={item.working}
           terminals={terminals?.[s.sessionId]}
+          port={sessionPorts?.[s.sessionId]}
+          onOpenPort={onOpenPort}
           onClick={clickRow}
           onToggleExpand={toggleExpand}
           onDelete={onDelete}
@@ -719,6 +736,8 @@ function SessionRowBase({
   need = null,
   working = false,
   terminals,
+  port,
+  onOpenPort,
   onClick,
   onToggleExpand,
   onDelete,
@@ -751,6 +770,9 @@ function SessionRowBase({
   working?: boolean;
   /** The plan's terminals, always listed under the row. */
   terminals?: readonly SidebarTerminal[];
+  /** Its dev servers' chip; a click opens the first in the browser. */
+  port?: PortChip;
+  onOpenPort?: (url: string) => void;
   onClick: (sessionId: string) => void;
   onToggleExpand: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
@@ -1091,6 +1113,12 @@ function SessionRowBase({
               }}
             >
               {pending}
+            </span>
+          )}
+          {port && onOpenPort && !combining && (
+            <span className="rl-sb-port" title={port.title} aria-label={`Open ${port.label} in the browser`}
+              {...nestedControl(() => onOpenPort(port.url))}>
+              <Globe size={12} aria-hidden />{port.label}
             </span>
           )}
         </div>

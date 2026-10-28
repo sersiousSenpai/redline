@@ -269,3 +269,7 @@
 .rl-sb-newtab:hover { background: var(--color-fill-1); color: var(--color-ink-2); }
 .rl-sb-newtab:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 .rl-sb-newtab kbd { font: inherit; font-size: var(--rl-text-label); color: var(--color-ink-5); }
+
+/* ── A session's dev servers (W7): a quiet chip on its status line ──────── */
+.rl-sb-port { display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border: 1px solid var(--color-rule); border-radius: 9999px; font-family: var(--font-mono); font-size: 10px; line-height: 16px; letter-spacing: 0; text-transform: none; white-space: nowrap; color: var(--color-ink-muted); cursor: pointer; }
+.rl-sb-port:hover, .rl-sb-port:focus-visible { color: var(--color-ink); border-color: var(--color-ink-muted); }

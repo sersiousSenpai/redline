@@ -9131,12 +9131,19 @@ function App() {
   // in the shared status vocabulary — its agent's terminal from
   // `useSessionTerminals`, its state from the CLI's own hooks.
   const sidebarPlace = !classicWb ? null : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
-  // Read off the Localhost scan, which runs only while that pane is on
-  // screen; a ports chip of its own comes with W7's discovery.
+  // Read off the Localhost scan (see `ptyKey` below for when it runs).
   // Sorted, deduped and kept by value: a scan that finds the same servers
   // (each 15 s while Localhost is up, in whatever order lsof lists them)
   // must not re-render or repaint the sidebar.
   const sidebarPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b).map((p) => `:${p}`), [devServers.scan]));
+  // Each session's own servers (W7) are its ports chip; the sidebar matches
+  // them to sessions (lib/sessionPorts). The scan runs while Localhost is on
+  // screen and otherwise once per event — boot, and a PTY appearing,
+  // exiting or starting to serve (the wall's own process sample) — never on
+  // a clock. The scan is kept by value, so an unchanged sweep is no render.
+  const ptyKey = useMemo(() => [...(liveTermIds ?? [])].sort().join(" ") + "|" + [...termStatuses].filter(([, t]) => t.state === "serving" || t.state === "exited").map(([id]) => id).sort().join(" "), [liveTermIds, termStatuses]);
+  const rescanServers = devServers.rescan;
+  useEffect(() => { rescanServers(); }, [ptyKey, rescanServers]);
   // Every terminal a session owns sits under its row — its agent's, the
   // shells opened in its tabs, and the ones kept running after their wall
   // closed — and Home's under Home (key ""). One status vocabulary, from the
@@ -9203,6 +9210,8 @@ function App() {
       setActiveId(id);
     },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
+    // A row's ports chip: the server in a browser tab, as Localhost's cards.
+    onOpenPort: (url: string) => openUrlInBrowser(url),
     // The Places (W1): Home is the workbench's Home set (its door lands),
     // Localhost opens in the current set.
     onSelectPlace: (place: "home" | "servers") => {
@@ -9624,6 +9633,7 @@ function App() {
               arrivalGlow={arrivalGlow}
               place={sidebarPlace}
               localhostPorts={sidebarPorts}
+              servers={devServers.scan?.running}
               terminals={sidebarTerminals}
               homeTerminals={sidebarTerminals[""]}
             />

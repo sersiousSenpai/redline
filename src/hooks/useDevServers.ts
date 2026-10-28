@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DevServerScan } from "../types";
+import { keepEqual } from "../lib/keepEqual";
 import type { StopPlan } from "../lib/devServerTypes";
 
 /** How often the Localhost surface re-sweeps the machine while it is visible.
@@ -15,6 +16,10 @@ export interface UseDevServers {
   scan: DevServerScan | null;
   error: string | null;
   refresh: () => void;
+  /** One sweep for an event (boot, a PTY appearing, exiting or starting to
+   *  serve), never on a clock: skipped while the window is hidden, and one
+   *  asked for mid-sweep runs once that sweep ends. */
+  rescan: () => void;
   stopServer: (
     pid: number,
     port: number,
@@ -40,6 +45,7 @@ export function useDevServers(active: boolean): UseDevServers {
   // Guards against a reply from a sweep that started before the surface closed.
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
+  const queuedRef = useRef(false);
 
   const refresh = useCallback(async () => {
     // One sweep at a time: a slow `lsof` must not let ticks pile up.
@@ -48,18 +54,29 @@ export function useDevServers(active: boolean): UseDevServers {
     try {
       const next = await invoke<DevServerScan>("dev_servers_scan");
       if (!aliveRef.current) return;
-      setScan(next);
+      // Kept by value: a sweep that found the same servers re-renders
+      // nothing, the sidebar's chips included.
+      setScan((prev) => keepEqual(prev, next));
       setError(null);
     } catch (e) {
       if (!aliveRef.current) return;
       setError(String(e));
     } finally {
       inFlightRef.current = false;
+      if (queuedRef.current) {
+        queuedRef.current = false;
+        void refreshRef.current();
+      }
     }
   }, []);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const rescan = useCallback(() => {
+    if (document.hidden) return;
+    if (inFlightRef.current) queuedRef.current = true;
+    else void refreshRef.current();
+  }, []);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -119,5 +136,5 @@ export function useDevServers(active: boolean): UseDevServers {
     [],
   );
 
-  return { scan, error: stopError ?? error, refresh: () => { setStopError(null); void refreshRef.current(); }, stopServer, planStop };
+  return { scan, error: stopError ?? error, refresh: () => { setStopError(null); void refreshRef.current(); }, rescan, stopServer, planStop };
 }
