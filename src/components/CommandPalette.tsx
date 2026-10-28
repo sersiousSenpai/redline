@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useMemo, useRef, useState } from "react";
-import { rankCommands, type PaletteCommand } from "../lib/commands";
+import { enterTarget, rankScored, type PaletteCommand } from "../lib/commands";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 
@@ -25,6 +25,11 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
   useMenuOverlay(open);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  // The person moved the cursor with the arrows: ⏎ runs what they chose,
+  // decent match or not. Typing resets it.
+  const [chosen, setChosen] = useState(false);
+  // ⏎ found nothing worth running: say so instead.
+  const [noMatchHint, setNoMatchHint] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const selectedRef = useRef<HTMLDivElement | null>(null);
 
@@ -33,12 +38,15 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
     if (!open) return;
     setQuery("");
     setSelected(0);
+    setChosen(false);
+    setNoMatchHint(false);
   }, [open]);
 
-  const ranked = useMemo(
-    () => rankCommands(commands, query),
+  const scored = useMemo(
+    () => rankScored(commands, query),
     [commands, query],
   );
+  const ranked = useMemo(() => scored.map((s) => s.cmd), [scored]);
   // Clamp, don't reset, when the list shrinks under the cursor.
   const cursor = Math.min(selected, Math.max(0, ranked.length - 1));
 
@@ -59,14 +67,23 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
       onClose();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (ranked.length) setSelected((cursor + 1) % ranked.length);
+      if (ranked.length) {
+        setSelected((cursor + 1) % ranked.length);
+        setChosen(true);
+      }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      if (ranked.length)
+      if (ranked.length) {
         setSelected((cursor - 1 + ranked.length) % ranked.length);
+        setChosen(true);
+      }
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (ranked[cursor]) run(ranked[cursor]);
+      // Never a fuzzy match nobody picked: no decent match is a hint, not
+      // a random plan.
+      const target = enterTarget(scored, cursor, chosen);
+      if (target) run(target);
+      else setNoMatchHint(true);
     }
   };
 
@@ -100,6 +117,8 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
           onChange={(e) => {
             setQuery(e.target.value);
             setSelected(0);
+            setChosen(false);
+            setNoMatchHint(false);
           }}
           placeholder="Type a command or a plan title…"
           aria-label="Search commands"
@@ -121,6 +140,19 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
           className="overflow-y-auto"
           style={{ maxHeight: "52vh", padding: "6px 0" }}
         >
+          {noMatchHint && ranked.length > 0 && (
+            <div
+              role="status"
+              data-palette-hint
+              className="font-sans px-4 py-2"
+              style={{
+                fontSize: "var(--rl-text-xs)",
+                color: "var(--color-ink-muted)",
+              }}
+            >
+              Nothing matches “{query.trim()}” well. Keep typing, or pick one with ↑↓.
+            </div>
+          )}
           {ranked.length === 0 && (
             <div
               className="font-sans px-4 py-3"

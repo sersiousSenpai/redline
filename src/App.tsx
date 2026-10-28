@@ -8455,6 +8455,8 @@ function App() {
           // primary way to start one. The Drafter is still one hop away
           // there, behind `Plan ▾ → Draft a document first`.
           draftNewPlan: openFrontDoor,
+          // ⌘T by name: a door tab in the set on screen.
+          newTab: openDoorTab,
           // Each a trip the user asked for, even to where they already
           // are: the door and its card step aside (`doorTrip`).
           openSession: (id) => {

@@ -59,7 +59,27 @@ export function rankCommands(
   commands: PaletteCommand[],
   query: string,
 ): PaletteCommand[] {
-  if (!query.trim()) return commands.slice();
+  return rankScored(commands, query).map((s) => s.cmd);
+}
+
+/** A match good enough for ⏎ to run unasked: about two points a typed
+ *  character. A subsequence scattered across a long plan title ("new tab"
+ *  found letter by letter in "Open plan: Create notes.txt …") scores far
+ *  below it; a word-start match is far above. */
+export const DECENT_PER_CHAR = 2;
+
+export function isDecentMatch(query: string, score: number): boolean {
+  const chars = query.replace(/\s+/g, "").length;
+  return chars === 0 || score >= DECENT_PER_CHAR * chars;
+}
+
+/** `rankCommands` with each entry's score and whether it is a decent match
+ *  (the browse list: every entry, decent). */
+export function rankScored(
+  commands: PaletteCommand[],
+  query: string,
+): { cmd: PaletteCommand; score: number; decent: boolean }[] {
+  if (!query.trim()) return commands.map((cmd) => ({ cmd, score: 0, decent: true }));
   const scored: { cmd: PaletteCommand; score: number; i: number }[] = [];
   commands.forEach((cmd, i) => {
     const hay = cmd.detail ? `${cmd.title} ${cmd.detail}` : cmd.title;
@@ -67,7 +87,20 @@ export function rankCommands(
     if (score !== null) scored.push({ cmd, score, i });
   });
   scored.sort((a, b) => b.score - a.score || a.i - b.i);
-  return scored.map((s) => s.cmd);
+  return scored.map(({ cmd, score }) => ({ cmd, score, decent: isDecentMatch(query, score) }));
+}
+
+/** What ⏎ runs: the entry under the cursor when it is a decent match, or
+ *  when the person chose it with the arrows — never a stray fuzzy match
+ *  nobody picked (the last walk's "New tab" ⏎ opening a plan). */
+export function enterTarget(
+  ranked: readonly { cmd: PaletteCommand; decent: boolean }[],
+  cursor: number,
+  chosen: boolean,
+): PaletteCommand | null {
+  const at = ranked[cursor];
+  if (!at) return null;
+  return at.decent || chosen ? at.cmd : null;
 }
 
 // ---- The v1 registry --------------------------------------------------------
@@ -130,6 +163,8 @@ export interface CommandDeps {
   perfProbe?: boolean;
   actions: {
     draftNewPlan: () => void;
+    /** ⌘T: a door in a tab of its own, in the set on screen. */
+    newTab?: () => void;
     openSession: (id: string) => void;
     selectSurface: (id: string) => void;
     /** Go to a surface AND a tab inside it, in one step. Falls back to
@@ -173,6 +208,16 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
   // One name for one place. The sidebar row, the divider pill and this entry
   // are three affordances for the same door, and three different labels for it
   // read as three different features.
+  if (actions.newTab) {
+    commands.push({
+      id: "new-tab",
+      title: "New tab",
+      detail: "A front door in a tab of its own",
+      group: "Plans",
+      keys: keysFor("new-tab"),
+      run: actions.newTab,
+    });
+  }
   commands.push({
     id: "draft-new",
     title: "Plan a build",

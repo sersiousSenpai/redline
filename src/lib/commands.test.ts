@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildCommands,
+  enterTarget,
   fuzzyScore,
+  isDecentMatch,
   rankCommands,
+  rankScored,
   type CommandDeps,
   type PaletteCommand,
 } from "./commands";
@@ -343,5 +346,47 @@ describe("buildCommands: performance probe", () => {
     const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
     expect(app).toContain("togglePerfProbe:");
     expect(app).toMatch(/from "\.\/lib\/perfProbeSwitch"/);
+  });
+});
+
+describe("⏎ never runs a fuzzy match nobody picked (the last walk's \"New tab\" ⏎ opening a plan)", () => {
+  const plans = (titles: string[]) =>
+    deps({ sessions: titles.map((t, i) => ({ id: `s${i}`, title: t, project: "wb-final-repo" })) });
+
+  it("offers New tab with ⌘T and Plan a build, and ⏎ on \"New tab\" runs New tab", () => {
+    const newTab = vi.fn();
+    const d = plans(["create notes.txt with sleep 45 then cat it"]);
+    const cmds = buildCommands({ ...d, actions: { ...d.actions, newTab } });
+    const tab = cmds.find((c) => c.id === "new-tab")!;
+    expect(tab.title).toBe("New tab");
+    expect(tab.keys).toEqual(["⌘", "T"]);
+    expect(cmds.find((c) => c.id === "draft-new")?.title).toBe("Plan a build");
+    const ranked = rankScored(cmds, "New tab");
+    expect(ranked[0].cmd.id).toBe("new-tab");
+    enterTarget(ranked, 0, false)?.run();
+    expect(newTab).toHaveBeenCalledTimes(1);
+  });
+
+  it("a query that only scatters through a plan's title is no decent match: ⏎ does nothing", () => {
+    const d = plans(["create notes.txt with sleep 45 then cat it"]);
+    // Without a New tab command (an older build) "new tab" only finds the
+    // plan letter by letter.
+    const cmds = buildCommands(d);
+    const ranked = rankScored(cmds, "new tab");
+    const plan = ranked.find((r) => r.cmd.id === "session:s0");
+    expect(plan).toBeTruthy();
+    expect(plan!.decent).toBe(false);
+    // It is the only match, under the cursor — and still nothing runs.
+    expect(ranked[0]).toBe(plan);
+    expect(enterTarget(ranked, 0, false)).toBeNull();
+    // Chosen with the arrows, it runs.
+    expect(enterTarget(ranked, ranked.indexOf(plan!), true)).toBe(plan!.cmd);
+  });
+
+  it("scores: a word-start match is decent, a scattered one is not, the browse list always is", () => {
+    expect(isDecentMatch("theme stu", fuzzyScore("theme stu", "Theme: Studio")!)).toBe(true);
+    expect(isDecentMatch("ntb", fuzzyScore("ntb", "Open plan: Create notes.txt b")!)).toBe(false);
+    expect(rankScored(buildCommands(deps()), "").every((r) => r.decent)).toBe(true);
+    expect(enterTarget([], 0, true)).toBeNull();
   });
 });
