@@ -116,6 +116,15 @@ export interface FeedbackPanelProps {
   onAutoDiscussConsumed?: () => void;
   autoOpenId?: string | null;
   onAutoOpenConsumed?: () => void;
+  /** The rail's Discussion tab (W4): each thread drawn by the host — the
+   *  classic comment card with App's own handlers — inside these piles.
+   *  `current` is the board's focus rim: the thread you're on. Absent, the
+   *  panel draws its own cards. */
+  renderCard?: (placed: Placed, current: boolean) => ReactNode;
+  /** Above the piles: the host's composer, notices and action chips. */
+  lead?: ReactNode;
+  /** In place of the panel's own empty line when nothing is marked. */
+  empty?: ReactNode;
 }
 
 /** The default actions: the same commands, with the same arguments, App's
@@ -154,6 +163,9 @@ export default function FeedbackPanel({
   onAutoDiscussConsumed,
   autoOpenId = null,
   onAutoOpenConsumed,
+  renderCard,
+  lead,
+  empty,
 }: FeedbackPanelProps) {
   // Labels are read against the revision each comment was made on, so a
   // thread keeps the words it was written against.
@@ -203,7 +215,11 @@ export default function FeedbackPanel({
     [onJumpToAnchor, onOpenVersion, viewingVersion],
   );
   const agent = agentLabelFor(session.backend);
-  const card = (p: Placed, isCurrent: boolean) => (
+  const card = (p: Placed, isCurrent: boolean) => renderCard ? (
+    <div key={p.comment.id} data-comment-id={p.comment.id} className="rl-fb-hosted" data-current={isCurrent ? "" : undefined}>
+      {renderCard(p, isCurrent)}
+    </div>
+  ) : (
     <FeedbackCard
       key={p.comment.id}
       comment={p.comment}
@@ -238,11 +254,12 @@ export default function FeedbackPanel({
   return (
     <div className="rl-fb-panel" data-feedback-panel>
       <div ref={listRef} className="rl-fb-list rl-thin-scroll-y">
-        {open.length === 0 && settled.length === 0 && (
+        {lead}
+        {open.length === 0 && settled.length === 0 && (empty !== undefined ? empty : (
           <p className="rl-fb-empty">
             Nothing marked yet. Select text in the plan to mark it (an edit, feedback, or a question), or type feedback below.
           </p>
-        )}
+        ))}
         {pile("Waiting on you", `Accept ${agent}'s answer, or reopen it`, groups.waiting)}
         {pile("Your marks", "Ride your next Send", groups.marks)}
         {pile(`With ${agent}`, null, groups.withAgent)}

@@ -544,3 +544,41 @@ button.rl-margin-note {
   font-size: 11px;
   color: var(--color-mode-plan-fg);
 }
+
+/* The rail's Discussion tab (W4): action chips over the piles, and the
+   classic comment cards the piles host. */
+.rl-fb-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rl-fb-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.rl-fb-chip:hover {
+  color: var(--color-ink);
+}
+.rl-fb-chip[data-tone="waiting"] {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-warning) 20%, transparent);
+  color: var(--color-warning-text, var(--color-warning));
+  font-weight: 600;
+}
+.rl-fb-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.rl-fb-chip:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: 1px;
+}

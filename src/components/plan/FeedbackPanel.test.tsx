@@ -340,3 +340,34 @@ describe("the model chip off the session", () => {
     expect(sessionModelLabel(session)).toBe(expected);
   });
 });
+
+describe("hosted in the rail's Discussion tab (W4)", () => {
+  it("wraps the host's own cards in the four piles, under the host's lead", async () => {
+    const seen: string[] = [];
+    await render(
+      panel({
+        composer: null,
+        lead: createElement("div", { "data-testid": "lead" }, "Send 2 marks"),
+        renderCard: (p, current) => {
+          seen.push(p.comment.id);
+          return createElement("p", { className: "host-card", "data-current": current ? "" : undefined }, `card ${p.comment.id}`);
+        },
+      }),
+    );
+    expect(host.querySelector("[data-testid=lead]")).not.toBeNull();
+    // Every thread the panel would draw is the host's card, inside a pile.
+    const hosted = [...host.querySelectorAll(".rl-fb-pile .host-card")];
+    expect(hosted.length).toBe(seen.length);
+    expect(hosted.length).toBeGreaterThan(0);
+    // The wrapper keeps the comment id for scroll-into-view, and exactly one
+    // open thread wears the current rim.
+    expect(cards().length).toBeGreaterThanOrEqual(hosted.length);
+    expect(host.querySelectorAll(".rl-fb-hosted[data-current]").length).toBeLessThanOrEqual(1);
+    expect(host.querySelector(".rl-fb-composer-wrap")).toBeNull();
+  });
+  it("shows the host's empty note when nothing is marked", async () => {
+    await render(panel({ session: withComments([]), composer: null, empty: createElement("em", null, "Select text in the plan to add a comment."), renderCard: () => null }));
+    expect(text()).toContain("Select text in the plan to add a comment.");
+    expect(text()).not.toContain("Nothing marked yet");
+  });
+});

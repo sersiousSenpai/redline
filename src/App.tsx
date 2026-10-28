@@ -189,6 +189,8 @@ const SidebarTabStrip = lazy(() => import("./components/SidebarTabStrip").then((
 // The right rail's chrome and its collapsed edge strip (W4): one lazy chunk.
 const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RightRail })));
 const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
+// The rail's Discussion piles (W4): the plan's threads grouped by who owes what.
+const FeedbackPanel = lazy(() => import("./components/plan/FeedbackPanel"));
 // The table-of-contents rail renders only once opened (about 6 kB, W1).
 const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
 // Classic's folder tab only, so its own chunk.
@@ -6167,6 +6169,11 @@ function App() {
   const activeRunState =
     summaries.find((s) => s.sessionId === session?.sessionId)?.runState ?? null;
 
+  // A highlight clicked in the plan brings its thread forward: the rail
+  // turns to Discussion (it never opens a folded rail — the card waits there).
+  useEffect(() => {
+    if (focusedCommentId && railKindRef.current === "plan") selectRailTab("discussion");
+  }, [focusedCommentId, focusNonce, selectRailTab]);
   // Bidirectional focus: when the editor (or anything else) sets a focused
   // comment id, scroll the matching sidebar card into view. The editor side
   // is handled by PlanEditor's own effect on `focusedCommentId`.
@@ -9031,6 +9038,8 @@ function App() {
     [railWaiting, pendingComments.length],
   );
   const railAttention = useMemo(() => ({ discussion: railWaiting > 0 }), [railWaiting]);
+  // The version the plan pane shows: the Discussion piles are read on it.
+  const railShownVersion = isViewingHistorical && viewedRevision ? viewedRevision.versionNumber : (latest?.versionNumber ?? 1);
   // The rail's other tabs. Talk is still the conversation dock's column
   // beside the pane until the dock's body moves in; Files and Changes land
   // with their own bodies.
@@ -11050,123 +11059,100 @@ function App() {
               setPaneCollapsed(true);
             }}
           >
-          {railTab !== "discussion" ? railOtherBody : (
-          <div className="rl-rail-scroll rl-thin-scroll-y">
-          {(discussionContext === "review" || (reviewOpen && planDiscussionAvailable)) && (
-          <div
-            className="rl-chrome-label sticky top-0 z-10 px-4 py-2 border-b flex items-center justify-between gap-2"
-            style={{
-              borderColor: "var(--color-rule)",
-              background: "var(--color-paper)",
-            }}
-          >
-            <span className="flex items-center gap-2">
-              {discussionContext === "review" && (
-                <span className="rl-review-source-chip normal-case" style={{ fontWeight: 500 }}>
-                  ⌗ code review
-                </span>
-              )}
-            </span>
-            <span className="flex items-center gap-2">
-              {/* Split-screening a plan and a review: the sidecar can point at
-                  either — this is the pin. */}
-              {reviewOpen && planDiscussionAvailable && (
-                <span className="rl-review-seg" role="group" aria-label="Discussion context">
-                  <button
-                    type="button"
-                    data-active={discussionContext === "plan" ? "" : undefined}
-                    onClick={() => setDiscussionPinned("plan")}
-                  >
-                    Plan
-                  </button>
-                  <button
-                    type="button"
-                    data-active={discussionContext === "review" ? "" : undefined}
-                    onClick={() => setDiscussionPinned("review")}
-                  >
-                    Review
-                  </button>
-                </span>
-              )}
-              {/* Secondary count: keep it on one line, and drop it entirely when
-                  the pane is too narrow to hold it (otherwise it wraps and looks
-                  squished under "DISCUSSION"). */}
-              {discussionContext === "plan" &&
-                sidebarTab.kind === "sessions" &&
-                paneComments.length > 0 &&
-                (paneFullscreen || paneWidth >= 340) && (
-                  <span
-                    className="font-mono normal-case"
+          {railTab !== "discussion" ? railOtherBody : discussionContext === "plan" && sidebarTab.kind === "sessions" && session && planDiscussable ? (
+            // "Refinement": the plan's threads in four piles — Waiting on you,
+            // Your marks, With Claude, Resolved — each the classic comment
+            // card with App's own handlers, under the composer, the revising
+            // notice and the action-item chips.
+            <DiscussionZoomContext.Provider value={adjustDiscussionZoom}>
+            <Suspense fallback={null}>
+            <FeedbackPanel
+              session={session}
+              viewingVersion={railShownVersion}
+              onJumpToAnchor={(_anchorId, commentId) => {
+                if (commentId) focusComment(commentId);
+              }}
+              onOpenVersion={(v) => setViewedVersionNumber(v === latest?.versionNumber ? null : v)}
+              focusedCommentId={focusedCommentId}
+              composer={null}
+              lead={
+                <>
+                {commentComposer}
+            {waiting && (
+                  <div
+                    className="rounded-md border p-3"
                     style={{
-                      fontSize: "10px",
-                      letterSpacing: "0.04em",
+                      borderColor: "var(--color-rule)",
+                      background: "var(--color-bg-elevated)",
                       color: "var(--color-ink-muted)",
-                      fontWeight: 500,
-                      whiteSpace: "nowrap",
+                      fontSize: "12px",
+                      lineHeight: 1.5,
                     }}
                   >
-                    {pendingComments.length} pending · {paneComments.length}{" "}
-                    {isViewingHistorical ? "on this version" : "total"}
-                  </span>
+                    {waitingAsk
+                      ? "Questions sent. Claude is answering in the background — "
+                      : "Feedback sent. Claude is revising in the background — "}
+                    <button
+                      type="button"
+                      onClick={revealTerm}
+                      style={{
+                        color: "var(--color-ink)",
+                        cursor: "pointer",
+                        textDecoration: "underline",
+                      }}
+                    >
+                      open the terminal to watch
+                    </button>
+                  </div>
                 )}
-            </span>
-          </div>
-          )}
-          <div className="p-4 flex flex-col gap-3">
-            {/* The sidecar pertains to what's on screen: the code review's
-                annotations/questions when the review context is active, else
-                the plan session's comments. Same pane, same fullscreen/zoom
-                machinery — different grounding. */}
-            {discussionContext === "review" ? (
-              <Suspense fallback={null}>
-                <ReviewDiscussionPane review={codeReview} />
-              </Suspense>
-            ) : sidebarTab.kind !== "sessions" ? (
-              <div
-                className="italic"
-                style={{
-                  fontSize: "12px",
-                  color: "var(--color-ink-muted)",
-                  lineHeight: 1.5,
-                }}
-              >
-                Comments belong to a plan session. Switch to{" "}
-                <strong style={{ color: "var(--color-ink)" }}>Sessions</strong>{" "}
-                to see a plan's discussion.
-              </div>
-            ) : (
-              <>
-            {commentComposer}
-            {waiting && (
-              <div
-                className="rounded-md border p-3"
-                style={{
-                  borderColor: "var(--color-rule)",
-                  background: "var(--color-bg-elevated)",
-                  color: "var(--color-ink-muted)",
-                  fontSize: "12px",
-                  lineHeight: 1.5,
-                }}
-              >
-                {waitingAsk
-                  ? "Questions sent. Claude is answering in the background — "
-                  : "Feedback sent. Claude is revising in the background — "}
-                <button
-                  type="button"
-                  onClick={revealTerm}
-                  style={{
-                    color: "var(--color-ink)",
-                    cursor: "pointer",
-                    textDecoration: "underline",
-                  }}
-                >
-                  open the terminal to watch
-                </button>
-              </div>
-            )}
-            {paneComments.length === 0 &&
-              !composing &&
-              (() => {
+            {/* Pin "Action items" (Claude's resolutions awaiting accept/
+                    reopen) at the top of the pane so the affordance is visible
+                    even when the "Claude is revising" banner sits above the
+                    regular cards. Clicking a pill focuses + scrolls to the card
+                    with the buttons. */}
+                {(() => {
+                  // The action chips: each answer waiting on you as an amber
+                  // pill (a click brings its card up, on the version it was
+                  // made on), and the marks riding the next Send.
+                  const actionItems = threadComments.filter(
+                    (c) => c.status === "resolved",
+                  );
+                  if (actionItems.length === 0 && !canSubmit) return null;
+                  return (
+                    <div className="rl-fb-chips" aria-label="Action items">
+                      {actionItems.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className="rl-fb-chip"
+                          data-tone="waiting"
+                          onClick={() => {
+                            // Clean slate: the card may live on an earlier
+                            // version — navigate there before focusing it.
+                            const v = commentVersionById.get(c.id);
+                            if (v !== undefined) {
+                              setViewedVersionNumber(
+                                v === latest?.versionNumber ? null : v,
+                              );
+                            }
+                            focusComment(c.id);
+                          }}
+                          title={`Jump to ${c.id} — Accept or Reopen the resolution`}
+                        >
+                          {c.type === "question" ? "Answer" : "Accept"} {c.id}
+                        </button>
+                      ))}
+                      {canSubmit && (
+                        <button type="button" className="rl-fb-chip" onClick={() => void submitReview()} disabled={busy} title="Send your marks to the agent">
+                          Send {pendingComments.length} {pendingComments.length === 1 ? "mark" : "marks"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+                </>
+              }
+              empty={composing ? null : (() => {
                 // Clean slate: the new revision's pane starts empty. If the
                 // prior round's discussions live on an earlier version, point
                 // there instead of pretending nothing happened.
@@ -11222,87 +11208,24 @@ function App() {
                   </div>
                 );
               })()}
-            {/* Pin "Action items" (Claude's resolutions awaiting accept/
-                reopen) at the top of the pane so the affordance is visible
-                even when the "Claude is revising" banner sits above the
-                regular cards. Clicking a pill focuses + scrolls to the card
-                with the buttons. */}
-            {(() => {
-              const actionItems = threadComments.filter(
-                (c) => c.status === "resolved",
-              );
-              if (actionItems.length === 0) return null;
-              return (
-                <div
-                  className="rounded-md border p-2"
-                  style={{
-                    borderColor: "var(--color-rule)",
-                    background: "var(--color-bg-elevated)",
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                      color: "var(--color-info)",
-                      marginBottom: "6px",
-                    }}
-                  >
-                    Action items · {actionItems.length}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {actionItems.map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => {
-                          // Clean slate: the card may live on an earlier
-                          // version — navigate there before focusing it.
-                          const v = commentVersionById.get(c.id);
-                          if (v !== undefined) {
-                            setViewedVersionNumber(
-                              v === latest?.versionNumber ? null : v,
-                            );
-                          }
-                          focusComment(c.id);
-                        }}
-                        title={`Jump to ${c.id} — Accept or Reopen the resolution`}
-                        className="font-mono rounded px-1.5 py-0.5"
-                        style={{
-                          background: "var(--color-anchor-bg)",
-                          color: "var(--color-anchor-text)",
-                          fontSize: "10px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {c.id}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
-            <DiscussionZoomContext.Provider value={adjustDiscussionZoom}>
-            {/* One boundary around the LIST, not one per card: a per-card
-                Suspense would let the pane pop in a card at a time. Quiet
-                fallback — a spinner where comments are about to appear reads
-                as a glitch, and the chunk is local. */}
-            <Suspense fallback={null}>
-            {paneComments.map((c) => (
+              renderCard={(p) => (
               <CommentCard
-                key={`${session?.sessionId ?? ""}-${c.id}`}
+                key={`${session?.sessionId ?? ""}-${p.comment.id}`}
                 sessionId={session?.sessionId ?? ""}
                 backend={session?.backend ?? null}
-                comment={c}
-                focused={focusedCommentId === c.id}
-                autoOpen={autoOpenCommentId === c.id}
+                comment={p.comment}
+                focused={focusedCommentId === p.comment.id}
+                autoOpen={autoOpenCommentId === p.comment.id}
                 onAutoOpenConsumed={clearAutoOpen}
-                autoDiscuss={autoDiscussCommentId === c.id}
+                autoDiscuss={autoDiscussCommentId === p.comment.id}
                 onAutoDiscussConsumed={clearAutoDiscuss}
                 onViewResearch={viewResearch}
-                onSelect={commentCallbacks.onSelect}
+                onSelect={p.version === railShownVersion ? commentCallbacks.onSelect : (id: string) => {
+                  // A thread from an earlier round is read where it was
+                  // written: that version first, then the comment on it.
+                  setViewedVersionNumber(p.version === latest?.versionNumber ? null : p.version);
+                  focusComment(id);
+                }}
                 onDelete={commentCallbacks.onDelete}
                 onUpdate={commentCallbacks.onUpdate}
                 onAccept={commentCallbacks.onAccept}
@@ -11311,10 +11234,73 @@ function App() {
                 onPromote={commentCallbacks.onPromote}
                 submitInFlight={busy}
               />
-            ))}
+              )}
+            />
             </Suspense>
             </DiscussionZoomContext.Provider>
-              </>
+          ) : (
+          <div className="rl-rail-scroll rl-thin-scroll-y">
+          {(discussionContext === "review" || (reviewOpen && planDiscussionAvailable)) && (
+          <div
+            className="rl-chrome-label sticky top-0 z-10 px-4 py-2 border-b flex items-center justify-between gap-2"
+            style={{
+              borderColor: "var(--color-rule)",
+              background: "var(--color-paper)",
+            }}
+          >
+            <span className="flex items-center gap-2">
+              {discussionContext === "review" && (
+                <span className="rl-review-source-chip normal-case" style={{ fontWeight: 500 }}>
+                  ⌗ code review
+                </span>
+              )}
+            </span>
+            <span className="flex items-center gap-2">
+              {/* Split-screening a plan and a review: the sidecar can point at
+                  either — this is the pin. */}
+              {reviewOpen && planDiscussionAvailable && (
+                <span className="rl-review-seg" role="group" aria-label="Discussion context">
+                  <button
+                    type="button"
+                    data-active={discussionContext === "plan" ? "" : undefined}
+                    onClick={() => setDiscussionPinned("plan")}
+                  >
+                    Plan
+                  </button>
+                  <button
+                    type="button"
+                    data-active={discussionContext === "review" ? "" : undefined}
+                    onClick={() => setDiscussionPinned("review")}
+                  >
+                    Review
+                  </button>
+                </span>
+              )}
+            </span>
+          </div>
+          )}
+          <div className="p-4 flex flex-col gap-3">
+            {discussionContext === "review" ? (
+              <Suspense fallback={null}>
+                <ReviewDiscussionPane review={codeReview} />
+              </Suspense>
+            ) : sidebarTab.kind !== "sessions" ? (
+              <div
+                className="italic"
+                style={{
+                  fontSize: "12px",
+                  color: "var(--color-ink-muted)",
+                  lineHeight: 1.5,
+                }}
+              >
+                Comments belong to a plan session. Switch to{" "}
+                <strong style={{ color: "var(--color-ink)" }}>Sessions</strong>{" "}
+                to see a plan's discussion.
+              </div>
+            ) : (
+              <div className="italic" style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
+                {railKind === "drafter" ? "The draft's comments live in its margin." : "A plan's discussion shows here once the plan arrives."}
+              </div>
             )}
           </div>
           </div>
