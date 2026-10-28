@@ -207,6 +207,13 @@ impl Pump {
         }
     }
 
+    /// The newest `max` bytes of output, as the replay ring holds them.
+    fn tail(&self, max: usize) -> Vec<u8> {
+        let output = lock_ok(&self.inner);
+        let skip = output.replay.len().saturating_sub(max);
+        output.replay.iter().skip(skip).copied().collect()
+    }
+
     fn attach(
         &self,
         channel: Channel<Response>,
@@ -1105,6 +1112,63 @@ pub fn pty_detach(state: tauri::State<'_, PtyState>, id: String, attachment_id: 
     }
 }
 
+/// How much of a terminal's newest output `pty_screen_tail` reads: a CLI's
+/// prompt and the plan box above it fit with room to spare.
+const SCREEN_TAIL_BYTES: usize = 12 * 1024;
+
+/// A terminal's newest output with its escapes stripped: what the CLI last
+/// drew, for a prompt of its own that no hook carried to the stage (the
+/// Agent pane reads its "Ready to code?" this way, `convo/proceedPrompt`).
+/// A TUI's cursor moves between words come out as nothing; the reader
+/// matches without spaces. Empty for a terminal that is gone. One lock and
+/// a copy of at most 12 KB, so it stays on the main thread.
+#[tauri::command]
+pub fn pty_screen_tail(state: tauri::State<'_, PtyState>, id: String) -> String {
+    let Some(session) = session_of(&state, &id) else { return String::new() };
+    let output = lock_ok(&session).output.clone();
+    screen_text(&output.tail(SCREEN_TAIL_BYTES))
+}
+
+/// Raw TUI output as text: CSI, OSC and two-byte escapes out, carriage
+/// returns as line breaks, invalid UTF-8 (a cut at the ring's start)
+/// replaced.
+fn screen_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for d in chars.by_ref() {
+                        if ('@'..='~').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST.
+                Some(']') => {
+                    while let Some(d) = chars.next() {
+                        if d == '\u{7}' {
+                            break;
+                        }
+                        if d == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => out.push('\n'),
+            c if c.is_control() && c != '\n' && c != '\t' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Registry membership — the handoff's spawn probe.
 #[tauri::command]
 pub fn pty_is_live(state: tauri::State<'_, PtyState>, id: String) -> bool {
@@ -1518,6 +1582,17 @@ mod tests {
             Ok(())
         });
         (channel, bytes)
+    }
+
+    #[test]
+    fn the_screen_tail_is_the_newest_output_as_text() {
+        let raw = b"\x1b[?25l\x1b]0;title\x07\x1b[1mWould\x1b[1Cyou\x1b[1Clike\x1b[1Cto\x1b[1Cproceed?\x1b[22m\r\n\x1b[38;5;153m\xe2\x9d\xaf\x1b[1C1.\x1b[1CYes\x1b[39m\r\n";
+        assert_eq!(screen_text(raw), "Wouldyouliketoproceed?\n\n❯1.Yes\n\n");
+        let pump = Pump::new(Arc::new(AtomicBool::new(true)));
+        pump.push(b"old output ");
+        pump.push(b"newest");
+        assert_eq!(pump.tail(6), b"newest");
+        assert_eq!(pump.tail(1_000), b"old output newest");
     }
 
     #[test]

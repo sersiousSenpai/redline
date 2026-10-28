@@ -344,6 +344,11 @@ impl ClaimFlags {
 struct HookResponse {
     #[serde(rename = "hookSpecificOutput")]
     hook_specific_output: HookSpecificOutput,
+    /// The reviewer's go-ahead to BUILD (Approve & build, an Ambient
+    /// auto-approve), not a pass-through allow: `handle_plan_core` answers it
+    /// with the call's own input as `updatedInput` (`answer_for_build`).
+    #[serde(skip)]
+    build_approval: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -354,6 +359,10 @@ struct HookSpecificOutput {
     permission_decision: &'static str,
     #[serde(rename = "permissionDecisionReason")]
     permission_decision_reason: String,
+    /// The tool input the decision stands for. On ExitPlanMode it is what
+    /// makes an allow the person's answer: see `answer_for_build`.
+    #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
+    updated_input: Option<Value>,
 }
 
 fn allow_response(reason: impl Into<String>) -> HookResponse {
@@ -362,16 +371,51 @@ fn allow_response(reason: impl Into<String>) -> HookResponse {
             hook_event_name: "PreToolUse",
             permission_decision: "allow",
             permission_decision_reason: reason.into(),
+            updated_input: None,
         },
+        build_approval: false,
     }
+}
+
+/// The reviewer approved the plan to be built: an allow `handle_plan_core`
+/// completes with the call's own input (`answer_for_build`).
+fn approval_response(reason: impl Into<String>) -> HookResponse {
+    HookResponse { build_approval: true, ..allow_response(reason) }
+}
+
+/// ExitPlanMode needs the person on claude 2.1.312: a PreToolUse `allow`
+/// alone still raises the CLI's own "Ready to code? Would you like to
+/// proceed?" prompt — and so does a PermissionRequest `allow` — unless the
+/// decision carries `updatedInput` (the CLI then logs "Hook satisfied user
+/// interaction for ExitPlanMode via updatedInput" and builds). Measured
+/// 2026-10-28 against the installed CLI with the convo-mirror rig's PTY and
+/// hooks (fresh session and `--resume`, haiku): allow alone → the prompt
+/// stays and no answer dismisses it but a person's; allow + the call's own
+/// `tool_input` → no prompt, the tool result in 0.2 s, no PermissionRequest
+/// at all. The CLI reads the plan from the plan file, not from this input
+/// (a replaced `plan` was ignored), so the input goes back as it came.
+/// Approve & build used to end in that prompt; the walk's fresh Approve only
+/// went through because a queued send's Enter answered it, and after a
+/// Restore nothing did. A pass-through allow (Paused, a fork, a refused
+/// restore) is not the person's answer and keeps the CLI's own prompt.
+fn answer_for_build(mut response: HookResponse, payload: &Value) -> HookResponse {
+    if response.build_approval && response.hook_specific_output.permission_decision == "allow" {
+        let exit_plan = payload.get("tool_name").and_then(Value::as_str) == Some("ExitPlanMode");
+        if let Some(input) = payload.get("tool_input").filter(|input| exit_plan && input.is_object()) {
+            response.hook_specific_output.updated_input = Some(input.clone());
+        }
+    }
+    response
 }
 
 fn deny_response(reason: impl Into<String>) -> HookResponse {
     HookResponse {
+        build_approval: false,
         hook_specific_output: HookSpecificOutput {
             hook_event_name: "PreToolUse",
             permission_decision: "deny",
             permission_decision_reason: reason.into(),
+            updated_input: None,
         },
     }
 }
@@ -2352,7 +2396,7 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
                         tracing::info!(session_id = %session_id, "Ambient: decision window elapsed — auto-approving");
                         app_state.store.set_status(&session_id, SessionStatus::Approved);
                         asks::note_plan_approved(&session_id);
-                        allow_response(
+                        approval_response(
                             "Auto-approved (Ambient mode — the plan was not opened for review within the decision window).",
                         )
                     }
@@ -2363,7 +2407,7 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
         }
     };
 
-    response
+    answer_for_build(response, &payload)
 }
 
 /// How many dated DB snapshots to retain under `backups/`.
@@ -7472,7 +7516,7 @@ async fn approve_plan(
     // The CLI asks its own "proceed?" after the hook's allow; Approve answers
     // that too (asks.rs), so Approve & build never ends in the native prompt.
     asks::note_plan_approved(&session_id);
-    let _ = tx.send(allow_response("Reviewer approved via Redline."));
+    let _ = tx.send(approval_response("Reviewer approved via Redline."));
     store.set_attach_state(&session_id, AttachState::Idle);
     tracing::info!(session_id = %session_id, "approve_plan fired");
     // "Approve & build": the same agent is building now. Recording it is what
@@ -11716,6 +11760,7 @@ pub fn run() {
             pty::pty_cwd,
             pty::pty_cwds,
             pty::pty_procs,
+            pty::pty_screen_tail,
             term_attention::term_attention_snapshot,
             term_attention::term_attention_interrupted,
             term_attention::set_attention_badge,

@@ -978,3 +978,15 @@ Not covered here: the real daemon's routes (the listener stood in for them), and
 - Order: an event's offset is the item's ordinal within its turn, inside the turn's range (the UUIDv7 turn id's millisecond × 1024): the same live and in any read. Reads are made whole at their oldest turn (that turn is read by itself) so a page never restarts a turn's ordinals.
 - Items map to the Claude event union; plans come from the `<proposed_plan>` envelope (prose around it stays), feedback from `hookPrompt`, approval from Redline's own hand-off prompt. Approvals are cards answered on the socket (Deny = `cancel`, Always = the request's own offer); the TUI's prompt stays live and `serverRequest/resolved` closes a card answered there. Questions stay in the TUI.
 
+
+## Experiment (n): ExitPlanMode's "Ready to code?" prompt after an allow (2026-10-28, claude 2.1.312)
+
+**Question:** the re-walk's Approve after a Restore ended in the CLI's own "Ready to code? Would you like to proceed?" prompt. Does a PreToolUse `allow` on ExitPlanMode spare it that prompt, and does a PermissionRequest `allow` answer it?
+
+**Rig:** `scripts/verify-convo-mirror.py`'s PTY, private hook server and isolated settings (`--setting-sources project`, haiku), driven in plan mode with a one-line plan; then the same session `--resume`d with `--permission-mode plan` and a positional prompt, as a Redline restore runs it.
+
+- [x] **PreToolUse `allow` alone (fresh and resumed): the prompt shows** and stays; a PermissionRequest fires for ExitPlanMode (`permission_suggestions: null`, `tool_input` = `{plan, planFilePath}`), and its `allow` + `updatedPermissions` **without `updatedInput` is ignored** — only a person's answer dismisses the prompt. (The walk's fresh Approve went through only because a queued send's Enter, typed as the hold released, answered the prompt and its words were lost.)
+- [x] **PreToolUse `allow` + `updatedInput` = the call's own `tool_input`: no prompt** and no PermissionRequest; the tool result lands 0.2 s after the hook (fresh and resumed). The CLI logs "Hook satisfied user interaction for ExitPlanMode via updatedInput". A replaced `plan` in `updatedInput` is ignored: the plan comes from the plan file.
+- [x] **PermissionRequest `allow` + `updatedInput`** answers the prompt (0.2 s), with its `setMode` applied (`acceptEdits`).
+
+**Design consequences:** the review hook's approval (Approve & build, Ambient auto-approve) carries the payload's `tool_input` as `updatedInput` (lib.rs `answer_for_build`); pass-through allows (Paused, a fork, a refused restore) do not, so the CLI keeps its own prompt there. The PermissionRequest answers for ExitPlanMode (`asks.rs`) carry it too. The Agent pane reads the prompt off the terminal (`pty_screen_tail`, `convo/proceedPrompt.ts`) for any CLI that shows it anyway.

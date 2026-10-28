@@ -24,20 +24,20 @@
 //!   for an hour.
 //! - A card arms only while the terminal is bound to the asking session and
 //!   a conversation is subscribed (`convo::open_ask`); otherwise `{}`.
-//! - ExitPlanMode's PreToolUse hook (`/v1/plan`) owns the plan. A PreToolUse
-//!   `allow` does NOT spare it the CLI's own "Ready to code? Would you like to
-//!   proceed?" dialog (every Approve in the walk's transcripts was followed
-//!   by a `user_temporary` accept typed in the TUI): the PermissionRequest
-//!   that comes with that dialog is answered here. Approved in Redline a
-//!   moment before ([`note_plan_approved`]), it is allowed at once, with the
-//!   payload's own mode switch (the dialog's first choice), so Approve ends
-//!   in a build and never in the native prompt. Otherwise it becomes a card
-//!   ("Ready to build this plan?"), so the stage is never left with a bare
-//!   "needs you". A PermissionRequest for AskUserQuestion (it fires when the
-//!   question was released to the TUI) passes through.
-//!   UNVERIFIED on the rig: that PermissionRequest fires for ExitPlanMode on
-//!   the current CLI and that `allow` + `setMode` dismisses this dialog (S4
-//!   measured it on Bash). `scripts/verify-convo-mirror.py` is the check.
+//! - ExitPlanMode's PreToolUse hook (`/v1/plan`) owns the plan, and its
+//!   approval now carries the call's own input as `updatedInput`, which is
+//!   what spares it the CLI's "Ready to code? Would you like to proceed?"
+//!   prompt (lib.rs `answer_for_build`). Measured 2026-10-28 on claude
+//!   2.1.312 (fresh and `--resume`): an `allow` WITHOUT `updatedInput` —
+//!   PreToolUse or PermissionRequest alike — leaves that prompt up for a
+//!   person; WITH it the prompt never shows. So the PermissionRequest that
+//!   comes with the prompt (when something else raised it) is answered here
+//!   with `updatedInput` too: approved in Redline a moment before
+//!   ([`note_plan_approved`]) it is allowed at once, with the payload's own
+//!   mode switch when it offers one (it offered none on 2.1.312); otherwise
+//!   it becomes a card ("Ready to build this plan?") whose Yes carries the
+//!   input as well. A PermissionRequest for AskUserQuestion (it fires when
+//!   the question was released to the TUI) passes through.
 //!
 //! A hold that ends without a stage answer (the connection dropped, the
 //! hold ran out) closes its card through [`AskGuard`], modelled on the
@@ -268,11 +268,27 @@ fn take_plan_approved(session_id: &str) -> bool {
 /// The reply that lets an approved plan's ExitPlanMode run: allow, switching
 /// to the mode the dialog's first choice would (the payload's own `setMode`
 /// suggestion), or accept-edits when the payload offers none.
-fn plan_approved_reply(suggestions: Option<&[Value]>) -> Value {
+/// `updatedInput` (the request's own input) is what makes the allow the
+/// person's answer on claude 2.1.312 (module note); without it the CLI
+/// ignores the allow and the prompt stays.
+fn plan_approved_reply(suggestions: Option<&[Value]>, input: &Value) -> Value {
     let set_mode = suggestions
         .and_then(|all| all.iter().find(|s| s.get("type").and_then(Value::as_str) == Some("setMode")).cloned())
         .unwrap_or_else(|| json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"}));
-    json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedPermissions": [set_mode]}}})
+    json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": input, "updatedPermissions": [set_mode]}}})
+}
+
+/// A permission card's allow: ExitPlanMode's carries its input back as
+/// `updatedInput`, or the CLI keeps its own prompt up (module note).
+fn allow_decision(pending: &PendingAsk, always: bool) -> Value {
+    let mut decision = json!({"behavior": "allow"});
+    if always {
+        decision["updatedPermissions"] = json!(pending.ask.suggestions.clone().unwrap_or_default());
+    }
+    if pending.ask.tool_name == "ExitPlanMode" && pending.input.is_object() {
+        decision["updatedInput"] = pending.input.clone();
+    }
+    decision
 }
 
 /// The hook's reply for a stage answer, and the outcome it records. The
@@ -294,11 +310,8 @@ pub(crate) fn reply(pending: &PendingAsk, answer: &AskAnswer) -> Result<(Value, 
     let permission = |decision: Value| json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}});
     Ok(match (question, answer) {
         (_, AskAnswer::Terminal) => (json!({}), "terminal"),
-        (false, AskAnswer::Allow) => (permission(json!({"behavior": "allow"})), "allow"),
-        (false, AskAnswer::Always) => (
-            permission(json!({"behavior": "allow", "updatedPermissions": pending.ask.suggestions.clone().unwrap_or_default()})),
-            "always",
-        ),
+        (false, AskAnswer::Allow) => (permission(allow_decision(pending, false)), "allow"),
+        (false, AskAnswer::Always) => (permission(allow_decision(pending, true)), "always"),
         (false, AskAnswer::Deny { message }) => {
             let decision = match message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
                 Some(message) => json!({"behavior": "deny", "message": message}),
@@ -360,7 +373,7 @@ pub(crate) async fn handle_ask(
     }
     if request.is_approved_plan_exit() {
         tracing::info!(session_id = %request.session_id, "answering the CLI's proceed dialog for a plan approved in Redline");
-        return Json(plan_approved_reply(request.suggestions.as_deref()));
+        return Json(plan_approved_reply(request.suggestions.as_deref(), &request.input));
     }
     let app = app_state.app_handle.clone();
     let ask_id = uuid::Uuid::new_v4().to_string();
@@ -480,13 +493,30 @@ mod tests {
         let bash = parse(json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "session_id": "asks-test-bash"}));
         assert!(!bash.is_approved_plan_exit());
         assert!(!exit("").is_approved_plan_exit());
-        // The payload's own mode switch, else accept-edits.
+        // The payload's own mode switch, else accept-edits; and the call's own
+        // input back as `updatedInput`, without which claude 2.1.312 ignores
+        // the allow and keeps its "Ready to code?" prompt up.
+        let input = json!({"plan": "# Plan", "planFilePath": "/p/plan.md"});
         let offered = [json!({"type": "addDirectories", "directories": ["/x"]}), json!({"type": "setMode", "mode": "auto", "destination": "session"})];
         assert_eq!(
-            plan_approved_reply(Some(&offered)),
-            json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedPermissions": [{"type": "setMode", "mode": "auto", "destination": "session"}]}}})
+            plan_approved_reply(Some(&offered), &input),
+            json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": {"plan": "# Plan", "planFilePath": "/p/plan.md"}, "updatedPermissions": [{"type": "setMode", "mode": "auto", "destination": "session"}]}}})
         );
-        assert_eq!(plan_approved_reply(None)["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["mode"], "acceptEdits");
+        assert_eq!(plan_approved_reply(None, &input)["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["mode"], "acceptEdits");
+    }
+
+    #[test]
+    fn the_ready_to_build_cards_yes_carries_the_plan_exits_input() {
+        let payload = json!({"hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode", "session_id": "s", "tool_input": {"plan": "# Plan", "planFilePath": "/p/plan.md"}});
+        let request = Request::from_payload(&payload).unwrap();
+        let (tx, _rx) = oneshot::channel();
+        let exit = PendingAsk { ask: request.card("a1".into()), tool_use_id: None, input: request.input.clone(), reply: Replier::Hook(tx) };
+        let (yes, outcome) = reply(&exit, &AskAnswer::Allow).unwrap();
+        assert_eq!(outcome, "allow");
+        assert_eq!(yes["hookSpecificOutput"]["decision"]["updatedInput"]["planFilePath"], "/p/plan.md");
+        // Any other tool's allow is just an allow.
+        let (bash, _) = pending(PERMISSION);
+        assert!(reply(&bash, &AskAnswer::Allow).unwrap().0["hookSpecificOutput"]["decision"].get("updatedInput").is_none());
     }
 
     #[test]

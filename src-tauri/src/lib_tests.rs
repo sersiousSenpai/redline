@@ -1923,6 +1923,28 @@ fn codex_approval_finishes_the_planning_turn_and_revision_continues_it() {
     assert_eq!(claude["hookSpecificOutput"]["permissionDecision"], "allow");
 }
 
+/// Approve & build answers ExitPlanMode with the call's own input: on claude
+/// 2.1.312 an allow without `updatedInput` leaves the CLI's "Ready to code?"
+/// prompt up (measured, see `answer_for_build`). Only the reviewer's
+/// go-ahead carries it; a pass-through allow and a denial never do.
+#[test]
+fn a_build_approval_carries_the_plan_exits_input_and_nothing_else_does() {
+    let payload = json!({"tool_name": "ExitPlanMode", "tool_input": {"plan": "# Plan", "planFilePath": "/p/plan.md"}});
+    let approved = serde_json::to_value(answer_for_build(approval_response("Reviewer approved via Redline."), &payload)).unwrap();
+    assert_eq!(approved["hookSpecificOutput"]["permissionDecision"], "allow");
+    assert_eq!(approved["hookSpecificOutput"]["updatedInput"], json!({"plan": "# Plan", "planFilePath": "/p/plan.md"}));
+    assert!(approved.get("build_approval").is_none() && approved["hookSpecificOutput"].get("build_approval").is_none(), "the flag is ours, never the wire's");
+    let passed = serde_json::to_value(answer_for_build(allow_response("Redline is paused"), &payload)).unwrap();
+    assert!(passed["hookSpecificOutput"].get("updatedInput").is_none(), "a pass-through allow keeps the CLI's own prompt");
+    let denied = serde_json::to_value(answer_for_build(deny_response("revise"), &payload)).unwrap();
+    assert!(denied["hookSpecificOutput"].get("updatedInput").is_none());
+    let other = json!({"tool_name": "Bash", "tool_input": {"command": "ls"}});
+    let not_a_plan = serde_json::to_value(answer_for_build(approval_response("ok"), &other)).unwrap();
+    assert!(not_a_plan["hookSpecificOutput"].get("updatedInput").is_none());
+    // Codex's Stop answer is unchanged by it.
+    assert_eq!(codex_stop_response(answer_for_build(approval_response("ok"), &payload)), json!({}));
+}
+
 // --- T4.2: landing a plan closes the work it opened ---------------------
 
 /// `work_items` carried 595 rows and had never closed one — every close
