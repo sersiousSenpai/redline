@@ -2,13 +2,13 @@
 // Copyright 2026 Yusuf Al-Bazian
 //! Entry of the full-App QA fixture: set the world up, then run the real
 //! `src/main.tsx` — the same module, so App mounts exactly as it does in the
-//! shipped window (theme pre-paint, shell stamp, StrictMode, the root error
+//! shipped window (theme pre-paint, StrictMode, the root error
 //! boundary).
 //!
-//! Query parameters (scripts/flow-app-visual-qa.mjs sets them):
-//! - `board`: 4a | 4b | 4c | 4d | 5a, the seed data (scenarios.ts).
-//! - `shell`: classic | flow, written to `redline.shell` before App loads,
-//!   because `shellFlag()` reads it once per page load.
+//! Query parameters (scripts/app-visual-qa.mjs sets them):
+//! - `board`: a scenario id or a scene name (scenarios.ts: `workbench` is
+//!   the default; `home`, `plan`, `agent`… alias it; `4a`…`5a` are the
+//!   original design-board seeds).
 //! - `theme`: any theme name, written to `redline.theme` likewise.
 //! - `motion`: `on` keeps animations; default `off` collapses every CSS
 //!   animation and transition to 1ms, so a capture never lands mid-flight
@@ -35,8 +35,7 @@ for (const [key, value] of Object.entries(scenario.storage)) {
 for (const [key, value] of Object.entries(scenario.session)) {
   sessionStorage.setItem(key, JSON.stringify(value));
 }
-// Plain strings, not JSON: shellFlag.ts and applyTheme.ts read them raw.
-localStorage.setItem("redline.shell", query.get("shell") === "flow" ? "flow" : "classic");
+// A plain string, not JSON: applyTheme.ts reads it raw.
 localStorage.setItem("redline.theme", query.get("theme") ?? "aurora");
 // The doors-open boot choreography plays once per tab; mark it played.
 sessionStorage.setItem("redline.bootPlayed", "1");

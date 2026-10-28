@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! The five Flow design boards (4a Start, 4b Claude plans, 4c You redline,
-//! 4d Managing · Tools, 5a Review) as backend seed data for the full-App QA
-//! fixture. Every visible string is transcribed verbatim from the boards
-//! (`~/redline-wt/flow-design/b4a.png` … `b5a.png`) and the design source
-//! (`flow.html`). Where a board implies data it never shows (the two reads
-//! folded into "and 2 more", the nine sessions behind "Show 9 more"), the
-//! filler is marked as such and never reaches the captured frame.
+//! Seed data for the full-App QA fixture (fixtures/app-qa), consumed by
+//! scripts/app-visual-qa.mjs through `scenarioFor(board)`.
+//!
+//! Scenario ids. `workbench` is the one the workbench walk boots: the DIN
+//! project with its two approved plans, the roadmap plan under review with
+//! its terminal's finished conversation (so the Agent tab has a thread), a
+//! companion chat, and NO held session, so boot lands on Home's door and the
+//! walk reaches the plan by selecting its sidebar row. Every scene name of
+//! the walk (`home`, `door-tab`, `plan`, `agent`, `browser`, `sidebar`)
+//! aliases it (`SCENE_ALIASES`), so `?board=<scene>` always seeds the same
+//! world. The original design-board ids `4a` … `5a` are kept as they were
+//! (1 Start, 2 Claude plans, 3 You redline, Managing · Tools, Review) for
+//! anyone still wanting those states; nothing in the walk uses them.
 //!
 //! The model catalog answers "Opus 4.5". The live app must read the model
-//! name from the catalog (deviation 4 of the plan); this catalog is a fake,
-//! so naming its model after the boards' copy lets a capture match the board
-//! verbatim while still proving the chip reads the catalog.
+//! name from the catalog; this catalog is a fake, so the chip reading it is
+//! what a capture proves.
 //!
 //! Times are pinned: the page's clock is frozen at `NOW` (main.tsx), and the
 //! capture runs in America/Los_Angeles, so "1m 12s", "2m 04s", "2h ago" and
-//! the Oct 14 / Oct 15 version dates come out exactly as drawn.
+//! the Oct 14 / Oct 15 version dates come out exactly.
 
 import type { ConvoEvent } from "../../src/components/agent/convo/types";
 
@@ -34,7 +39,7 @@ export const DIALCROWN = `${HOME}/projects/dialcrown`;
 export const MACHINE_OS = `${HOME}/projects/machine-os`;
 export const REDLINE = `${HOME}/projects/redline`;
 
-export type BoardId = "4a" | "4b" | "4c" | "4d" | "5a";
+export type BoardId = "workbench" | "4a" | "4b" | "4c" | "4d" | "5a";
 
 /** A comment as `get_session` returns it; `provenance` is an extra field the
  *  Comment type doesn't carry yet (5a's "🎙 voice note" tag). */
@@ -616,7 +621,14 @@ function reviewScenario(): Scenario {
   };
 }
 
+/** The workbench walk's world: the DIN project with the roadmap plan and its
+ *  terminal, nothing held, so boot lands on Home's door. */
+function workbenchScenario(): Scenario {
+  return { ...dinScenario("workbench", "Workbench walk", true), viewport: { width: 1440, height: 900 }, heldSessionId: null, openSessionId: null };
+}
+
 export const SCENARIOS: Record<BoardId, () => Scenario> = {
+  workbench: workbenchScenario,
   "4a": () => dinScenario("4a", "1 · Start", false),
   "4b": () => dinScenario("4b", "2 · Claude plans", false),
   "4c": () => dinScenario("4c", "3 · You redline", true),
@@ -624,7 +636,19 @@ export const SCENARIOS: Record<BoardId, () => Scenario> = {
   "5a": reviewScenario,
 };
 
+/** The walk's scene names (scripts/app-visual-qa.mjs) all seed `workbench`. */
+export const SCENE_ALIASES: Record<string, BoardId> = {
+  home: "workbench",
+  "door-tab": "workbench",
+  plan: "workbench",
+  agent: "workbench",
+  browser: "workbench",
+  sidebar: "workbench",
+};
+
+/** The scenario for `?board=`: an id, a scene alias, else `workbench`. */
 export function scenarioFor(id: string | null): Scenario {
-  const make = SCENARIOS[(id ?? "4a") as BoardId] ?? SCENARIOS["4a"];
+  const key = (id && (SCENE_ALIASES[id] ?? id)) as BoardId | null;
+  const make = (key && SCENARIOS[key]) || SCENARIOS.workbench;
   return make();
 }

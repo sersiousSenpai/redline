@@ -1,0 +1,73 @@
+{
+  "$comment": [
+    "What scripts/app-visual-qa.mjs measures on each scene of the workbench walk.",
+    "A probe finds ONE element: the first `css` candidate that matches a visible element, else the smallest visible element whose whole text is `text` (or starts with it, `textStarts`), searched inside the first visible `within` match when given, then `.closest(up)` when `up` is given.",
+    "`expect` keys: x, y, width, height, maxWidth (<=), minWidth (>=), fontSize, fontWeight, lineHeight, letterSpacing, borderRadius, paddingTop/Right/Bottom/Left, gap: numbers in px (±1, weight exact). `fontFamily~` is a substring test. A probe with no `expect` only has to be found.",
+    "`tokens` maps a computed colour property (color, backgroundColor, borderTopColor, …) to the CSS custom property it must resolve to.",
+    "`copy` lists strings that must appear verbatim in the page's rendered text; `absent` lists strings that must not.",
+    "`all` runs on every scene; the named sets run on their scene."
+  ],
+  "all": [
+    { "name": "tab strip", "css": [".rl-wb-strip"], "expect": { "height": 34, "fontSize": 13 } },
+    { "name": "active tab", "css": [".rl-wb-strip [role=tab][aria-selected=true]"], "expect": { "height": 34 } }
+  ],
+  "home": {
+    "copy": ["Home", "Runs", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps"],
+    "probes": [
+      { "name": "sidebar", "css": [".rl-sb"] },
+      { "name": "door plate", "css": [".rl-wb-door-plate"] },
+      { "name": "island", "css": [".rl-fd-island"] },
+      { "name": "door prompt", "css": [".rl-fd-island .rl-fd-input", ".rl-fd-input"] },
+      { "name": "session row title", "within": ".rl-sb", "text": "Din roadmap: next steps", "expect": { "fontSize": 13 } }
+    ]
+  },
+  "door-tab": {
+    "probes": [
+      { "name": "second tab", "css": [".rl-wb-strip [role=tab]:nth-of-type(2)", ".rl-wb-strip [role=tab] ~ [role=tab]"], "expect": { "height": 34 } }
+    ]
+  },
+  "plan": {
+    "copy": ["Din roadmap: next steps", "Plan", "Agent"],
+    "probes": [
+      { "name": "sidebar", "css": [".rl-sb"] },
+      { "name": "Plan tab (titled after the plan)", "css": [".rl-wb-strip [role=tab][title^='Din roadmap: next steps']"], "expect": { "height": 34 } },
+      { "name": "Agent tab", "css": [".rl-wb-strip [role=tab][title='Agent']"], "expect": { "height": 34 } },
+      { "name": "plan pane", "css": [".rl-plan-pane"] },
+      { "name": "plan title", "within": ".rl-plan-pane", "text": "Din roadmap: next steps", "up": "h1" }
+    ]
+  },
+  "agent": {
+    "copy": ["Chat", "CLI", "Claude Code"],
+    "probes": [
+      { "name": "sidebar", "css": [".rl-sb"] },
+      { "name": "agent pane", "css": [".rl-agent-pane"] },
+      { "name": "agent pane header", "css": [".rl-agent-pane .rl-agent-head"], "expect": { "height": 28 } },
+      { "name": "Chat radio", "within": ".rl-agent-head", "text": "Chat", "up": "[role=radio]" },
+      { "name": "CLI radio", "within": ".rl-agent-head", "text": "CLI", "up": "[role=radio]" },
+      { "name": "conversation", "css": [".rl-agent-pane .rl-convo"] }
+    ]
+  },
+  "agent-cli": {
+    "probes": [
+      { "name": "agent pane header", "css": [".rl-agent-pane .rl-agent-head"], "expect": { "height": 28 } },
+      { "name": "CLI box", "css": [".rl-agent-pane .rl-agent-cli"] }
+    ]
+  },
+  "browser": {
+    "$comment": "The browser surface hides the sidebar (an immersive surface), so no sidebar probe here; its page is a faked webview.",
+    "copy": ["Browser"],
+    "probes": [
+      { "name": "Browser tab", "css": [".rl-wb-strip [role=tab][title='Browser']"], "expect": { "height": 34 } }
+    ]
+  },
+  "sidebar": {
+    "copy": ["Home", "Runs", "Localhost"],
+    "probes": [
+      { "name": "sidebar", "css": [".rl-sb"] },
+      { "name": "Places", "css": [".rl-sb .rl-sb-places"] },
+      { "name": "Home place", "within": ".rl-sb-places", "text": "Home", "up": "button, [role=button], a" },
+      { "name": "project group label", "css": [".rl-sb .rl-sb-section .rl-sb-label"], "expect": { "fontSize": 11 } },
+      { "name": "session row title", "within": ".rl-sb", "text": "Din roadmap: next steps", "expect": { "fontSize": 13 } }
+    ]
+  }
+}

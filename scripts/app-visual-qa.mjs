@@ -1,27 +1,33 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! Design-fidelity harness for the Flow redesign: the REAL App (src/main.tsx
-//! → App.tsx, every lane composed) booted in headless Chrome against the fake
-//! backend in fixtures/flow-app-qa/services.ts, driven into each design
-//! board's state with real clicks and keys, and captured at board size.
+//! Headless walk of the workbench: the REAL App (src/main.tsx → App.tsx)
+//! booted in headless Chrome against the fake backend in
+//! fixtures/app-qa/services.ts, driven through the walk's scenes with real
+//! clicks and keys, and captured.
 //!
-//!   node scripts/flow-app-visual-qa.mjs [--board 4a,4b,4c,4d,5a]
-//!       [--theme aurora,basic,studio] [--shell flow|classic|flow,classic]
-//!       [--out docs/flow-qa/app] [--probes fixtures/flow-app-qa/probes.json]
-//!       [--boards ~/redline-wt/flow-design] [--keep-going]
-//!       [--motion on] [--clock live]
+//!   node scripts/app-visual-qa.mjs [--scene home,door-tab,plan,agent,agent-cli,browser,sidebar]
+//!       [--theme aurora,basic,studio] [--size 1440x900,1100x720,900x640]
+//!       [--out docs/app-qa] [--probes fixtures/app-qa/probes.json]
+//!       [--keep-going] [--motion on] [--clock live]
 //!
-//! Per board × theme × shell it writes `<board>-<theme>.png` (the classic
-//! shell adds `-classic`), and for Aurora a side-by-side
-//! `<board>-compare.png`: the reference board's window | the capture | their
-//! difference. One `report.json` holds, per run: which drive steps ran, the
-//! probes from probes.json measured against the fidelity spec, the copy
-//! check, a WCAG contrast sweep over the whole page, console errors, and every
-//! command App invoked that the fake backend has no handler for.
+//! Scenes (DRIVES below), each booted fresh from the `workbench` seed:
+//!   home      boot: Home's door tab, the Front Door island landed on its plate
+//!   door-tab  ⌘T (the native menu's `menu-new-tab`): a second door tab
+//!   plan      a plan session picked in the sidebar: its [Plan][Agent] set
+//!   agent     the Agent tab: the session's conversation, Chat | CLI header
+//!   agent-cli the Agent tab showing its PTY (the CLI radio)
+//!   browser   the door's "Open in the browser" destination with an address
+//!   sidebar   Places + a project group: at 1440×900 (the whole sidebar) and
+//!             at 900×640 (the narrow pose) unless --size is given
 //!
-//! The drive steps (DRIVES below) and the probes are the two things a lane
-//! merge should need to touch; see "How to extend" in the appqa REPORT.
+//! Per scene × theme × size it writes `<scene>.png` — `-<theme>` appended
+//! for a theme other than aurora, `-<w>x<h>` when more than one size runs
+//! for that scene. One `report.json` holds, per run: which drive steps ran,
+//! the probes from probes.json measured against the workbench spec, the
+//! copy check, a WCAG contrast sweep over the whole page, console errors,
+//! and every command App invoked that the fake backend has no handler for.
+//! There are no reference boards for the workbench: nothing is composited.
 
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
@@ -29,12 +35,12 @@ import tailwindcss from "@tailwindcss/vite";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile, mkdir, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixture = "fixtures/flow-app-qa";
+const fixture = "fixtures/app-qa";
 const service = path.join(root, fixture, "services.ts");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -46,101 +52,105 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const BOARDS = list(flag("board", "4a,4b,4c,4d,5a"));
-const THEMES = list(flag("theme", "aurora,basic,studio"));
-const SHELLS = list(flag("shell", "flow"));
-const output = path.resolve(root, flag("out", "docs/flow-qa/app"));
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar"];
+const SCENES = list(flag("scene", ALL_SCENES.join(",")));
+const THEMES = list(flag("theme", "aurora"));
+const sizeFlag = flag("size", null);
+const parseSize = (s) => {
+  const m = /^(\d+)x(\d+)$/.exec(s);
+  if (!m) throw new Error(`Bad --size ${s}: want <width>x<height>`);
+  return { width: +m[1], height: +m[2] };
+};
+const SIZES = sizeFlag ? list(sizeFlag).map(parseSize) : [{ width: 1440, height: 900 }];
+const output = path.resolve(root, flag("out", "docs/app-qa"));
 const probesFile = path.resolve(root, flag("probes", `${fixture}/probes.json`));
-const boardsDir = path.resolve(String(flag("boards", path.join(homedir(), "redline-wt/flow-design"))));
 const keepGoing = !!flag("keep-going", false);
 const motion = flag("motion", "off");
 const clockMode = flag("clock", "frozen");
-for (const b of BOARDS) if (!["4a", "4b", "4c", "4d", "5a"].includes(b)) throw new Error(`Unknown board ${b}`);
-for (const s of SHELLS) if (!["flow", "classic"].includes(s)) throw new Error(`Unknown shell ${s}`);
+for (const s of SCENES) if (!ALL_SCENES.includes(s)) throw new Error(`Unknown scene ${s}`);
 
-/** Where each board PNG draws the app window (inside its 1px frame) and the
- *  window's size, which is the capture's viewport. Measured from the PNGs:
- *  the first canvas-coloured pixel inside the #1c2230 frame. The 4a–4d
- *  boards crop the window's last 6px. */
-const BOARD = {
-  "4a": { png: "b4a.png", x: 13, y: 56, width: 1280, height: 800 },
-  "4b": { png: "b4b.png", x: 10, y: 56, width: 1280, height: 800 },
-  "4c": { png: "b4c.png", x: 12, y: 56, width: 1280, height: 800 },
-  "4d": { png: "b4d.png", x: 9, y: 56, width: 1280, height: 800 },
-  "5a": { png: "b5a.png", x: 13, y: 18, width: 1600, height: 960 },
+/** Per scene: the seed (`?board=`, a scenarios.ts id or alias) and, for a
+ *  scene that reads best at one size, the sizes it runs at when --size is
+ *  not given. */
+const SCENE = {
+  home: { board: "workbench" },
+  "door-tab": { board: "workbench" },
+  plan: { board: "workbench" },
+  agent: { board: "workbench" },
+  "agent-cli": { board: "workbench" },
+  browser: { board: "workbench" },
+  sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
 };
+const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
 // ── Drives ─────────────────────────────────────────────────────────────────
 //
-// How each board's state is reached, with real input: CDP mouse events at an
-// element's centre, `Input.insertText` for typing, key events for keys. A
-// step finds its target like a probe does (`css` candidates, then `text` /
-// `textStarts`, then `.closest(up)`). Steps marked `optional` are the flow
-// controls the lanes are still building: absent, they're recorded as skipped
-// and the drive carries on, so the same table works on classic today and on
-// the composed flow shell after integration. `shell` limits a step to one
-// shell.
+// How each scene's state is reached, with real input: CDP mouse events at an
+// element's centre, `Input.insertText` for typing, key events for keys, and
+// `emit` for what the native menu would send (the fake's `listen` hears
+// `window.__qa.emit`). A step finds its target like a probe does (`css`
+// candidates, then `text` / `textStarts` scoped by `within`, then
+// `.closest(up)`). Steps marked `optional` are recorded as skipped when
+// their target is absent and the drive carries on.
 
-const COMPOSER = ["[data-flow-start-composer] textarea", ".rl-fd-input", "[data-chat-composer] textarea"];
-const typePrompt = [
-  { do: "click", css: COMPOSER, why: "put the caret in the start composer" },
-  { do: "type", from: "prompt", why: "type the board's prompt" },
+const PLAN_ROW = "Din roadmap: next steps";
+const AT_HOME = [
+  { do: "waitFor", expr: "!!document.querySelector('.rl-wb-door-plate')", timeout: 15000, why: "Home's door tab is the active pane" },
+  { do: "waitFor", expr: "!!document.querySelector('.rl-fd-island')", timeout: 15000, why: "the Front Door island is on the plate" },
+];
+const SELECT_PLAN = [
+  { do: "click", within: ".rl-sb", text: PLAN_ROW, up: "button", why: "pick the roadmap plan's sidebar row" },
+  { do: "waitFor", expr: "!!document.querySelector('.rl-plan-pane h1')", timeout: 15000, why: "the Plan tab shows the plan's h1" },
+];
+const OPEN_AGENT = [
+  ...SELECT_PLAN,
+  { do: "click", css: [".rl-wb-strip [role=tab][title='Agent']"], why: "the set's Agent tab" },
+  { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-convo')", timeout: 15000, why: "the session's conversation in the Agent pane" },
 ];
 const DRIVES = {
-  "4a": [
-    { do: "click", text: "Plan", up: "button, [role=radio], [role=tab]", optional: true, shell: "flow", why: "pick Plan in the Chat | Plan segment" },
-    ...typePrompt,
-    // The caret in the box is the focus zoom (everything else recedes); the
-    // board draws the start screen at rest with the sentence typed.
-    { do: "key", key: "Escape", optional: true, shell: "flow", why: "Esc: back to rest, the sentence kept" },
+  home: AT_HOME,
+  "door-tab": [
+    ...AT_HOME,
+    { do: "emit", event: "menu-new-tab", payload: null, why: "⌘T / File ▸ New Tab: a second door tab" },
+    { do: "waitFor", expr: "document.querySelectorAll('.rl-wb-strip [role=tab]').length >= 2", timeout: 8000, why: "a second tab in the strip" },
   ],
-  "4b": [
-    ...typePrompt,
-    { do: "key", key: "Enter", why: "Start plan ↵" },
-    { do: "waitFor", expr: "window.__qa.terminals().some(t => t.launched)", timeout: 20000, why: "the launch command reaches the PTY" },
-    { do: "waitFor", expr: "window.__qa.terminals().some(t => t.launched && t.subscribed)", timeout: 6000, optional: true, why: "the stage subscribes to the launch's conversation" },
+  plan: SELECT_PLAN,
+  agent: OPEN_AGENT,
+  "agent-cli": [
+    ...OPEN_AGENT,
+    { do: "click", within: ".rl-agent-head", text: "CLI", up: "[role=radio]", why: "CLI in the header's Chat | CLI segment" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-agent-cli')", timeout: 8000, why: "the pane shows its PTY" },
   ],
-  "4c": [
-    // Flow opens the plan beside the chat by itself once it has loaded.
-    { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
-    { do: "click", text: "Open in panel →", optional: true, why: "open the plan beside the chat (split pose)" },
-    // The split pose folds the sidebar itself (⌘B here would bring it back).
-    { do: "click", css: ["[data-comment-id=c-001]", "mark"], optional: true, why: "focus the mark so its margin note shows" },
+  browser: [
+    ...AT_HOME,
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
+    { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
+    { do: "type", text: "https://example.com", why: "type an address" },
+    { do: "key", key: "Enter", why: "⏎: the door tab becomes the browser" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-strip [role=tab][aria-selected=true] svg.lucide-globe') || !!document.querySelector('.rl-wb-pane [data-browser-pane], .rl-wb-pane .rl-browser, .rl-wb-pane .rl-bp')", timeout: 15000, why: "the active tab is the browser" },
   ],
-  "4d": [
-    { do: "click", text: "Close plan", up: "button", optional: true, why: "✕ Close plan: the plan panel closes" },
-    { do: "rightClick", text: "Din backend: Hono + Fly", why: "right-click a row: its ⋯ menu" },
-    { do: "snapshot", name: "rowmenu", why: "the row menu alone (the board draws both menus at once)" },
-    { do: "click", text: "Tools", up: "button", optional: true, shell: "flow", why: "open the Tools menu" },
-  ],
-  "5a": [
-    { do: "click", text: "Dialcrown: fastest credible launch", why: "open the building session" },
-    // Flow: the session loads, and its plan opens beside the conversation
-    // (split, which folds the sidebar); Full screen brings the sidebar and
-    // its versions back.
-    { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
-    { do: "click", text: "Full screen", up: "button", optional: true, shell: "flow", why: "⤢ Full screen: the full pose" },
-    { do: "click", css: [".rl-sb-versions li:first-child .rl-sb-version"], text: "v1", up: "button, [role=button], [role=treeitem], a, li", optional: true, why: "view v1 (read-only)" },
-    { do: "click", textStarts: "Feedback", up: "button, [role=tab]", optional: true, shell: "flow", why: "the right panel's Feedback tab" },
+  sidebar: [
+    ...AT_HOME,
+    { do: "waitFor", expr: "!!document.querySelector('.rl-sb .rl-sb-places') && !!document.querySelector('.rl-sb .rl-sb-section .rl-sb-label')", timeout: 8000, why: "the Places and a project group" },
   ],
 };
 
-const temporary = await mkdtemp(path.join(tmpdir(), "redline-flow-app-qa-"));
+const temporary = await mkdtemp(path.join(tmpdir(), "redline-app-qa-"));
 const report = {
   startedAt: new Date().toISOString(),
   fixture,
-  boards: BOARDS,
+  scenes: SCENES,
   themes: THEMES,
-  shells: SHELLS,
+  sizes: SIZES.map((s) => `${s.width}x${s.height}`),
   runs: [],
-  composites: [],
   errors: [],
   appWarnings: [],
   limitations: [
     "Headless Chrome (Blink), not WKWebView: fonts resolve through Chrome's stacks, and native chrome (traffic lights, vibrancy) is absent.",
-    "Every Tauri command is answered by fixtures/flow-app-qa/services.ts; no Rust, database, PTY or agent runs.",
+    "Every Tauri command is answered by fixtures/app-qa/services.ts; no Rust, database, PTY or agent runs. The browser surface's native webview is faked, so its pane is a placeholder.",
     "Animations and transitions are collapsed to 1ms and the page clock is frozen at the scenario's time unless --motion on / --clock live.",
-    "4d: the board draws the Tools menu and a row menu open at once; real input can't (opening one dismisses the other), so the row menu is also captured alone as 4d-rowmenu-<theme>.png.",
+    "No reference boards exist for the workbench: captures are not composited against a design.",
   ],
 };
 let server, chrome, cdp;
@@ -269,12 +279,13 @@ function pageTools() {
     return s.visibility === "visible" && s.display !== "none" && !el.closest("[hidden], [aria-hidden=true], [inert]");
   };
   const norm = (s) => s.replace(/\s+/g, " ").trim();
-  /** Visible elements whose whole text is `text` (or starts with it),
-   *  smallest first: the first is the tightest box around the words. */
-  const byText = (text, starts) => {
+  /** Visible elements under `scope` whose whole text is `text` (or starts
+   *  with it), smallest first: the first is the tightest box around the
+   *  words. */
+  const byText = (text, starts, scope) => {
     const want = norm(text);
     const hits = [];
-    for (const el of document.body.querySelectorAll("*")) {
+    for (const el of (scope ?? document.body).querySelectorAll("*")) {
       if (/^(SCRIPT|STYLE|SVG|PATH|TEMPLATE)$/i.test(el.tagName)) continue;
       const t = norm(el.textContent || "");
       if (!(starts ? t.startsWith(want) : t === want) || !visible(el)) continue;
@@ -296,13 +307,19 @@ function pageTools() {
     }
     const text = spec.text ?? spec.textStarts;
     if (text) {
-      const hits = byText(text, !!spec.textStarts);
-      // With `up`, the words that sit inside such an element win (the plan's
-      // h1, not the sidebar row with the same title); without one, or when
-      // none does, the tightest match.
+      // `within` scopes the text search to one region (the sidebar's row,
+      // not the plan's h1 or a door recent with the same title).
+      let scope = null;
+      if (spec.within) {
+        scope = [...document.querySelectorAll(spec.within)].find(visible) ?? null;
+        if (!scope) return null;
+      }
+      const hits = byText(text, !!spec.textStarts, scope);
+      // With `up`, the words that sit inside such an element win; without
+      // one, or when none does, the tightest match.
       const inside = spec.up ? hits.map((el) => el.closest(spec.up)).find(Boolean) : null;
       const el = inside ?? hits[0];
-      if (el) return { el, via: `${spec.textStarts ? "textStarts" : "text"} ${JSON.stringify(text)}${spec.up ? ` ↑${spec.up}${inside ? "" : " (no match; tightest text)"}` : ""}` };
+      if (el) return { el, via: `${spec.textStarts ? "textStarts" : "text"} ${JSON.stringify(text)}${spec.within ? ` in ${spec.within}` : ""}${spec.up ? ` ↑${spec.up}${inside ? "" : " (no match; tightest text)"}` : ""}` };
     }
     return null;
   };
@@ -443,8 +460,7 @@ function pageTools() {
       const own = [...el.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).map((n) => n.textContent.trim()).join(" ");
       if (own) texts.push({ text: own.slice(0, 48), ratio: contrast(s.color, el), size: parseFloat(s.fontSize), region });
       // A placeholder painted transparent is standing in for an overlay
-      // that carries the words (the Feedback composer's two-line hint); the
-      // overlay is swept as text of its own.
+      // that carries the words; the overlay is swept as text of its own.
       if ((el.tagName === "TEXTAREA" || el.tagName === "INPUT") && el.placeholder && !el.value && paint(getComputedStyle(el, "::placeholder").color)[3] > 0) {
         texts.push({ text: `placeholder: ${el.placeholder}`.slice(0, 48), ratio: contrast(getComputedStyle(el, "::placeholder").color, el), size: parseFloat(s.fontSize), region });
       }
@@ -500,9 +516,14 @@ async function key(name, modifiers = 0) {
   await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", ...base });
 }
 
-async function drive(board, shell, name) {
-  for (const step of DRIVES[board] ?? []) {
-    if (step.shell && step.shell !== shell) continue;
+/** The capture's file name for a run, with an extra `-<tag>` for a snapshot. */
+function shotName(scene, theme, size, tag) {
+  const sizeTag = sizesFor(scene).length > 1 ? `-${size.width}x${size.height}` : "";
+  return `${scene}${tag ? `-${tag}` : ""}${theme === "aurora" ? "" : `-${theme}`}${sizeTag}.png`;
+}
+
+async function drive(scene) {
+  for (const step of DRIVES[scene] ?? []) {
     const rec = { do: step.do, why: step.why, ok: false };
     run.steps.push(rec);
     if (step.do === "click" || step.do === "rightClick") {
@@ -510,7 +531,7 @@ async function drive(board, shell, name) {
       if (!at) {
         rec.note = "target not found";
         if (step.optional) continue;
-        throw new Error(`Drive ${board}: ${step.why}: target not found`);
+        throw new Error(`Drive ${scene}: ${step.why}: target not found`);
       }
       rec.via = at.via;
       await mouse(at, step.do === "rightClick" ? "right" : "left");
@@ -520,23 +541,25 @@ async function drive(board, shell, name) {
       rec.note = text;
     } else if (step.do === "key") {
       await key(step.key, step.modifiers ?? 0);
+    } else if (step.do === "emit") {
+      await cdp.evaluate(`window.__qa.emit(${JSON.stringify(step.event)}, ${JSON.stringify(step.payload ?? null)})`);
+      rec.note = step.event;
     } else if (step.do === "waitFor") {
       const ok = await waitFor(step.expr, step.timeout ?? 10000);
       if (!ok) {
         rec.note = "timed out";
         if (step.optional) continue;
-        throw new Error(`Drive ${board}: ${step.why}: timed out`);
+        throw new Error(`Drive ${scene}: ${step.why}: timed out`);
       }
     } else if (step.do === "snapshot") {
       await quiesce(300, 4000);
-      const file = `${board}-${step.name}-${run.theme}${shell === "classic" ? "-classic" : ""}.png`;
+      const file = shotName(scene, run.theme, run.size, step.name);
       await screenshot(file);
       run.extraShots.push(file);
     }
     rec.ok = true;
     await settle(150);
   }
-  void name;
 }
 
 async function screenshot(file) {
@@ -547,15 +570,13 @@ async function screenshot(file) {
 // ── Self-test ──────────────────────────────────────────────────────────────
 //
 // The fake's conversation plumbing, proven through the real wrappers in
-// src/components/agent/convo/api.ts (imported into the 4c page): a subscription returns
-// the seeded tail, a pushed batch reaches the subscriber through its
-// Channel, a reset batch replaces, and a composer send is accepted. On this
-// branch nothing in App subscribes yet, so this is what says the mirror
-// side of the fixture works before the stage lane needs it.
+// src/components/agent/convo/api.ts: a subscription returns the seeded
+// tail, a pushed batch reaches the subscriber through its Channel, a reset
+// batch replaces, and a composer send is accepted.
 
 async function selfTest(base) {
-  await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
-  await cdp.call("Page.navigate", { url: `${base}?board=4c&theme=aurora&shell=classic` });
+  await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await cdp.call("Page.navigate", { url: `${base}?board=workbench&theme=aurora` });
   await waitFor("!!(window.__qa && window.__qa.booted)", 60000);
   return cdp.evaluate(`(async () => {
     const api = await import("/src/components/agent/convo/api.ts");
@@ -587,14 +608,14 @@ async function selfTest(base) {
 
 // ── Runs ───────────────────────────────────────────────────────────────────
 
-async function boot(base, board, theme, shell) {
-  const { width, height } = BOARD[board];
-  // Leave the previous board first: resizing the viewport under it would
+async function boot(base, scene, theme, size) {
+  const { width, height } = size;
+  // Leave the previous scene first: resizing the viewport under it would
   // fire its resize handlers (an open menu's, say) into this run's log.
   await cdp.call("Page.navigate", { url: "about:blank" });
   await waitFor("location.href === 'about:blank' && document.readyState === 'complete'", 5000);
   await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-  const url = `${base}?board=${board}&theme=${theme}&shell=${shell}&motion=${motion}&clock=${clockMode}`;
+  const url = `${base}?board=${SCENE[scene].board}&theme=${theme}&motion=${motion}&clock=${clockMode}`;
   await cdp.call("Page.navigate", { url });
   const booted = await waitFor("!!(window.__qa && window.__qa.booted && document.querySelector('#root')?.children.length)", 60000);
   if (!booted) throw new Error(`App never mounted for ${url}`);
@@ -603,13 +624,12 @@ async function boot(base, board, theme, shell) {
   await quiesce(800, 20000);
 }
 
-async function capture(base, board, theme, shell, spec, shared) {
-  await boot(base, board, theme, shell);
-  run.shellStamp = await cdp.evaluate("document.documentElement.dataset.rlShell");
-  await drive(board, shell);
-  await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: BOARD[board].width - 2, y: BOARD[board].height - 2 });
+async function capture(base, scene, theme, size, spec, shared) {
+  await boot(base, scene, theme, size);
+  await drive(scene);
+  await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: size.width - 2, y: size.height - 2 });
   await quiesce(600, 10000);
-  const name = `${board}-${theme}${shell === "classic" ? "-classic" : ""}.png`;
+  const name = shotName(scene, theme, size);
   await screenshot(name);
   run.screenshot = name;
   const probes = [...(shared ?? []), ...(spec.probes ?? [])];
@@ -620,6 +640,7 @@ async function capture(base, board, theme, shell, spec, shared) {
   const pageErrors = await cdp.evaluate("window.__qa.errors");
   run.pageErrors = pageErrors.filter((t) => !isAppWarning(t));
   run.appWarnings.push(...pageErrors.filter(isAppWarning).map((t) => `[page] ${t}`));
+  run.tabs = await cdp.evaluate("[...document.querySelectorAll('.rl-wb-strip [role=tab]')].map((t) => ({ title: t.title, active: t.getAttribute('aria-selected') === 'true' }))");
   run.terminals = await cdp.evaluate("window.__qa.terminals().map(({ input, ...t }) => ({ ...t, typed: input.length }))");
   run.invoked = await cdp.evaluate("Object.fromEntries(Object.entries(window.__qa.calls().reduce((m, c) => (m[c.cmd] = (m[c.cmd] || 0) + 1, m), {})).sort())");
   const probeFails = run.probes.filter((p) => !p.pass).length;
@@ -632,45 +653,6 @@ async function capture(base, board, theme, shell, spec, shared) {
   };
 }
 
-/** The reference board's window, the capture, and their difference, side
- *  by side on one canvas, composed in the page so no image library is
- *  needed. */
-async function composite(board, shell, theme) {
-  const ref = path.join(boardsDir, BOARD[board].png);
-  const cap = path.join(output, `${board}-${theme}${shell === "classic" ? "-classic" : ""}.png`);
-  if (!existsSync(ref) || !existsSync(cap)) return null;
-  const toData = async (file) => `data:image/png;base64,${(await readFile(file)).toString("base64")}`;
-  const { x, y, width, height } = BOARD[board];
-  await cdp.call("Page.navigate", { url: "about:blank" });
-  await delay(100);
-  const dataUrl = await cdp.evaluate(`(async () => {
-    const load = (src) => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
-    const [ref, cap] = await Promise.all([load(${JSON.stringify(await toData(ref))}), load(${JSON.stringify(await toData(cap))})]);
-    const W = ${width}, H = ${height}, head = 34, gap = 16;
-    const c = document.createElement("canvas");
-    c.width = W * 3 + gap * 2; c.height = H + head;
-    const g = c.getContext("2d");
-    g.fillStyle = "#101114"; g.fillRect(0, 0, c.width, c.height);
-    g.font = "600 15px -apple-system, system-ui, sans-serif"; g.fillStyle = "#e4e9f3";
-    const labels = ["Board ${board} (reference)", "Capture: ${shell} shell, ${theme}", "Difference (black = identical)"];
-    labels.forEach((t, i) => g.fillText(t, i * (W + gap) + 4, 22));
-    const refH = Math.min(H, ref.height - ${y});
-    g.drawImage(ref, ${x}, ${y}, W, refH, 0, head, W, refH);
-    g.drawImage(cap, 0, 0, W, H, W + gap, head, W, H);
-    const d = document.createElement("canvas"); d.width = W; d.height = H;
-    const dg = d.getContext("2d");
-    dg.fillStyle = "#000"; dg.fillRect(0, 0, W, H);
-    dg.drawImage(ref, ${x}, ${y}, W, refH, 0, 0, W, refH);
-    dg.globalCompositeOperation = "difference";
-    dg.drawImage(cap, 0, 0, W, H, 0, 0, W, H);
-    g.drawImage(d, (W + gap) * 2, head);
-    return c.toDataURL("image/png");
-  })()`);
-  const file = `${board}-compare${shell === "classic" ? "-classic" : ""}.png`;
-  await writeFile(path.join(output, file), Buffer.from(dataUrl.split(",")[1], "base64"));
-  return file;
-}
-
 async function main() {
   await mkdir(output, { recursive: true });
   const probes = existsSync(probesFile) ? JSON.parse(await readFile(probesFile, "utf8")) : {};
@@ -678,7 +660,7 @@ async function main() {
   server = await createServer({
     configFile: false,
     root,
-    cacheDir: path.join(root, "node_modules/.cache/flow-app-qa-vite"),
+    cacheDir: path.join(root, "node_modules/.cache/app-qa-vite"),
     logLevel: "warn",
     optimizeDeps: { entries: [`${fixture}/index.html`] },
     plugins: [react(), tailwindcss()],
@@ -735,27 +717,28 @@ async function main() {
 
   // The first load compiles and pre-bundles the whole App graph; boot once
   // untimed so a mid-run dependency re-optimisation can't reload a capture.
-  await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
-  await cdp.call("Page.navigate", { url: `${base}?board=4a&theme=aurora&shell=classic` });
+  await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await cdp.call("Page.navigate", { url: `${base}?board=workbench&theme=aurora` });
   await waitFor("!!(window.__qa && window.__qa.booted)", 120000);
   await delay(1500);
 
   report.selfTest = await selfTest(base);
   if (!report.selfTest.pass) report.errors.push(`Self-test failed: ${JSON.stringify(report.selfTest)}`);
 
-  for (const shell of SHELLS) {
-    for (const board of BOARDS) {
-      for (const theme of THEMES) {
-        run = { board, theme, shell, steps: [], extraShots: [], consoleErrors: [], appWarnings: [], screenshot: null };
+  for (const scene of SCENES) {
+    for (const theme of THEMES) {
+      for (const size of sizesFor(scene)) {
+        const sizeId = `${size.width}x${size.height}`;
+        run = { scene, theme, size, steps: [], extraShots: [], consoleErrors: [], appWarnings: [], screenshot: null };
         report.runs.push(run);
         const t0 = Date.now();
         try {
-          await capture(base, board, theme, shell, probes[board] ?? {}, probes.all);
+          await capture(base, scene, theme, size, probes[scene] ?? {}, probes.all);
         } catch (error) {
           run.failure = String(error?.stack ?? error);
           if (!run.screenshot) {
             try {
-              const file = `${board}-${theme}${shell === "classic" ? "-classic" : ""}.png`;
+              const file = shotName(scene, theme, size);
               await screenshot(file);
               run.screenshot = file;
             } catch {}
@@ -763,23 +746,12 @@ async function main() {
         }
         run.ms = Date.now() - t0;
         const s = run.summary;
-        console.log(`${board} ${theme} ${shell}: ${run.failure ? `FAILED (${String(run.failure).split("\n")[0]})` : "ok"}${s ? ` · probes ${s.probes} · copy missing ${s.copyMissing} · contrast short ${s.contrastShort} · console ${s.consoleErrors} · unmocked ${s.unmocked}` : ""}`);
+        console.log(`${scene} ${theme} ${sizeId}: ${run.failure ? `FAILED (${String(run.failure).split("\n")[0]})` : "ok"}${s ? ` · probes ${s.probes} · copy missing ${s.copyMissing} · contrast short ${s.contrastShort} · console ${s.consoleErrors} · unmocked ${s.unmocked}` : ""}`);
         if (run.failure && !keepGoing) throw new Error(run.failure);
       }
     }
   }
   run = null;
-  if (existsSync(boardsDir)) {
-    for (const shell of SHELLS) {
-      for (const board of BOARDS) {
-        const theme = THEMES.includes("aurora") ? "aurora" : THEMES[0];
-        const file = await composite(board, shell, theme);
-        if (file) report.composites.push(file);
-      }
-    }
-  } else {
-    report.limitations.push(`No reference boards at ${boardsDir}: compare images skipped.`);
-  }
   await writeFile(path.join(output, "chrome.stderr.log"), chromeLog.slice(-200_000));
 }
 
@@ -791,10 +763,9 @@ try {
   report.finishedAt = new Date().toISOString();
   // Two verdicts. `harnessClean`: every run booted, drove and captured with
   // no console error and no command the fake doesn't answer — the fixture's
-  // own bar. `fidelity`: how far the composed App is from the boards — the
-  // integrator's bar, red until the lanes land.
+  // own bar. `fidelity`: how the walk measures against the workbench spec.
   report.harnessClean = !report.errors.length && report.runs.every((r) => !r.failure && !r.consoleErrors.length && !r.pageErrors?.length && !r.unmocked?.length);
-  report.table = report.runs.map((r) => ({ run: `${r.board} ${r.theme} ${r.shell}`, ...(r.summary ?? { failure: String(r.failure).split("\n")[0] }) }));
+  report.table = report.runs.map((r) => ({ run: `${r.scene} ${r.theme} ${r.size.width}x${r.size.height}`, ...(r.summary ?? { failure: String(r.failure).split("\n")[0] }) }));
   const probes = report.runs.flatMap((r) => r.probes ?? []);
   report.fidelity = {
     probesPassing: `${probes.filter((p) => p.pass).length}/${probes.length}`,
@@ -812,7 +783,7 @@ try {
   await server?.close();
   await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
-console.log(`harness ${report.harnessClean ? "clean" : "NOT CLEAN"} · ${report.runs.length} runs · ${report.composites.length} composites · fidelity: probes ${report.fidelity?.probesPassing}, copy missing ${report.fidelity?.copyMissing}, contrast short ${report.fidelity?.contrastShort} → ${path.relative(root, output)}/report.json`);
+console.log(`harness ${report.harnessClean ? "clean" : "NOT CLEAN"} · ${report.runs.length} runs · fidelity: probes ${report.fidelity?.probesPassing}, copy missing ${report.fidelity?.copyMissing}, contrast short ${report.fidelity?.contrastShort} → ${path.relative(root, output)}/report.json`);
 if (!report.harnessClean) {
   if (report.errors.length) console.error(report.errors.join("\n"));
   process.exitCode = 1;

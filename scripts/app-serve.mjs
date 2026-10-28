@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! The full-App QA fixture (fixtures/flow-app-qa: the real App over fake
-//! Tauri services) served live, with hot reload, for using the app by hand
-//! in an ordinary browser rather than capturing boards:
+//! The full-App QA fixture (fixtures/app-qa: the real App over fake Tauri
+//! services) served live, with hot reload, for using the workbench by hand
+//! in an ordinary browser rather than capturing scenes:
 //!
-//!   node scripts/flow-app-serve.mjs [port]
-//!   open "http://127.0.0.1:5199/fixtures/flow-app-qa/?board=4c&shell=flow&clock=live&motion=on"
+//!   node scripts/app-serve.mjs [port]
+//!   open "http://127.0.0.1:5199/fixtures/app-qa/?board=workbench&clock=live&motion=on"
 //!
-//! The query parameters are the fixture's own (fixtures/flow-app-qa/main.tsx).
+//! The query parameters are the fixture's own (fixtures/app-qa/main.tsx):
+//! `board` (a scenario id or scene name), `theme`, `motion`, `clock`.
 
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
@@ -16,13 +17,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixture = "fixtures/flow-app-qa";
+const fixture = "fixtures/app-qa";
 const port = Number(process.argv[2] ?? 5199);
 
 const server = await createServer({
   configFile: false,
   root,
-  cacheDir: path.join(root, "node_modules/.cache/flow-app-serve"),
+  cacheDir: path.join(root, "node_modules/.cache/app-serve"),
   logLevel: "warn",
   optimizeDeps: { entries: [`${fixture}/index.html`] },
   plugins: [react(), tailwindcss()],

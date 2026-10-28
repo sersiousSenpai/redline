@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 //! The fake Tauri backend behind the full-App QA fixture.
 //!
-//! scripts/flow-app-visual-qa.mjs aliases EVERY `@tauri-apps/*` import in
+//! scripts/app-visual-qa.mjs aliases EVERY `@tauri-apps/*` import in
 //! `src/` (api core/event/window/webview/dpi/path/app and the dialog, opener,
 //! deep-link and notification plugins) to this one module, so the real
 //! `src/main.tsx` → `App` boots in headless Chrome against scripted answers
@@ -415,14 +415,29 @@ export function getCurrentWebviewWindow() {
   return currentWebview;
 }
 
-/** Child webviews (the embedded browser) don't exist headless: none are
- *  found, and creating one yields an inert handle. */
+/** The embedded browser's child webviews, by label: `browser_create_tab`
+ *  registers one, its handle's `close()` forgets it. No page ever loads
+ *  headless — the handle is inert — but BrowserPane sees the view it asked
+ *  for, so the browser surface mounts without logging a failed create. */
+const childWebviews = new Map<string, Record<string, unknown>>();
+
+function childWebview(label: string): Record<string, unknown> {
+  let view = childWebviews.get(label);
+  if (!view) {
+    view = nativeHandle(label, { close: async () => void childWebviews.delete(label), url: async () => "about:blank" });
+    childWebviews.set(label, view);
+  }
+  return view;
+}
+
+/** Child webviews (the embedded browser) exist only as inert handles: the
+ *  ones `browser_create_tab` registered are found, nothing else is. */
 export class Webview {
   static getCurrent() {
     return currentWebview;
   }
-  static async getByLabel() {
-    return null;
+  static async getByLabel(label: string) {
+    return childWebviews.get(label) ?? null;
   }
   static async getAll() {
     return [currentWebview];
@@ -807,6 +822,20 @@ const handlers: Record<string, Handler> = {
   set_interception_mode: () => null,
   surface_set_active: () => null,
   show_main_window: () => null,
+  // The workbench's native menu set (classic's ⌘T / Tabs submenu).
+  set_workbench_menu: () => null,
+
+  // The embedded browser: a tab's child webview is registered (inert), the
+  // rest is bookkeeping the backend would do.
+  browser_create_tab: (a) => void childWebview(String(a?.label)),
+  browser_close: (a) => void childWebviews.delete(String(a?.label)),
+  browser_consume_scroll: () => null,
+  browser_set_active: () => null,
+  browser_set_tabs: () => null,
+  browser_protect_tabs: () => null,
+  browser_suspend: () => null,
+  browser_eval_result: () => "{}",
+  mission_set_active: () => null,
 
   // Memory's freshness (the Tools menu's "Memory 2h ago").
   memory_status: () => ({
