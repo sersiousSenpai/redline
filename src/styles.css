@@ -1935,14 +1935,15 @@ p.rl-block-modified {
   margin-bottom: 0;
 }
 
-/* Full-window pulse fired when a plan is intercepted (FlashOverlay). The
-   element carries its own background color; this only animates opacity so a
+/* Full-window pulse fired when a plan is intercepted (FlashOverlay): amber
+   by default, a wash rather than a red slam. The element carries its own
+   background color; this only animates opacity so a
    single keyframe works for any user-chosen color. */
 @keyframes redline-flash {
   0% { opacity: 0; }
-  15% { opacity: 0.55; }
+  15% { opacity: 0.28; }
   40% { opacity: 0; }
-  60% { opacity: 0.55; }
+  60% { opacity: 0.28; }
   100% { opacity: 0; }
 }
 

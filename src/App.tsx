@@ -902,7 +902,8 @@ function App() {
   );
   const [flashColor, setFlashColor] = usePersistedState(
     "redline.flashOnIntercept.color",
-    "#e8553d",
+    // Empty: the amber token (`flashPaint`), never a hard-coded red.
+    "",
   );
   const [flashSound, setFlashSound] = usePersistedState(
     "redline.flashOnIntercept.sound",

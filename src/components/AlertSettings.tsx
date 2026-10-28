@@ -120,7 +120,10 @@ export function AlertSettings({
               <span style={{ color: "var(--color-ink-muted)" }}>Color</span>
               <input
                 type="color"
-                value={color}
+                // The picker needs a hex: an untouched colour (or the old
+                // red default) shows the amber the pulse actually paints,
+                // `--color-warning`'s value.
+                value={!color || color.toLowerCase() === "#e8553d" ? "#d6c060" : color}
                 onChange={(e) => onColorChange(e.target.value)}
                 style={{
                   width: "32px",

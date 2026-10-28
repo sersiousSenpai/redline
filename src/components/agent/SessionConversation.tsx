@@ -495,7 +495,7 @@ function SessionConversation(props: SessionConversationProps) {
   const drawerRows = useMemo(() => (view.outbox.length === 0 ? queue : [...view.outbox, ...queue]), [view.outbox, queue]);
 
   // ── What it says ──
-  const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath, planHeld: reviewHeld });
+  const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath, planHeld: reviewHeld, building: props.planState?.kind === "build" });
   const stats = useMemo(() => planStatsLabel(planStats(props.planMarkdown)), [props.planMarkdown]);
   // Held, the turn is open but nothing is working: no Stop (an Esc into a
   // CLI blocked in the review hook would cancel the plan), no timer.

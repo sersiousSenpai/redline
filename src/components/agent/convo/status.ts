@@ -333,7 +333,7 @@ export const PLAN_HELD_LABEL = "Plan ready · waiting for you";
 
 export function workingStatus(
   view: Pick<ConvoView, "openAsks" | "activeTurn" | "lastTurn" | "mode">,
-  options: { term?: TermState | null; projectPath?: string | null; planHeld?: boolean } = {},
+  options: { term?: TermState | null; projectPath?: string | null; planHeld?: boolean; building?: boolean } = {},
 ): WorkingStatus | null {
   const turn = view.activeTurn;
   const since = turn?.startedAt ?? null;
@@ -349,10 +349,15 @@ export function workingStatus(
     // In plan mode the plan is one tool call the transcript only shows once
     // it is whole, so after the turn has said what it will do, the model is
     // composing it — a thought between there and the plan is part of that.
+    // A plan approved (the session says it is building, or this turn's own
+    // plan came back approved) is being built, whatever mode the transcript
+    // last named: the CLI leaves plan mode without a line saying so until
+    // its next turn, and "Writing the plan" over a build is a lie.
+    const building = options.building || turn.items.some((item) => item.kind === "plan" && item.plan.outcome === "approved");
     const said = turn.items.some((item) => item.kind === "prose");
-    if (view.mode === "plan" && said) return { kind: "writing-plan", label: "Writing the plan", since };
+    if (view.mode === "plan" && said) return building ? { kind: "working", label: "Building", since } : { kind: "writing-plan", label: "Writing the plan", since };
     if (turn.items[turn.items.length - 1]?.kind === "thinking") return { kind: "thinking", label: "Thinking", since };
-    if (view.mode === "plan") return { kind: "writing-plan", label: "Writing the plan", since };
+    if (view.mode === "plan") return building ? { kind: "working", label: "Building", since } : { kind: "writing-plan", label: "Writing the plan", since };
   }
   if (held) return { kind: "plan-ready", label: "Plan ready", since: null };
   if (turn || options.term === "working") return { kind: "working", label: "Working", since };
