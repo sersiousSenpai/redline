@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 15
+version: 16
 ---
 
 # Redline review protocol
@@ -261,7 +261,7 @@ primed path exists precisely to spend one instead of three.
 ### Rescinded approvals
 
 If the trigger says an earlier Redline stand-down is void, it is: the reviewer
-un-approved an Orchestrate and this plan is back in review. Do not act on the
+rescinded an approval and this plan is back in review. Do not act on the
 stand-down still sitting in your context.
 
 A restore is a **re-presentation, not a revision**: don't fetch the body, don't

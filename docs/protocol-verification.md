@@ -716,7 +716,7 @@ separation, identity changes, retries, and late success/error replies across an
 A → B → A switch.
 
 Native execution verification, actual process ownership, checked scope, and
-measured run reports are documented in [native-runner.md](native-runner.md).
+measured run reports were documented in `docs/native-runner.md`, removed with the run feature (D16, 2026-10-28).
 
 
 ### Codex interactive approval (2026-09-10)

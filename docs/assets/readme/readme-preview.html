@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Redline README — layout preview</title><style>body{margin:0;background:#0d1117;color:#e6edf3;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1012px;margin:35px auto;border:1px solid #30363d;border-radius:7px;padding:32px 40px}h1{font-size:32px}h1,h2{border-bottom:1px solid #30363d;padding-bottom:.3em;line-height:1.25}h2{font-size:24px;margin-top:32px}h3{font-size:20px;margin-top:28px}a{color:#79c0ff;text-decoration:none}a:hover{text-decoration:underline}img{display:block;width:100%;height:auto;border-radius:5px}table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;font-size:14px}td,th{border:1px solid #30363d;text-align:left;padding:9px 13px;vertical-align:top}tr:nth-child(even){background:#161b22}pre{background:#161b22;border-radius:6px;padding:16px;overflow-x:auto}code{font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;background:#6e768126;border-radius:4px;padding:.2em .35em}pre code{padding:0;background:none}sub{display:block;color:#8b949e;font-size:12px;line-height:1.6}li{margin:6px 0}details{border-top:1px solid #30363d;padding-top:15px}summary{cursor:pointer}body>p{max-width:1012px;margin:18px auto;color:#8b949e;font-size:12px;padding:0 15px}@media(max-width:650px){main{margin:0;border:0;padding:20px}body{font-size:15px}table{font-size:12px}td,th{padding:7px}h1{font-size:28px}}</style></head><body><p>README layout preview · <a href="redline-workspace.html">View the Document mockup</a></p><main><h1 id="redline">Redline</h1>
 <p><strong>Research it. Draft it. Redline it. Build it.</strong></p>
-<p>A document-centered workspace for agent-assisted development on macOS. Bring research, conversations, plans, execution, and code review into one app—with tracked changes and comments that carry your decisions back to the agent.</p>
+<p>A document-centered meta-harness for agent-assisted development on macOS. Bring research, conversations, plans, execution, and code review into one app—with tracked changes and comments that carry your decisions back to the agent.</p>
 <p><a href="#get-started">Get started</a> · <a href="#the-workspace">Explore the surfaces</a> · <a href="#under-the-hood">Technical overview</a> · <a href="#documentation">Documentation</a></p>
 <p><img src="../../../docs/assets/readme/document.png" alt="Redline in the Terminal theme with San Francisco text: the intercepted plan, session history, discussion action items and agent responses, and the open terminal drawer"></p>
 <p><sub>This Document preview renders the current app components in the Terminal theme with San Francisco text and sample content. <a href="../../../docs/assets/readme/README.md">Browse the preview source and visual references</a>.</sub></p>
@@ -41,11 +41,6 @@
 <td>Unified/split diffs; line annotations; curated AI review findings; working-tree, staged, commit, and base-branch comparisons.</td>
 </tr>
 <tr>
-<td><strong>Runs</strong></td>
-<td>Review a task graph, execute it, and inspect the evidence behind each result.</td>
-<td>Task/check/review/gate nodes; file ownership; retries; steer, queue, pause, and stop; measured reports.</td>
-</tr>
-<tr>
 <td><strong>Memory</strong></td>
 <td>Recover what you asked, what you decided, and why.</td>
 <td>Searchable timeline; cited answers; curated class catalog; 3D Memory Cosmos; provenance and health views.</td>
@@ -68,10 +63,8 @@
 </ol>
 <p>The <strong>discussion sidecar</strong> keeps questions, feedback, and agent responses beside the plan. <strong>Action items</strong> collect resolutions waiting for Accept or Reopen; a follow-up discussion can become a plan change. The <strong>terminal drawer</strong> stays in view while a plan is intercepted, with a red status strip on the terminal that is waiting for your review.</p>
 <p>Voice adds dictation, a plan discussion agent, and read-aloud. PTY terminals and the file explorer keep the repository within reach.</p>
-<h3 id="run-the-plan-inspect-the-result">Run the plan, inspect the result</h3>
-<p>Orchestrate turns a plan into an editable graph. Review dependencies, models, scope hints, and check commands before starting. Checks retain exit codes and output; independent reviews and human gates control what proceeds.</p>
-<p>The native runner currently executes <strong>Claude Code tasks in a shared working tree</strong>, with file claims and check barriers. It leaves changes uncommitted for review. Other planning providers do not yet imply other task-execution backends. <a href="../../../docs/native-runner.md">Runner details →</a></p>
-<p>For work on Redline itself, <strong>Runs → Build Redline</strong> prepares and verifies a replacement app in a separate candidate workspace, then offers an explicit restart.</p>
+<h3 id="build-the-plan-review-the-result">Build the plan, review the result</h3>
+<p><strong>Approve &amp; build</strong> hands the approved plan to the agent that wrote it, in its own terminal. <strong>Approve, build later</strong> parks it; <strong>Build</strong> then resumes that agent or hands the plan to another provider. Code Review is where the result comes back for line-by-line feedback.</p>
 <h2 id="planning-providers">Planning providers</h2>
 <table>
 <thead>
@@ -133,7 +126,7 @@ npm run redline
 </tr>
 <tr>
 <td>Local state</td>
-<td>SQLite sessions, documents, research, and run graphs; hash-chained prompt/decision ledger</td>
+<td>SQLite sessions, documents and research; hash-chained prompt/decision ledger</td>
 </tr>
 <tr>
 <td>Agent bridge</td>
@@ -154,11 +147,10 @@ npm run redline
 </tbody>
 </table>
 <p><strong>Local-first, with your providers.</strong> No Redline account or telemetry. Documents and review state stay on your machine. Agent requests use your installed vendor CLIs and accounts; browsing and optional cloud services use the network.</p>
-<p><strong>Current boundaries:</strong> macOS only; early release; general runner worktree isolation is still future work. Mission monitoring definitions and versioned context can be handed to a compatible runtime; Redline does not provision an external scheduler or machine fleet.</p>
+<p><strong>Current boundaries:</strong> macOS only; early release. Mission monitoring definitions and versioned context can be handed to a compatible runtime; Redline does not provision an external scheduler or machine fleet.</p>
 <h2 id="documentation">Documentation</h2>
 <ul>
 <li><a href="../../../docs/getting-started.md">Installation, provider hooks, and development</a></li>
-<li><a href="../../../docs/native-runner.md">Native run graphs</a></li>
 <li><a href="../../../docs/api-v1.md">Control-plane API and MCP</a></li>
 <li><a href="../../../docs/extensions-api.md">Extension API</a> · <a href="../../../docs/marketplace.md">Marketplace and harnesses</a></li>
 <li><a href="../../../SPEC.md">Core specification</a> · <a href="../../../skills/">Agent skill contracts</a></li>

@@ -154,7 +154,8 @@ it, that's the discussion to have before merging.
    dot), a translated window (the working shimmer). The rule covers every way
    an animation starts: a stylesheet, an inline style, `el.animate(…)`, and a
    package's own CSS that a prop switches on — React Flow's `animated` edge
-   marches its dash forever, so the Runs canvas tints a live edge instead.
+   marches its dash forever (the Runs canvas, cut in D16, tinted a live edge
+   instead).
 
    > **What it cost before it was a rule (2026-10-09).** The default Aurora
    > theme animated `background-position` on a 280%-size gradient behind a

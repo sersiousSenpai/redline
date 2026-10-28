@@ -10,8 +10,11 @@ The whole design is one separation: **preparing** a change is not
 startup code, and can fail; none of that disturbs the copy you are working in.
 Activation is short, recoverable, and happens only when you say so.
 
-Surface: Runs → Build Redline. Entry is the tab and the readiness indicator;
-there is no new header button.
+Surface: none at present. The release panel lived in Runs → Build Redline, and
+the Runs surface was cut with the run feature (D16, 2026-10-28); the panel and
+this backend remain, unmounted, until it is rehomed or cut. The readiness
+indicator stays. There is no header button. Candidates are captured without a
+run graph now: nothing decomposes the plan into agent tasks.
 
 ## Three responsibilities, three processes
 

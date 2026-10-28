@@ -21,7 +21,6 @@ Start with a question, a document, or a plan. Move between surfaces as the work 
 | **Browser & Missions** | Read sources beside an agent, compare pages, and synthesize a research brief. | Native webviews; page and cross-tab discussions; tiled layouts and saved mosaics; source-linked pins and handoffs. |
 | **Prompt Drafter** | Shape a brief, specification, or prompt in a real document editor. | Formatting ribbon; tables and Mermaid diagrams; tracked suggestions; Bookshelf folders and templates. |
 | **Code Review** | Inspect the implementation and send precise feedback back to the agent. | Unified/split diffs; line annotations; curated AI review findings; working-tree, staged, commit, and base-branch comparisons. |
-| **Runs** | Review a task graph, execute it, and inspect the evidence behind each result. | Task/check/review/gate nodes; file ownership; retries; steer, queue, pause, and stop; measured reports. |
 | **Memory** | Recover what you asked, what you decided, and why. | Searchable timeline; cited answers; curated class catalog; 3D Memory Cosmos; provenance and health views. |
 | **Localhost** | See which development servers belong to which projects. | Port and process discovery; previews; open, stop, and restart controls. |
 
@@ -40,13 +39,9 @@ The **discussion sidecar** keeps questions, feedback, and agent responses beside
 
 Voice adds dictation, a plan discussion agent, and read-aloud. PTY terminals and the file explorer keep the repository within reach.
 
-### Run the plan, inspect the result
+### Build the plan, review the result
 
-Orchestrate turns a plan into an editable graph. Review dependencies, models, scope hints, and check commands before starting. Checks retain exit codes and output; independent reviews and human gates control what proceeds.
-
-The native runner currently executes **Claude Code tasks in a shared working tree**, with file claims and check barriers. It leaves changes uncommitted for review. Other planning providers do not yet imply other task-execution backends. [Runner details →](docs/native-runner.md)
-
-For work on Redline itself, **Runs → Build Redline** prepares and verifies a replacement app in a separate candidate workspace, then offers an explicit restart.
+**Approve & build** hands the approved plan to the agent that wrote it, in its own terminal. **Approve, build later** parks it; **Build** then resumes that agent or hands the plan to another provider. Code Review is where the result comes back for line-by-line feedback.
 
 ## Planning providers
 
@@ -80,7 +75,7 @@ This builds Redline, installs it into `/Applications`, and launches it. The app 
 | --- | --- |
 | Desktop | Tauri 2, Rust, React 19, TypeScript, Vite 7 |
 | Documents | Tiptap / ProseMirror; Yjs document state; IndexedDB review persistence |
-| Local state | SQLite sessions, documents, research, and run graphs; hash-chained prompt/decision ledger |
+| Local state | SQLite sessions, documents and research; hash-chained prompt/decision ledger |
 | Agent bridge | axum on `127.0.0.1:7676`; versioned HTTP API; read-only MCP tools at `/mcp` |
 | Browser & terminal | Native Tauri child webviews; `portable-pty` and xterm.js |
 | Voice | Apple or local Whisper dictation; system/Kokoro local TTS and optional cloud voices |
@@ -88,12 +83,11 @@ This builds Redline, installs it into `/Applications`, and launches it. The app 
 
 **Local-first, with your providers.** No Redline account or telemetry. Documents and review state stay on your machine. Agent requests use your installed vendor CLIs and accounts; browsing and optional cloud services use the network.
 
-**Current boundaries:** macOS only; early release; general runner worktree isolation is still future work. Mission monitoring definitions and versioned context can be handed to a compatible runtime; Redline does not provision an external scheduler or machine fleet.
+**Current boundaries:** macOS only; early release. Mission monitoring definitions and versioned context can be handed to a compatible runtime; Redline does not provision an external scheduler or machine fleet.
 
 ## Documentation
 
 - [Installation, provider hooks, and development](docs/getting-started.md)
-- [Native run graphs](docs/native-runner.md)
 - [Control-plane API and MCP](docs/api-v1.md)
 - [Extension API](docs/extensions-api.md) · [Marketplace and harnesses](docs/marketplace.md)
 - [Core specification](SPEC.md) · [Agent skill contracts](skills/)

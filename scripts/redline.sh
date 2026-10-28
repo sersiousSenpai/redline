@@ -119,4 +119,3 @@ open /Applications/Redline.app
 echo
 echo "Redline installed to /Applications and launched."
 echo "To update later: git pull && npm run redline"
-echo "After this install, prepared releases can also be applied from Runs → Build Redline."

@@ -1039,10 +1039,6 @@ dictation / TTS.
 
 Not yet built:
 
-- **Worktree isolation.** The [native run graph](docs/native-runner.md) executes
-  reviewed tasks, command checks, independent reviews, and gates in the shared
-  working tree. Optional worktrees remain future work; the parked
-  `feature/loop-orchestrator` prototype is not the implementation.
 - **Multiplayer.** Several reviewers in one document at once, each with their own
   agent, over the CRDT (Yjs / Hocuspocus). See the north-star doc.
 - **Documents beyond plans.** A born-in-app Word-class editor and, later,

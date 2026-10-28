@@ -52,12 +52,10 @@ struct EmbeddedSkill {
 ///   prompt/context library and emits a prioritized next-actions checklist.
 /// - `sensei`: the Dojo recruit contract — how an external model grounds
 ///   classes-first on the user's lake + ClassMemory (over MCP) to work like them.
-/// - `orchestrate`: one native task executor's contract — direct file claims,
-///   uncommitted changes, independent checks, and Redline-owned lifecycle.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 15,
+        version: 16,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
@@ -128,11 +126,6 @@ const SKILLS: &[EmbeddedSkill] = &[
         version: 2,
         content: include_str!("../../skills/sensei/SKILL.md"),
     },
-    EmbeddedSkill {
-        name: "orchestrate",
-        version: 3,
-        content: include_str!("../../skills/orchestrate/SKILL.md"),
-    },
 ];
 
 /// The version reported in the aggregate status — the redline skill is the
@@ -143,15 +136,16 @@ const SKILL_VERSION: u32 = SKILLS[0].version;
 /// past version and later renamed or retired: `redline` (renamed to
 /// `redline-plan-review` — the stale v8 copy carries a near-identical
 /// description plus a pre-auth curl flow that now 401s), `redline-review`
-/// (renamed to `redline-code-review`), and `loop-orchestrator` (feature
-/// removed). `install_under` deletes these so a stale copy can't keep shadowing
+/// (renamed to `redline-code-review`), `loop-orchestrator` (feature
+/// removed), and `orchestrate` (the native run executor, removed with runs).
+/// `install_under` deletes these so a stale copy can't keep shadowing
 /// the live contract. HARD RULE: these are the ONLY names Redline ever shipped
 /// and retired — the list must never contain a name Redline did not create,
 /// because it drives `fs::remove_dir_all` under the user's `~/.claude/skills`
 /// and would delete a skill the user owns.
 /// `retired_names_never_overlap_shipped` guards against a shipped name landing
 /// here.
-const RETIRED_SKILLS: &[&str] = &["redline", "redline-review", "loop-orchestrator", "linked"];
+const RETIRED_SKILLS: &[&str] = &["redline", "redline-review", "loop-orchestrator", "linked", "orchestrate"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -664,16 +658,6 @@ mod tests {
             !sensei.content.contains("redline-mcp") && !sensei.content.contains("bundled"),
             "no proxy binary to teach"
         );
-    }
-
-    #[test]
-    fn orchestrate_skill_teaches_the_native_node_contract() {
-        let orch=SKILLS.iter().find(|s|s.name=="orchestrate").unwrap();
-        for needle in ["REDLINE_RUN_ID","REDLINE_RUN_NODE","scope contract","nothing more","git stash","uncommitted","PreToolUse","claim-on-first-write","scopeHint","enforceScope","busy path","verification barrier","real exit codes","clean-context","Steer","Queue","Stop","measured report"] {
-            assert!(orch.content.contains(needle),"orchestrate executor contract is missing {needle}");
-        }
-        assert!(!orch.content.contains("## 4. Author the workflow"));
-        assert!(!orch.content.contains("/v1/orchestration/report"));
     }
 
     #[test]
