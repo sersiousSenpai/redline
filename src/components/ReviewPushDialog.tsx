@@ -32,6 +32,11 @@ interface ReviewPushDialogProps {
   reviewedPaths: string[];
   /** Called after a successful push so the panel refreshes its diff. */
   onPushed?: () => void;
+  /** The AI draft reads a review's diff: off where there is no review (the
+   *  rail's Changes tab). Default on. */
+  canDraft?: boolean;
+  /** A message already typed elsewhere (the rail's commit box). */
+  initialMessage?: string;
 }
 
 export default function ReviewPushDialog({
@@ -43,6 +48,8 @@ export default function ReviewPushDialog({
   branches,
   reviewedPaths,
   onPushed,
+  canDraft = true,
+  initialMessage = "",
 }: ReviewPushDialogProps) {
   useMenuOverlay(open);
   const { status, pushing, log, outcome, error, drafting } = push;
@@ -70,7 +77,7 @@ export default function ReviewPushDialog({
     draftRevision.current += 1;
     setDraftNotice(null);
     if (!open) return;
-    setForm(DEFAULT_PUSH_FORM);
+    setForm(initialMessage ? { ...DEFAULT_PUSH_FORM, message: initialMessage } : DEFAULT_PUSH_FORM);
     setStageReviewedOnly(true);
     setConfirmingProtected(false);
     push.clearResult();
@@ -274,7 +281,7 @@ export default function ReviewPushDialog({
               <>
                 <div className="flex items-center gap-2">
                   {label("Commit message")}
-                  <button
+                  {canDraft && <button
                     type="button"
                     className="rl-review-btn"
                     style={{ fontSize: "11px", marginLeft: "auto" }}
@@ -283,7 +290,7 @@ export default function ReviewPushDialog({
                     onClick={() => void doDraft()}
                   >
                     ✦ {drafting ? "Drafting…" : "Draft"}
-                  </button>
+                  </button>}
                 </div>
                 <textarea
                   value={form.message}

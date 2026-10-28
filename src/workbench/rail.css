@@ -282,3 +282,121 @@
   font-size: 12.5px;
   color: var(--color-ink-muted);
 }
+
+/* ── The Changes tab ───────────────────────────────────────────────────── */
+
+.rl-ch-section {
+  padding: 4px 0;
+}
+.rl-ch-head {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 14px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+.rl-ch-head > span {
+  flex: 1;
+}
+.rl-ch-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-ink-muted);
+  cursor: pointer;
+}
+.rl-ch-link:hover {
+  color: var(--color-ink);
+}
+.rl-ch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.rl-ch-row:hover {
+  background: var(--color-hover-wash);
+}
+.rl-ch-row input {
+  margin: 0;
+  flex: none;
+}
+.rl-ch-code {
+  width: 10px;
+  flex: none;
+  font: 600 11px var(--font-mono);
+}
+.rl-ch-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-ch-add {
+  font: 600 11px var(--font-mono);
+  color: var(--color-success);
+}
+.rl-ch-del {
+  font: 600 11px var(--font-mono);
+  color: var(--color-ink-muted);
+}
+.rl-ch-commit {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--color-rule);
+}
+.rl-ch-commit textarea {
+  resize: none;
+  padding: 8px 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--rl-radius-control);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: 12.5px/1.45 var(--font-sans);
+  outline: none;
+}
+.rl-ch-commit textarea:focus {
+  border-color: var(--color-focus-rim);
+}
+.rl-ch-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rl-ch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--rl-radius-control);
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  font: 500 12.5px var(--font-sans);
+  cursor: pointer;
+}
+.rl-ch-btn[data-primary] {
+  border-color: transparent;
+  background: var(--color-info);
+  color: var(--color-on-info);
+}
+.rl-ch-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

@@ -892,6 +892,16 @@ const handlers: Record<string, Handler> = {
     ],
     conflicted: [],
   }),
+  review_diff: (a) => {
+    const lines = (add: number, del: number) => [
+      ...Array.from({ length: add }, () => ({ kind: "add", oldLine: null, newLine: 1, text: "+" })),
+      ...Array.from({ length: del }, () => ({ kind: "del", oldLine: 1, newLine: null, text: "-" })),
+    ];
+    const f = (path: string, add: number, del: number) => ({ oldPath: path, newPath: path, status: "modified", binary: false, hunks: [{ oldStart: 1, oldLines: del, newStart: 1, newLines: add, header: "", lines: lines(add, del) }] });
+    if (a?.source === "staged") return [f("src/jobs/queue.ts", 41, 12), f("src/jobs/lease.ts", 58, 0)];
+    if (a?.source === "unstagedPlusUntracked") return [f("src/auth/auth.ts", 12, 3), f("src/jobs/retry.ts", 9, 0)];
+    return [];
+  },
   read_text_file: () => ({ content: FILE_TEXT, isBinary: false, tooLarge: false, size: FILE_TEXT.length }),
   open_doc: () => ({
     meta: { lineCount: FILE_TEXT.split("\n").length, size: FILE_TEXT.length, isBinary: false, tooLarge: false, highlightable: false },

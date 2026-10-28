@@ -194,6 +194,7 @@ const FeedbackPanel = lazy(() => import("./components/plan/FeedbackPanel"));
 // The rail's Files tab and ⌘P quick open (W4).
 const FilesRail = lazy(() => import("./workbench/FilesRail"));
 const QuickOpen = lazy(() => import("./workbench/QuickOpen"));
+const ChangesRail = lazy(() => import("./workbench/ChangesRail"));
 // The table-of-contents rail renders only once opened (about 6 kB, W1).
 const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
 // Classic's folder tab only, so its own chunk.
@@ -9085,6 +9086,14 @@ function App() {
       void unlisten.then((off) => off());
     };
   }, [openQuickOpen]);
+  // A Changes row: that file's diff, in the Review pane over the working tree.
+  const [reviewFocus, setReviewFocus] = useState<{ path: string; nonce: number } | null>(null);
+  const openRailDiff = (repo: string, path: string) => {
+    codeReview.setSource("uncommitted");
+    void codeReview.openReview(repo, "uncommitted");
+    setReviewFocus({ path, nonce: Date.now() });
+    selectSurface("review");
+  };
   const railOtherBody: ReactNode =
     railTab === "files" ? (
       <Suspense fallback={null}>
@@ -9108,7 +9117,9 @@ function App() {
         )}
       </div>
     ) : (
-      <div className="rl-rail-empty">Changes</div>
+      <Suspense fallback={null}>
+        <ChangesRail repo={railFilesRoot} onOpenDiff={openRailDiff} onNotice={(message) => setToast({ message, tone: "warning" })} />
+      </Suspense>
     );
 
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
@@ -10395,6 +10406,7 @@ function App() {
                       }).catch(error => setToast(`Couldn't open a terminal: ${String(error)}`, 6000));
                     }}
                     onClose={() => (classicWb ? closeSurfacePane("review") : selectSurface("document"))}
+                    focusPath={reviewFocus}
                   />
                 </Suspense>
               </ErrorBoundary>

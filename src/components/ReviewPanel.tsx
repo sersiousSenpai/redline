@@ -58,9 +58,12 @@ interface ReviewPanelProps {
   projectOptions: ProjectOption[];
   onClose: () => void;
   onOpenTerminal?: (cwd: string, command?: string) => void;
+  /** A file to bring into view once the diff has it (the rail's Changes tab:
+   *  a click opens that file's diff). The nonce asks again for the same path. */
+  focusPath?: { path: string; nonce: number } | null;
 }
 
-function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: ReviewPanelProps) {
+function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal, focusPath = null }: ReviewPanelProps) {
   const {
     activeReviewId,
     review: session,
@@ -129,6 +132,16 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
   const diffKey = `${repo ?? ""}|${source}|${base ?? ""}|${sha ?? ""}|${session?.round ?? 1}`;
 
   const diffRef = useRef<DiffViewHandle | null>(null);
+  // A file asked for from outside (the rail's Changes tab): the review pose,
+  // then the file, as soon as the diff holds it.
+  useEffect(() => {
+    if (focusPath) setPose("review");
+  }, [focusPath, setPose]);
+  useEffect(() => {
+    if (!focusPath || !diff?.some((f) => f.newPath === focusPath.path || f.oldPath === focusPath.path)) return;
+    const raf = requestAnimationFrame(() => diffRef.current?.scrollToFile(focusPath.path));
+    return () => cancelAnimationFrame(raf);
+  }, [focusPath, diff]);
   const [showTree, setShowTree] = usePersistedState("redline.review.showTree", true);
   const [helpOpen, setHelpOpen] = useState(false);
 
