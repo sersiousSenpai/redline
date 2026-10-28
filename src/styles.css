@@ -1941,9 +1941,9 @@ p.rl-block-modified {
    single keyframe works for any user-chosen color. */
 @keyframes redline-flash {
   0% { opacity: 0; }
-  15% { opacity: 0.28; }
+  15% { opacity: 0.16; }
   40% { opacity: 0; }
-  60% { opacity: 0.28; }
+  60% { opacity: 0.16; }
   100% { opacity: 0; }
 }
 

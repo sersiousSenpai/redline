@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { isRedHue } from "./FlashOverlay";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SoundConfig } from "../audio/beep";
 import { getNotifyPrefs, setNotifyPref, subscribeNotifyPrefs } from "../lib/notifyPrefs";
@@ -120,10 +121,10 @@ export function AlertSettings({
               <span style={{ color: "var(--color-ink-muted)" }}>Color</span>
               <input
                 type="color"
-                // The picker needs a hex: an untouched colour (or the old
-                // red default) shows the amber the pulse actually paints,
+                // The picker needs a hex: an untouched colour (or any red,
+                // which the pulse never paints) shows the amber it does paint,
                 // `--color-warning`'s value.
-                value={!color || color.toLowerCase() === "#e8553d" ? "#d6c060" : color}
+                value={!color || isRedHue(color) ? "#d6c060" : color}
                 onChange={(e) => onColorChange(e.target.value)}
                 style={{
                   width: "32px",
