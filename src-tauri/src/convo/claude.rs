@@ -108,7 +108,7 @@ pub fn parse_line(line: &str, epoch: u32, offset: u64, fallback_ts: i64, tools: 
     let ts = row
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(crate::runwatch::iso_millis)
+        .and_then(crate::transcript::iso_millis)
         .unwrap_or(fallback_ts);
     let bodies = match row.get("type").and_then(Value::as_str) {
         Some("user") => user(&row, tools),
@@ -282,7 +282,7 @@ fn tool_result(row: &Value, block: &Value, tools: &ToolNames) -> Vec<Body> {
     let mut out = vec![Body::ToolResult {
         tool_use_id: id.to_string(),
         is_error,
-        preview: crate::runwatch::preview(&text, PREVIEW_CHARS),
+        preview: crate::transcript::preview(&text, PREVIEW_CHARS),
     }];
     if let Some(outcome) = plan_outcome(row, &text, is_error, tools.get(id)) {
         out.push(Body::PlanOutcome { tool_use_id: id.to_string(), outcome: outcome.0.to_string(), feedback: outcome.1 });
@@ -345,7 +345,7 @@ fn assistant(row: &Value, tools: &mut ToolNames) -> Vec<Body> {
     out
 }
 
-/// A tool call in one line: the run monitor's summary, except for the two
+/// A tool call in one line: `transcript::summarize_tool_input`, except for the two
 /// tools whose input is a document (a plan, a question form). Permission
 /// cards use the same summarizer, which is how a card finds its row.
 fn tool_summary(name: &str, input: &Value) -> String {
@@ -354,7 +354,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
         "AskUserQuestion" => input.pointer("/questions/0/question").and_then(Value::as_str).map(str::to_string),
         _ => None,
     };
-    text.unwrap_or_else(|| crate::runwatch::summarize_tool_input(input))
+    text.unwrap_or_else(|| crate::transcript::summarize_tool_input(input))
 }
 
 /// A plan's title: its first heading, else its first line with words. HTML
@@ -370,7 +370,7 @@ pub fn plan_title(plan: &str) -> Option<String> {
     let lines = || plan.lines().map(str::trim).filter(|l| !l.is_empty());
     let line = lines().find(|l| l.starts_with('#')).or_else(|| lines().find(|l| l.chars().any(char::is_alphanumeric)))?;
     let title = line.trim_start_matches('#').trim();
-    (!title.is_empty()).then(|| crate::runwatch::preview(title, 120))
+    (!title.is_empty()).then(|| crate::transcript::preview(title, 120))
 }
 
 fn system(row: &Value) -> Vec<Body> {

@@ -168,10 +168,10 @@ pub struct ReviewSession {
     /// Last-activity timestamp (revision/comment/thread message/status
     /// change) — the sidebar orders sessions by it, newest first.
     pub updated_at: i64,
-    /// Orchestrated-run lifecycle (orchestrating | running | in_code_review |
-    /// landed | stalled). `None` for plain Approves — deliberately separate
-    /// from the frozen three-value `status` so reconciliation and the
-    /// liveness watchdog stay untouched.
+    /// Build state of an approved plan: `building` (an agent is building it
+    /// in a terminal) or `landed` (marked Completed). `None` is "approved ·
+    /// not built" — deliberately separate from the frozen three-value
+    /// `status` so reconciliation and the liveness watchdog stay untouched.
     pub run_state: Option<String>,
     /// Which harness authored this plan: `claude-code` | `codex`. `None` on
     /// every pre-backend row, which reads as claude-code everywhere it
@@ -229,14 +229,8 @@ pub struct SessionSummary {
     pub attach_state: AttachState,
     /// Last-activity timestamp — `list()` sorts by it, newest first.
     pub updated_at: i64,
-    /// Orchestrated-run lifecycle chip state; `None` for plain Approves.
+    /// Build chip state (`building` | `landed`); `None` is "not built".
     pub run_state: Option<String>,
-    /// How the run actually executed — `workflow` or `sequential` — joined
-    /// from the `orchestrations` row. `None` until the watcher settles it.
-    /// Carried onto the summary (rather than left to the Runs surface) so the
-    /// sidebar chip, the only run affordance visible without navigating away,
-    /// can show that a run silently degraded to the sequential fallback.
-    pub run_mode: Option<String>,
     /// Which harness authored the plan, and at what model — the session
     /// header's badge. `None` reads as claude-code.
     pub backend: Option<String>,
@@ -1301,7 +1295,7 @@ impl SessionStore {
         }
     }
 
-    /// Record an orchestrated run's lifecycle transition, in memory and on
+    /// Record a plan's build-state transition, in memory and on
     /// disk (the db setter also journals it). Returns whether the state
     /// actually changed, so callers emit the chip event only on a real
     /// transition.
@@ -1322,10 +1316,9 @@ impl SessionStore {
         changed
     }
 
-    /// Return a session's run columns to NULL, in memory and on disk — the
-    /// rollback for a handoff that never delivered ("the click was not
-    /// evidence of a run"). `set_run_state` takes `&str` and structurally
-    /// cannot write NULL; this is the only way back.
+    /// Return a session's run columns to NULL, in memory and on disk —
+    /// "approved · not built" again. `set_run_state` takes `&str` and
+    /// structurally cannot write NULL; this is the only way back.
     pub fn clear_run_state(&self, session_id: &str) -> bool {
         let changed = match self.db.clear_run_state(session_id) {
             Ok(c) => c,
@@ -1578,9 +1571,6 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {
-        // One small keyed read per refresh — the run chip needs a mode string
-        // and nothing else from the runs table.
-        let run_modes = self.db.run_modes();
         let organization = self.db.session_organization().unwrap_or_else(|error| {
             tracing::error!(%error, "failed to read session organization");
             Default::default()
@@ -1628,7 +1618,6 @@ impl SessionStore {
                     attach_state: s.attach_state,
                     updated_at: s.updated_at,
                     run_state: s.run_state.clone(),
-                    run_mode: run_modes.get(s.session_id.as_str()).cloned(),
                     backend: s.backend.clone(),
                     model: s.model.clone(),
                     effort: s.effort.clone(),

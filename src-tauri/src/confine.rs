@@ -191,15 +191,11 @@ pub fn command(policy: &Policy, program: &Path, args: &[&str]) -> Command {
 }
 
 /// Environment entries a confined worker must never inherit: the production
-/// daemon's credential and the run-claim service it authorizes. A build script
+/// daemon's credential and the activation transaction. A build script
 /// that read them would be holding a token to the very application it is
 /// forbidden to touch.
 pub const STRIPPED_ENV: &[&str] = &[
     crate::auth::ENV_DAEMON_TOKEN,
-    "REDLINE_RUN_CLAIM_URL",
-    crate::runner::ENV_RUN_ID,
-    crate::runner::ENV_RUN_NODE,
-    crate::runner::ENV_RUN_ATTEMPT,
     crate::runtime_profile::ENV_ACTIVATION_TXN,
 ];
 

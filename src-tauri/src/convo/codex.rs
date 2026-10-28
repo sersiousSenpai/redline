@@ -588,11 +588,11 @@ fn tool(item: &Value) -> Option<(String, String)> {
         }
         "mcpToolCall" => {
             let input = item.get("arguments").cloned().unwrap_or(Value::Null);
-            named(&format!("mcp__{}__{}", text("server"), text("tool")), crate::runwatch::summarize_tool_input(&input))
+            named(&format!("mcp__{}__{}", text("server"), text("tool")), crate::transcript::summarize_tool_input(&input))
         }
         "dynamicToolCall" => {
             let input = item.get("arguments").cloned().unwrap_or(Value::Null);
-            named(str_of(item, "tool").unwrap_or("tool"), crate::runwatch::summarize_tool_input(&input))
+            named(str_of(item, "tool").unwrap_or("tool"), crate::transcript::summarize_tool_input(&input))
         }
         "webSearch" => named("WebSearch", text("query")),
         "imageView" => named("Read", text("path")),
@@ -635,7 +635,7 @@ fn outcome(item: &Value) -> (bool, String) {
             .join(" "),
         _ => String::new(),
     };
-    (failed, crate::runwatch::preview(&text, PREVIEW_CHARS))
+    (failed, crate::transcript::preview(&text, PREVIEW_CHARS))
 }
 
 /// A stage answer, as the reply its request takes (`Replier::Codex`): the

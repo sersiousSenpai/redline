@@ -3586,8 +3586,6 @@ fn routed_reads_work_on_the_readers() {
     assert!(db.list_drafts().unwrap().is_empty());
     assert!(db.list_companions().unwrap().is_empty());
     assert!(db.list_missions().unwrap().is_empty());
-    assert!(db.list_orchestrations().unwrap().is_empty());
-    assert!(db.runner_list().unwrap().is_empty());
     assert!(db.friction_summary(i64::MAX).is_ok());
     assert!(db.seat_activity(0).iter().all(|seat| seat.turns_total >= seat.turns_window));
 }
@@ -5655,7 +5653,6 @@ fn foreign_version_two_history_shape_repairs_additively() {
     assert_eq!(kept.revisions.len(), 1);
     assert_eq!(kept.revisions[0].raw_plan_markdown, "# Kept plan");
     assert_eq!(kept.revisions[0].comments[0].body, "Keep this feedback");
-    assert!(db.runner_list().unwrap().is_empty());
     drop(db);
     // A second open must remain readable and avoid another migration.
     assert_eq!(Database::open(&path).unwrap().load_all().unwrap().len(), 1);

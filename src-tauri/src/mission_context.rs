@@ -1610,7 +1610,7 @@ pub fn prepare_handoff(
     message_ids: &[String],
     key: &str,
 ) -> Result<Value, String> {
-    if !["drafter", "plan", "run", "auto"].contains(&destination) {
+    if !["drafter", "plan", "run"].contains(&destination) {
         return Err("unsupported handoff destination".into());
     }
     if body.trim().is_empty() || body.len() > 256_000 || key.trim().is_empty() {
@@ -1759,7 +1759,7 @@ fn prepare_conversation_handoff(
             "select 1–100 completed source messages before preparing a conversation handoff".into(),
         );
     }
-    if !["drafter", "plan", "run", "auto"].contains(&request.destination.as_str())
+    if !["drafter", "plan", "run"].contains(&request.destination.as_str())
         || request.body.trim().is_empty()
         || request.body.len() > 256_000
         || request.idempotency_key.is_empty()
@@ -2065,6 +2065,7 @@ mod tests {
         );
         assert!(deliver_handoff(&db, "m1", h, d, None).is_ok());
         assert!(deliver_handoff(&db, "m1", h, "different-session", None).is_err());
+        // "auto" (a native run graph) is no longer a destination.
         assert!(prepare_handoff(&db, "m1", "auto", "changed", &[], "brief-one").is_err());
     }
     #[test]

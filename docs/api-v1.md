@@ -42,15 +42,11 @@ This is not a failure to report: anything written in either window could be take
 | POST | `/v1/plan` | hook contract | Plan-hold ingest: the ExitPlanMode hook POSTs the plan and blocks until the review resolves | JSON hook payload {session_id, plan markdown, cwd, ...} | held; resolves to the review verdict (approve/deny reason) |
 | POST | `/v1/term/event` | hook contract | Terminal attention and conversation binding: an agent in a dock terminal started, is working, needs you, finished its turn, or exited (async SessionStart/UserPromptSubmit/Notification/Stop/SessionEnd hooks) | Claude Code hook payload {hook_event_name, session_id, transcript_path, source?, notification_type?, message?, last_assistant_message?, ...}; X-Redline-Terminal names the dock terminal, X-Redline-Entrypoint carries CLAUDE_CODE_ENTRYPOINT (sdk-cli = a nested claude -p, never bound) | {} (ignored without a live terminal id) |
 | POST | `/v1/term/ask` | hook contract | Permission and question cards: a dock terminal's PermissionRequest hook (every tool) or PreToolUse hook (AskUserQuestion) holds until the session stage answers; ExitPlanMode passes through | Claude Code hook payload {hook_event_name, session_id, tool_name, tool_input, permission_suggestions?, tool_use_id?, ...}; X-Redline-Terminal names the dock terminal | {} at once unless the terminal's conversation is bound to that session and subscribed (the TUI then asks itself); else held up to 1 h (permission) / 5 min (question) and resolved to the CLI's decision JSON, or {} to hand the ask to the TUI |
-| POST | `/v1/scaled/:run/preflight` | hook contract | Scaled build pre-flight: the run's PreToolUse(Workflow) hook POSTs the generated script and blocks until the user presses Run, Edit or Cancel | JSON hook payload {session_id, tool_name: Workflow, tool_input: {script}, ...} | held; resolves to allow (Run), deny with the user's edit note (Edit), or deny (Cancel) |
-| POST | `/v1/scaled/:run/gate` | hook contract | Scaled build budget gate: every tool call of the run's lead and workflow subagents; no opinion until the agent, token or time limit trips, then held until Extend or Stop | JSON hook payload {session_id, tool_name, tool_input, agent_id?, agent_type?, ...} | {} (no opinion), held while paused, or a deny once stopped |
-| GET | `/v1/scaled/:run/brief` | open | A scaled build lead's brief: the approved plan, the build's agent/model/token/time budget, and the execution and reporting contract | - | text/plain brief |
 | POST | `/v1/codex/stop` | hook contract | Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves | JSON Codex Stop payload {session_id, turn_id, permission_mode, last_assistant_message, ...} | {} to finish the turn, or {decision:"block", reason} to request revision |
 | POST | `/v1/cursor/prompt` | hook contract | Cursor prompt capture using the shared memory ingest contract | prompt, conversation_id, workspace_roots | continue true |
 | POST | `/v1/cursor/response` | hook contract | Cache the complete Cursor response for its exact conversation and generation | conversation_id, generation_id, text | empty object |
 | POST | `/v1/cursor/stop` | hook contract | Hold the completed Cursor plan for review | conversation_id, generation_id, status | empty object or followup_message |
 | POST | `/v1/antigravity/stop` | hook contract | Hold a completed Antigravity plan from its confined transcript | conversationId, executionNum, transcriptPath, fullyIdle | decision allow or continue with reason |
-| POST | `/v1/runs/claim` | hook contract | Runner first-write ownership guard for a live task | run, node and attempt headers; tool_name, tool_input | PreToolUse allow or deny |
 | GET | `/v1/sessions/:session_id/plan` | open | Latest plan revision with block structure (agent-in-doc read) | session id in path | JSON {version, blocks:[{id, markdown}, ...]} |
 | POST | `/v1/sessions/:session_id/suggestions` | token: `plan.suggest` | Post a tracked edit suggestion against a plan block | JSON {block_id, op, markdown, ...} | JSON accepted suggestion (or staleness error) |
 | POST | `/v1/sessions/:session_id/comments` | token: `plan.comment` | Capture a [feedback] comment (voice agent and read-only agents) that rides the next Revise | JSON {body, block_id?, ...} | JSON created comment |
@@ -90,7 +86,6 @@ This is not a failure to report: anything written in either window could be take
 | GET | `/v1/reviews/annotations` | open | List external annotations on a live review | ?repo= known project | JSON annotation list |
 | POST | `/v1/reviews/annotations` | token: `review.annotate` | Post a finding into a live review (external local tools) | JSON schema-only body with required source tag | JSON created annotation |
 | DELETE | `/v1/reviews/annotations` | token: `review.annotate` | Clear a source's annotations from a live review | ?repo=&source=... | JSON cleared count |
-| POST | `/v1/orchestration/report` | token: `orchestration.report` | File an orchestrated run's structured exit report (claims paired against observed ground truth in the RunReport GUI) | JSON {planSessionId, scriptPath, workflowRan, summary, subtasks:[{title, planSection, verified, skipped, notes}]} | JSON {ok} |
 | GET | `/v1/work/ready` | open | The work graph's claimable frontier, urgent-first: open items whose defer time has passed, with no deferred ancestor up the parent chain and no unclosed blocker | ?project=&limit=... | JSON {items:[work item, ...]} |
 | GET | `/v1/work/:id` | open | One work item plus every typed edge touching it | item id in path | JSON {item, edges:[{fromId, toId, type, ...}]} |
 | POST | `/v1/work` | token: `work.file` | File a new work item (task / bug / question / message); `parent` mints a child id and records the parent-child edge | JSON {title, body?, kind?, priority?, status?, parent?, originKind?, originId?, projectPath?, pinned?, deferUntil?, author?} | JSON {item} with the minted hierarchical id |
@@ -150,7 +145,7 @@ This is not a failure to report: anything written in either window could be take
 - `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`, `POST /v1/memory/runs/:id/revert`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`
 - `review.annotate` — `POST /v1/reviews/annotations`, `DELETE /v1/reviews/annotations`
-- `orchestration.report` — `POST /v1/orchestration/report`
+- `orchestration.report` — 
 - `ui.panel` — `POST /v1/extensions/:name/panel`
 - `work.file` — `POST /v1/work`
 - `work.claim` — `POST /v1/work/:id/claim`, `POST /v1/work/:id/close`

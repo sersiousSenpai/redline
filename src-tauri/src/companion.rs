@@ -268,7 +268,6 @@ pub fn describe_surface(s: &SurfaceInfo) -> String {
         "chat" => named("a chat room"),
         "servers" => named("the Localhost grid"),
         "memory" => named("their organized memory"),
-        "runs" => named("the run monitor"),
         "terminal" => named("the terminal"),
         _ => "the welcome screen".to_string(),
     }
@@ -1778,9 +1777,8 @@ pub fn companion_cancel(
 }
 
 #[tauri::command]
-pub fn companion_build_activity(companion: tauri::State<'_, CompanionState>, store: tauri::State<'_, crate::state::SessionStore>, companion_id: String, project_path: String) -> bool {
+pub fn companion_build_activity(companion: tauri::State<'_, CompanionState>, companion_id: String, project_path: String) -> bool {
     companion.db.list_companions().unwrap_or_default().iter().any(|chat| chat.companion_id != companion_id && companion.is_running(&chat.companion_id) && companion.db.companion_project(&chat.companion_id).as_deref() == Some(&project_path) && companion.db.get_setting(&runtime_key(&chat.companion_id, "activeMode")).as_deref() == Some("build"))
-        || store.list().iter().any(|session| session.project_path == project_path && session.run_state.as_deref() == Some("running"))
 }
 
 #[tauri::command]

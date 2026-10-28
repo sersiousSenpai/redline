@@ -40,8 +40,6 @@ pub struct NativeTurn {
     started: bool,
     initialized: bool,
     observed_meter: TurnMeter,
-    task_instructions: Option<String>,
-    file_changes: std::collections::HashMap<String, Vec<String>>,
     output_schema: Option<Value>,
     workspace_write: bool,
     tools_seen: std::collections::HashSet<String>,
@@ -56,12 +54,6 @@ pub struct Step {
     pub error: Option<String>,
     pub activity: Option<String>,
     pub meter: Option<TurnMeter>,
-    pub approval: Option<FileApproval>,
-}
-
-pub struct FileApproval {
-    pub id: Value,
-    pub paths: Vec<String>,
 }
 
 impl NativeTurn {
@@ -89,37 +81,30 @@ impl NativeTurn {
             started: false,
             initialized: false,
             observed_meter: TurnMeter::new(),
-            task_instructions: None,
-            file_changes: Default::default(),
             output_schema: None,
             workspace_write: false,
             tools_seen: Default::default(),
         }
     }
-    fn approval_policy(&self) -> &str { if self.task_instructions.is_some() { "on-request" } else { "never" } }
     fn start_turn(&self) -> Value {
         json!({"id":3,"method":"turn/start","params":{
             "threadId":self.thread_id,"input":[{"type":"text","text":self.prompt}],
-            "model":self.model,"effort":self.effort,"approvalPolicy":self.approval_policy(),
+            "model":self.model,"effort":self.effort,"approvalPolicy":"never",
             "outputSchema":self.output_schema,
-            "sandboxPolicy":if self.workspace_write { json!({"type":"workspaceWrite","writableRoots":[self.cwd],"networkAccess":true}) } else { json!({"type":"readOnly","networkAccess":self.task_instructions.is_none()}) }
+            "sandboxPolicy":if self.workspace_write { json!({"type":"workspaceWrite","writableRoots":[self.cwd],"networkAccess":true}) } else { json!({"type":"readOnly","networkAccess":true}) }
         }})
     }
     pub fn workspace_write(mut self, enabled: bool) -> Self { self.workspace_write = enabled; self }
     pub fn steer(&self, text: &str, id: u64) -> Option<Value> {
         Some(json!({"id":id,"method":"turn/steer","params":{"threadId":self.thread_id.as_ref()?,"expectedTurnId":self.turn_id.as_ref()?,"input":[{"type":"text","text":text}]}}))
     }
-    pub fn task(mut self, instructions: &str) -> Self {
-        self.task_instructions = Some(instructions.into());
-        self
-    }
     pub fn schema(mut self, schema: Option<Value>) -> Self {
         self.output_schema = schema;
         self
     }
     fn start_thread(&self, disabled_tools: Value) -> Value {
-        let mut params = json!({"cwd":self.cwd,"model":self.model,"approvalPolicy":self.approval_policy(),"sandbox":if self.workspace_write { "workspace-write" } else { "read-only" },"developerInstructions":self.task_instructions.as_deref().unwrap_or(INSTRUCTIONS)});
-        if self.task_instructions.is_some() || self.output_schema.is_some() {
+        let mut params = json!({"cwd":self.cwd,"model":self.model,"approvalPolicy":"never","sandbox":if self.workspace_write { "workspace-write" } else { "read-only" },"developerInstructions":INSTRUCTIONS});
+        if self.output_schema.is_some() {
             params["config"] = disabled_tools;
         }
         let method = if let Some(thread) = &self.thread_id {
@@ -157,7 +142,7 @@ impl NativeTurn {
                 Some(1) if !self.initialized => {
                     self.initialized = true;
                     step.writes.push(json!({"method":"initialized"}));
-                    if self.task_instructions.is_some() || self.output_schema.is_some() {
+                    if self.output_schema.is_some() {
                         step.writes.push(json!({"id":5,"method":"config/read","params":{"cwd":self.cwd,"includeLayers":false}}));
                     } else {
                         step.writes.push(self.start_thread(Value::Null));
@@ -189,14 +174,12 @@ impl NativeTurn {
                         self.observe_limits(limits, &mut step);
                     }
                 }
-                Some(5)
-                    if (self.task_instructions.is_some() || self.output_schema.is_some())
-                        && !self.started =>
+                Some(5) if self.output_schema.is_some() && !self.started =>
                 {
                     let Some(config) = event.pointer("/result/config").and_then(Value::as_object)
                     else {
                         step.error =
-                            Some("Codex could not verify the run's tool configuration".into());
+                            Some("Codex could not verify the turn's tool configuration".into());
                         return step;
                     };
                     let mut disabled = json!({"features.apps":false,"features.multi_agent":false});
@@ -227,24 +210,6 @@ impl NativeTurn {
         // Server requests cannot remain unanswered and hang a conversation.
         // This read-only mode never escalates filesystem permissions.
         if let Some(id) = event.get("id") {
-            if self.task_instructions.is_some()
-                && method == "item/fileChange/requestApproval"
-                && p["grantRoot"].is_null()
-                && p["threadId"].as_str() == self.thread_id.as_deref()
-                && p["turnId"].as_str() == self.turn_id.as_deref()
-            {
-                if let Some(paths) = p["itemId"]
-                    .as_str()
-                    .and_then(|item| self.file_changes.remove(item))
-                    .filter(|paths| !paths.is_empty())
-                {
-                    step.approval = Some(FileApproval {
-                        id: id.clone(),
-                        paths,
-                    });
-                    return step;
-                }
-            }
             let result = match method {
                 "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                     Some(json!({"decision":"decline"}))
@@ -308,30 +273,6 @@ impl NativeTurn {
                             self.meter_rev += 1;
                             self.observed_meter.rev = self.meter_rev;
                             step.meter = Some(self.observed_meter.clone());
-                        }
-                    }
-                }
-                if kind == "fileChange" && self.task_instructions.is_some() {
-                    if let (Some(id), Some(changes)) = (
-                        p.pointer("/item/id").and_then(Value::as_str),
-                        p.pointer("/item/changes").and_then(Value::as_array),
-                    ) {
-                        let mut paths = Vec::new();
-                        let mut valid = !changes.is_empty() && changes.len() <= 128;
-                        for change in changes {
-                            if let Some(path) = change["path"].as_str() {
-                                paths.push(path.to_string());
-                            } else {
-                                valid = false;
-                            }
-                            if let Some(path) =
-                                change.pointer("/kind/move_path").and_then(Value::as_str)
-                            {
-                                paths.push(path.to_string());
-                            }
-                        }
-                        if valid && self.file_changes.len() < 256 {
-                            self.file_changes.insert(id.into(), paths);
                         }
                     }
                 }
@@ -551,45 +492,6 @@ mod tests {
         assert_eq!(meter.output_tokens, 10);
         assert_eq!(meter.context_tokens, 70);
         assert_eq!(meter.cost_usd, None);
-    }
-    #[test]
-    fn task_configuration_disables_external_mutation_paths() {
-        let mut t = turn().task("bounded task");
-        let init = t.observe(&json!({"id":1,"result":{}}));
-        assert_eq!(init.writes[1]["method"], "config/read");
-        let config = t.observe(
-            &json!({"id":5,"result":{"config":{"mcp_servers":{"remote":{"enabled":true}}}}}),
-        );
-        let params = &config.writes[0]["params"];
-        assert_eq!(params["sandbox"], "read-only");
-        assert_eq!(params["approvalPolicy"], "on-request");
-        assert_eq!(params["config"]["mcp_servers.\"remote\".enabled"], false);
-        assert_eq!(params["config"]["features.apps"], false);
-        assert!(t.observe(&json!({"id":1,"result":{}})).writes.is_empty());
-    }
-    #[test]
-    fn file_approval_requires_exact_item_turn_and_paths_including_rename() {
-        let mut t = turn().task("bounded task");
-        t.thread_id = Some("t".into());
-        t.turn_id = Some("u".into());
-        let approval = json!({"id":90,"method":"item/fileChange/requestApproval","params":{"threadId":"t","turnId":"u","itemId":"patch"}});
-        assert_eq!(
-            t.observe(&approval).writes[0]["result"]["decision"],
-            "decline"
-        );
-        t.observe(&json!({"method":"item/started","params":{"threadId":"t","turnId":"u","item":{"type":"fileChange","id":"patch","changes":[{"path":"old.rs","kind":{"type":"update","move_path":"new.rs"}}]}}}));
-        let mut wrong = approval.clone();
-        wrong["params"]["turnId"] = json!("other");
-        assert!(t.observe(&wrong).approval.is_none());
-        let mut broad = approval.clone();
-        broad["params"]["grantRoot"] = json!("/repo");
-        assert!(t.observe(&broad).approval.is_none());
-        let accepted = t.observe(&approval).approval.unwrap();
-        assert_eq!(accepted.paths, ["old.rs", "new.rs"]);
-        assert_eq!(
-            t.observe(&approval).writes[0]["result"]["decision"],
-            "decline"
-        );
     }
     #[test]
     fn structured_review_has_no_shell_web_or_connected_tools() {

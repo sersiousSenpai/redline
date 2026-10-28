@@ -147,35 +147,6 @@ pub fn claim_plan_launch(body_hash: &str) -> Option<LaunchClaim> {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration handoff guard
-// ---------------------------------------------------------------------------
-//
-// The Orchestrate lineage: `record_orchestration_launch` registers the typed
-// orchestrator prompt's hash here WITH the plan session id it will execute;
-// when the orchestrator session's first `UserPromptSubmit` hook fire arrives
-// at the ingest handler, the handler claims this map — at that exact moment
-// the new claude session id is known, so the ingest records
-// `session_link(session → plan session)` and advances the run state. Same
-// TTL/consume-once semantics as the guards above.
-
-fn orchestration_guard() -> &'static TtlGuard<String> {
-    static G: OnceLock<TtlGuard<String>> = OnceLock::new();
-    G.get_or_init(|| TtlGuard::new(GUARD_TTL))
-}
-
-/// Register an orchestrator prompt body about to be typed into a fresh
-/// session, carrying the plan session id whose approved plan it executes.
-pub fn register_orchestration_prompt(body_hash: &str, plan_session_id: &str) {
-    orchestration_guard().register(body_hash.to_string(), plan_session_id.to_string());
-}
-
-/// Consume an orchestration registration: the plan session id this body was
-/// launched to execute, or `None` if the body wasn't an Orchestrate launch.
-pub fn claim_orchestration_prompt(body_hash: &str) -> Option<String> {
-    orchestration_guard().claim(body_hash)
-}
-
-// ---------------------------------------------------------------------------
 // Public record entry points
 // ---------------------------------------------------------------------------
 
@@ -466,38 +437,6 @@ mod tests {
         let claim = claim_plan_launch(&bh).expect("a threadless launch still registers");
         assert_eq!(claim.origin, "front-door");
         assert_eq!(claim.thread, None);
-    }
-
-    #[test]
-    fn orchestration_guard_claims_once_with_plan_session_id() {
-        let bh = format!("orchguard-{}", now_millis());
-        assert_eq!(claim_orchestration_prompt(&bh), None);
-        register_orchestration_prompt(&bh, "plan-sid-9");
-        assert_eq!(
-            claim_orchestration_prompt(&bh),
-            Some("plan-sid-9".to_string())
-        );
-        assert_eq!(claim_orchestration_prompt(&bh), None, "consume-once");
-    }
-
-    #[test]
-    fn orchestration_guard_rearms_after_a_claim() {
-        // Pins the handoff-retry path against the GUARD_TTL bug: a retry
-        // re-calls `record_orchestration_launch`, and because register is a
-        // plain insert, re-registering after a claim (or an expiry) genuinely
-        // re-arms — the retried prompt still earns its `orchestrations` row.
-        let bh = format!("orchguard-rearm-{}", now_millis());
-        register_orchestration_prompt(&bh, "plan-sid-3");
-        assert_eq!(
-            claim_orchestration_prompt(&bh),
-            Some("plan-sid-3".to_string())
-        );
-        register_orchestration_prompt(&bh, "plan-sid-3");
-        assert_eq!(
-            claim_orchestration_prompt(&bh),
-            Some("plan-sid-3".to_string()),
-            "a re-registered body must claim again"
-        );
     }
 
     #[test]

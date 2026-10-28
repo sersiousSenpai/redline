@@ -254,20 +254,6 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         ),
     },
     SeatFact {
-        seat: "orchestrator",
-        label: "Plan orchestrator",
-        role: "Visible terminal session that executes an approved plan as a \
-               multi-agent workflow. Every workflow subagent inherits the session \
-               model, so this pick multiplies across the whole fan-out (up to 16 \
-               concurrent agents).",
-        traits: &["interactive", "long_context"],
-        note: Some(
-            "Left unset this seat spawns with `--model sonnet` (never the bare CLI \
-             default) — a big model here multiplies across every concurrent \
-             subagent. Say so in the rationale if you propose raising it.",
-        ),
-    },
-    SeatFact {
         seat: "fork_plan",
         label: "Plan sidecar threads",
         role: "Read-only fork answering one reviewer comment on a plan section. \
@@ -331,12 +317,6 @@ const SEAT_HINTS: &[(&str, &str)] = &[
         "seatassign",
         "This agent. Left on Default it runs on a fast tier; a change here takes \
          effect on its next run.",
-    ),
-    (
-        "orchestrator",
-        "The Orchestrate terminal session. Left on Default it launches with \
-         sonnet — every workflow subagent inherits this model, so the cost \
-         multiplies across the fan-out.",
     ),
     (
         "fork_plan",

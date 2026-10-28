@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::claude::{self, ToolNames};
 use super::wire::ConvoEvent;
-use crate::runwatch::{read_new_records, split_lines, Cursor};
+use crate::transcript::{read_new_records, split_lines, Cursor};
 
 /// The first read takes this much of the transcript's end; older history
 /// comes back through pages.

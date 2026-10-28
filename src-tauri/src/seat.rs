@@ -63,7 +63,6 @@ pub const KNOWN_SEATS: &[&str] = &[
     "ai_commit",
     "browse_locator",
     "browse_organizer",
-    "orchestrator",
     "fork_plan",
     "fork_review",
     "fork_drafter",
@@ -199,12 +198,6 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
          element the user highlighted.",
         "In the background, each time you add a list item with something \
          highlighted on the page.",
-    ),
-    (
-        "orchestrator",
-        "Executes an approved plan as a multi-agent workflow in a visible \
-         terminal session.",
-        "When you launch a plan via Orchestrate.",
     ),
     (
         "fork_plan",

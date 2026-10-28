@@ -632,26 +632,6 @@ pub fn describe_turn_error(
     error.to_string()
 }
 
-/// The same classification as `describe_turn_error`, worded for a surface with
-/// nobody sitting in front of it: an overnight run's stall note, read later in
-/// the Runs surface. No "send your message again" here — the reader is
-/// deciding whether to relaunch, not typing into a conversation. Shares the
-/// two predicates so a run and a discussion can never disagree about what an
-/// error means.
-pub fn describe_run_error(error: &str) -> String {
-    if is_context_overflow(error) {
-        return "The session outgrew the model's context window and stopped. A \
-                relaunch starts fresh."
-            .to_string();
-    }
-    if is_transient(error) {
-        return "The model hit a temporary error and the run stopped — not \
-                something the plan or the prompt did. Relaunching usually works."
-            .to_string();
-    }
-    error.to_string()
-}
-
 /// The tool calls carried by one parsed stream line, as `(name, input)`.
 ///
 /// The complete call — name AND arguments — arrives on the `assistant` message
@@ -1195,25 +1175,6 @@ mod tests {
         });
         assert_eq!(msg, "claude exited abnormally: boom");
         assert!(!reset_fired);
-    }
-
-    /// A run's stall note gets the same classification with run-shaped words:
-    /// no machine token, and no "send your message again" to somebody who
-    /// isn't there.
-    #[test]
-    fn run_errors_are_humanised_without_conversational_wording() {
-        let transient = describe_run_error("error_during_execution");
-        assert!(!transient.contains("error_during_execution"), "leaked: {transient}");
-        assert!(!transient.contains("send your message"));
-        assert!(transient.to_lowercase().contains("relaunch"));
-
-        let overflow = describe_run_error("prompt is too long: 1200000 tokens");
-        assert!(overflow.to_lowercase().contains("context window"));
-        assert!(!overflow.contains("send your message"));
-
-        // The generic non-model reasons the queue composes itself pass through.
-        let generic = "exited without parking a review (run_state=none)";
-        assert_eq!(describe_run_error(generic), generic);
     }
 
 }

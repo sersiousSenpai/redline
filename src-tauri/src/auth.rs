@@ -114,7 +114,7 @@ pub struct RouteSpec {
 /// `(method, path)` — so a flag in the body could never carry its own class.
 pub use redline_extension_abi::scopes::{
     BROWSER_DRIVE as SCOPE_BROWSER_DRIVE, CONSULT as SCOPE_CONSULT,
-    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, KNOWN_SCOPES, ORCH_REPORT as SCOPE_ORCH_REPORT,
+    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, KNOWN_SCOPES,
     PLAN_COMMENT as SCOPE_PLAN_COMMENT, PLAN_OFFER as SCOPE_PLAN_OFFER,
     PLAN_SUGGEST as SCOPE_PLAN_SUGGEST, REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE,
     UI_PANEL as SCOPE_UI_PANEL, WORK_CLAIM as SCOPE_WORK_CLAIM, WORK_FILE as SCOPE_WORK_FILE,
@@ -223,30 +223,6 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "POST",
-        path: "/v1/scaled/:run/preflight",
-        class: RouteClass::HookContract,
-        purpose: "Scaled build pre-flight: the run's PreToolUse(Workflow) hook POSTs the generated script and blocks until the user presses Run, Edit or Cancel",
-        request: "JSON hook payload {session_id, tool_name: Workflow, tool_input: {script}, ...}",
-        response: "held; resolves to allow (Run), deny with the user's edit note (Edit), or deny (Cancel)",
-    },
-    RouteSpec {
-        method: "POST",
-        path: "/v1/scaled/:run/gate",
-        class: RouteClass::HookContract,
-        purpose: "Scaled build budget gate: every tool call of the run's lead and workflow subagents; no opinion until the agent, token or time limit trips, then held until Extend or Stop",
-        request: "JSON hook payload {session_id, tool_name, tool_input, agent_id?, agent_type?, ...}",
-        response: "{} (no opinion), held while paused, or a deny once stopped",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/scaled/:run/brief",
-        class: RouteClass::Open,
-        purpose: "A scaled build lead's brief: the approved plan, the build's agent/model/token/time budget, and the execution and reporting contract",
-        request: "-",
-        response: "text/plain brief",
-    },
-    RouteSpec {
-        method: "POST",
         path: "/v1/codex/stop",
         class: RouteClass::HookContract,
         purpose: "Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves",
@@ -284,14 +260,6 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Hold a completed Antigravity plan from its confined transcript",
         request: "conversationId, executionNum, transcriptPath, fullyIdle",
         response: "decision allow or continue with reason",
-    },
-    RouteSpec {
-        method: "POST",
-        path: "/v1/runs/claim",
-        class: RouteClass::HookContract,
-        purpose: "Runner first-write ownership guard for a live task",
-        request: "run, node and attempt headers; tool_name, tool_input",
-        response: "PreToolUse allow or deny",
     },
     RouteSpec {
         method: "GET",
@@ -604,14 +572,6 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Clear a source's annotations from a live review",
         request: "?repo=&source=...",
         response: "JSON cleared count",
-    },
-    RouteSpec {
-        method: "POST",
-        path: "/v1/orchestration/report",
-        class: RouteClass::Protected(SCOPE_ORCH_REPORT),
-        purpose: "File an orchestrated run's structured exit report (claims paired against observed ground truth in the RunReport GUI)",
-        request: "JSON {planSessionId, scriptPath, workflowRan, summary, subtasks:[{title, planSection, verified, skipped, notes}]}",
-        response: "JSON {ok}",
     },
     RouteSpec {
         method: "GET",

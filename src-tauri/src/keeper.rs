@@ -26,7 +26,7 @@
 //! one-shots. A watch only ever *notices* a condition and wakes an existing
 //! actor or spawn site — the bus itself spawns no agents and lands no work.
 //! The ad hoc timers that used to run as their own threads/tasks are re-homed
-//! here (mirror sync, ledger backup, the orchestrate-stall sweep, the revise
+//! here (mirror sync, ledger backup, the revise
 //! watchdog's scheduling, the review-staleness sweep). New background behavior becomes a bus
 //! entry, not a new thread — **the bus is the one scheduling vocabulary going
 //! forward**. The memory passes (organize / compaction / observations) remain
@@ -39,7 +39,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::db::Database;
 use crate::ledger::now_millis;
@@ -133,10 +133,6 @@ const MIRROR_SYNC_EVERY: Duration = Duration::from_secs(120);
 /// Ledger-backup cadence — the 6h rhythm of the retired `std::thread` loop.
 /// The immediate startup snapshot stays at the setup site.
 const BACKUP_EVERY: Duration = Duration::from_secs(6 * 3600);
-/// Orchestrate-stall sweep cadence. The stall *window* itself stays
-/// `crate::ORCHESTRATE_STALL_WINDOW` in lib.rs; sweeping every minute
-/// detects a stall at most a minute late.
-const STALL_SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// Review-staleness sweep cadence — deliberately conservative. With the
 /// seen-twice rule a session reconciles 5–10 minutes after its held POST
 /// silently died, never on a single racy observation.
@@ -211,252 +207,6 @@ fn backup_act(ctx: &WatchCtx, _now: i64) {
                 "LEDGER CHAIN VERIFICATION FAILED — the record may have been tampered with"
             ),
             Err(e) => tracing::warn!(error = %e, "deep ledger verify could not run"),
-        }
-    });
-}
-
-// --- orchestrate-stall sweep ------------------------------------------------
-
-/// When each session was FIRST observed in `orchestrating` by this process.
-/// In-memory on purpose: `run_updated_at` isn't surfaced by a db helper, and
-/// a restart merely restarts the clock — detection after a relaunch is at
-/// most one window late, still strictly better than the old one-shot task,
-/// which died with its process and then never fired at all.
-fn stall_first_seen() -> &'static StdMutex<HashMap<String, i64>> {
-    static G: OnceLock<StdMutex<HashMap<String, i64>>> = OnceLock::new();
-    G.get_or_init(|| StdMutex::new(HashMap::new()))
-}
-
-/// One sweep step (pure over the passed map): drop sessions no longer
-/// orchestrating (a beacon landed — their clock resets if they ever return),
-/// start the clock for newly-seen ones, and return the sessions that have sat
-/// in `orchestrating` for at least `window_ms`. Sorted for determinism.
-pub fn stall_sweep_mark(
-    first_seen: &mut HashMap<String, i64>,
-    orchestrating: &[String],
-    now_ms: i64,
-    window_ms: i64,
-) -> Vec<String> {
-    first_seen.retain(|sid, _| orchestrating.iter().any(|o| o == sid));
-    for sid in orchestrating {
-        first_seen.entry(sid.clone()).or_insert(now_ms);
-    }
-    let mut ripe: Vec<String> = first_seen
-        .iter()
-        .filter(|(_, &t)| now_ms - t >= window_ms)
-        .map(|(s, _)| s.clone())
-        .collect();
-    ripe.sort();
-    ripe
-}
-
-fn orchestrating_sessions(ctx: &WatchCtx) -> Vec<String> {
-    ctx.store
-        .list()
-        .into_iter()
-        .filter(|s| s.run_state.as_deref() == Some("orchestrating"))
-        .map(|s| s.session_id)
-        .collect()
-}
-
-fn running_sessions(ctx: &WatchCtx) -> Vec<String> {
-    ctx.store
-        .list()
-        .into_iter()
-        .filter(|s| s.run_state.as_deref() == Some("running"))
-        .map(|s| s.session_id)
-        .collect()
-}
-
-/// Something is (or was just) on the clock — the sweep must also run when the
-/// tracked set needs clearing, so a session that left `orchestrating` between
-/// sweeps drops its stale clock instead of firing instantly on a later return.
-fn stall_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
-    !orchestrating_sessions(ctx).is_empty()
-        || !stall_first_seen().lock().unwrap().is_empty()
-        || !running_sessions(ctx).is_empty()
-}
-
-/// Walk every over-window `orchestrating` session to `stalled` — periodic and
-/// restart-surviving, where a one-shot task dies with a restart. Re-checks
-/// `orchestrate_stall_should_fire` right before walking, so the sweep only
-/// ever stalls a chip still reading `orchestrating`.
-fn stall_watch_act(ctx: &WatchCtx, now: i64) {
-    let window_ms = crate::ORCHESTRATE_STALL_WINDOW.as_millis() as i64;
-    let orch = orchestrating_sessions(ctx);
-    let ripe = {
-        let mut seen = stall_first_seen().lock().unwrap();
-        stall_sweep_mark(&mut seen, &orch, now, window_ms)
-    };
-    if ripe.is_empty() {
-        return;
-    }
-    // The per-session sqlite read + run-state walk ride `spawn_blocking`
-    // (the house pattern — see `mirror_act`) so the bus tick never blocks
-    // on the database.
-    let app = ctx.app.clone();
-    let store = ctx.store.clone();
-    tokio::task::spawn_blocking(move || {
-        for sid in ripe {
-            let state = store.database().get_run_state(&sid);
-            if crate::orchestrate_stall_should_fire(state.as_deref()) {
-                tracing::info!(session_id = %sid, "orchestrate stall sweep fired");
-                crate::advance_run_state(&app, &store, &sid, "stalled");
-            }
-        }
-    });
-}
-
-/// The whole orchestrate-stall sweep: the launch window (`orchestrating` that
-/// never got a beacon) and the silence window (`running` that stopped
-/// producing artifacts). One watch, two clocks — the plan for this was
-/// explicitly "extend that sweep rather than add a fourth timer".
-fn stall_sweep_act(ctx: &WatchCtx, now: i64) {
-    stall_watch_act(ctx, now);
-    running_silence_act(ctx, now);
-}
-
-/// The second half of the same sweep: a run that reached `running` and then
-/// wrote nothing anywhere in its artifact set for the window.
-///
-/// Deliberately folded into this watch rather than given a fourth timer. The
-/// clock is the artifacts' own mtimes (`runwatch::run_last_activity_ms`), not
-/// an in-memory first-seen map, so it survives a restart with no warm-up: the
-/// evidence is on disk either way.
-fn running_silence_act(ctx: &WatchCtx, now: i64) {
-    let candidates = running_sessions(ctx);
-    if candidates.is_empty() {
-        return;
-    }
-    let window_ms = crate::RUNNING_SILENCE_WINDOW.as_millis() as i64;
-    // Same two vetoes the abandoned-run sweep takes: a run held by a human is
-    // not a silent one.
-    let live_links: HashSet<String> = ctx
-        .app
-        .try_state::<crate::PendingReviews>()
-        .map(|pr| pr.held_ids())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|rid| crate::orchestration_review_link(&ctx.db, &rid))
-        .collect();
-    let app = ctx.app.clone();
-    let store = ctx.store.clone();
-    let pending = ctx.pending.clone();
-    tokio::task::spawn_blocking(move || {
-        for sid in candidates {
-            let db = store.database();
-            let Some(row) = db.get_orchestration(&sid) else { continue };
-            // No artifacts to read = no evidence of silence. The phantom-run
-            // case (a claim that never anchored) is the launch watchdog's.
-            let Some(last) = crate::runwatch::run_last_activity_ms(&row) else {
-                continue;
-            };
-            let state = db.get_run_state(&sid);
-            if !crate::running_silence_should_stall(
-                state.as_deref(),
-                now - last,
-                window_ms,
-                pending.has(&sid),
-                live_links.contains(&sid),
-            ) {
-                continue;
-            }
-            let quiet_m = (now - last) / 60_000;
-            tracing::info!(
-                session_id = %sid,
-                quiet_minutes = quiet_m,
-                "running-silence sweep: walking a quiet run to stalled"
-            );
-            crate::db::note_friction(
-                "run_stalled",
-                Some("orchestration"),
-                Some(&sid),
-                Some(&format!("running with no artifact writes for {quiet_m}m")),
-            );
-            crate::advance_run_state(&app, &store, &sid, "stalled");
-        }
-    });
-}
-
-// --- abandoned-run sweep ----------------------------------------------------
-
-/// How often the abandoned-run sweep evaluates. Cheap (one in-memory
-/// `store.list()` plus, only when something is ripe, one link lookup per held
-/// review), and the window it enforces is a day — a slow cadence is fine.
-const ABANDONED_RUN_SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
-
-/// Sessions whose chip is in a state the sweep may touch, with the timestamp
-/// the window is measured from. `updated_at` is the session's last activity of
-/// ANY kind, which is exactly the "nothing has happened here" signal wanted.
-fn abandoned_run_candidates(ctx: &WatchCtx) -> Vec<(String, i64, Option<String>)> {
-    ctx.store
-        .list()
-        .into_iter()
-        .filter(|s| {
-            s.run_state
-                .as_deref()
-                .is_some_and(|r| crate::ABANDONED_RUN_STATES.contains(&r))
-        })
-        .map(|s| (s.session_id, s.updated_at, s.run_state))
-        .collect()
-}
-
-fn abandoned_run_predicate(ctx: &WatchCtx, _now: i64) -> bool {
-    !abandoned_run_candidates(ctx).is_empty()
-}
-
-/// Walk every run that claimed work and then went silent for a day to
-/// `stalled` — unless a human is demonstrably still holding it.
-fn abandoned_run_act(ctx: &WatchCtx, now: i64) {
-    let candidates = abandoned_run_candidates(ctx);
-    if candidates.is_empty() {
-        return;
-    }
-    let window_ms = crate::ABANDONED_RUN_WINDOW.as_millis() as i64;
-    // Every plan session a currently-held code review closes out. Resolved
-    // through the T4.1 chain, so a review held across a restart still vetoes.
-    let live_links: HashSet<String> = ctx
-        .app
-        .try_state::<crate::PendingReviews>()
-        .map(|pr| pr.held_ids())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|rid| crate::orchestration_review_link(&ctx.db, &rid))
-        .collect();
-
-    // The run-state walk rides `spawn_blocking` (the house pattern — see
-    // `mirror_act`) so the bus tick never blocks on the database.
-    let app = ctx.app.clone();
-    let store = ctx.store.clone();
-    let pending = ctx.pending.clone();
-    tokio::task::spawn_blocking(move || {
-        for (sid, updated_at, run_state) in candidates {
-            if !crate::abandoned_run_should_stall(
-                run_state.as_deref(),
-                now - updated_at,
-                window_ms,
-                pending.has(&sid),
-                live_links.contains(&sid),
-            ) {
-                continue;
-            }
-            let idle_h = (now - updated_at) / 3_600_000;
-            tracing::info!(
-                session_id = %sid,
-                run_state = ?run_state,
-                idle_hours = idle_h,
-                "abandoned-run sweep: walking a silent run to stalled"
-            );
-            crate::db::note_friction(
-                "run_stalled",
-                Some("orchestration"),
-                Some(&sid),
-                Some(&format!(
-                    "{} for {idle_h}h with no beacon",
-                    run_state.as_deref().unwrap_or("?")
-                )),
-            );
-            crate::advance_run_state(&app, &store, &sid, "stalled");
         }
     });
 }
@@ -673,8 +423,7 @@ pub(crate) fn file_friction_items(db: &Database, window_ms: i64, threshold: i64)
 }
 
 /// Fires when a kind crossed OR a decayed mark needs lowering — the latter is
-/// the bookkeeping half, mirroring the stall sweep's "the tracked set needs
-/// clearing" rule so marks don't stay stale behind an inactive frontier.
+/// the bookkeeping half ("the tracked set needs clearing"), so marks don't stay stale behind an inactive frontier.
 fn friction_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
     let rows = match ctx.db.friction_summary(FRICTION_WINDOW_MS) {
         Ok(rows) => rows,
@@ -715,22 +464,6 @@ pub(crate) static WATCHES: &[Watch] = &[
         gate: always,
         predicate: always,
         act: backup_act,
-    },
-    Watch {
-        name: "orchestrate-stall-sweep",
-        target_role: "orchestrator",
-        cadence: STALL_SWEEP_EVERY,
-        gate: always,
-        predicate: stall_watch_predicate,
-        act: stall_sweep_act,
-    },
-    Watch {
-        name: "abandoned-run-sweep",
-        target_role: "orchestrator",
-        cadence: ABANDONED_RUN_SWEEP_EVERY,
-        gate: always,
-        predicate: abandoned_run_predicate,
-        act: abandoned_run_act,
     },
     Watch {
         name: "review-staleness-sweep",
@@ -942,7 +675,6 @@ mod tests {
         assert_eq!(find("mirror-sync").cadence, Duration::from_secs(120));
         assert_eq!(find("ledger-backup").cadence, Duration::from_secs(6 * 3600));
         // The sweeps and the hub watch are registered, conservatively paced.
-        assert_eq!(find("orchestrate-stall-sweep").cadence, Duration::from_secs(60));
         assert_eq!(find("review-staleness-sweep").cadence, Duration::from_secs(300));
         // The friction filer: conservative cadence, the keeper as its actor.
         assert_eq!(find("friction-filer").cadence, Duration::from_secs(6 * 3600));
@@ -952,24 +684,6 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), WATCHES.len(), "duplicate watch names");
-    }
-
-    #[test]
-    fn stall_sweep_fires_only_past_the_window_and_only_on_orchestrating() {
-        let w = 300_000i64;
-        let mut seen = HashMap::new();
-        let orch = vec!["a".to_string()];
-        // First observation starts the clock — never fires.
-        assert!(stall_sweep_mark(&mut seen, &orch, 1_000, w).is_empty());
-        // Still inside the window — no fire.
-        assert!(stall_sweep_mark(&mut seen, &orch, 1_000 + w - 1, w).is_empty());
-        // At the window — fires.
-        assert_eq!(stall_sweep_mark(&mut seen, &orch, 1_000 + w, w), vec!["a".to_string()]);
-        // A session that LEFT orchestrating is dropped (a beacon landed)…
-        assert!(stall_sweep_mark(&mut seen, &[], 1_000 + w * 2, w).is_empty());
-        assert!(seen.is_empty(), "departed session must drop its clock");
-        // …and a later return restarts the clock instead of firing instantly.
-        assert!(stall_sweep_mark(&mut seen, &orch, 1_000 + w * 3, w).is_empty());
     }
 
     #[test]

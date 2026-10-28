@@ -218,7 +218,7 @@ pub fn finish_if_probing(app: tauri::AppHandle) {
 }
 
 /// Reads that exercise the paths a user's first minute would: the plan list
-/// and the run graphs, both of which go through the same storage a migration
+/// and the drafts, both of which go through the same storage a migration
 /// would have touched.
 fn representative_reads(app: &tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;
@@ -227,12 +227,12 @@ fn representative_reads(app: &tauri::AppHandle) -> Result<String, String> {
         .ok_or("the session store was never registered")?;
     let sessions = store.list();
     let db = store.database();
-    let runs = db.runner_list()?;
+    let drafts = db.list_drafts().map_err(|e| e.to_string())?;
     let settings = db.get_setting("redline.ui.theme");
     Ok(format!(
-        "{} plan sessions, {} runs, settings readable: {}",
+        "{} plan sessions, {} drafts, settings readable: {}",
         sessions.len(),
-        runs.len(),
+        drafts.len(),
         settings.is_some()
     ))
 }

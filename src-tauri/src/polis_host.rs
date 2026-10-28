@@ -26,7 +26,7 @@
 //! - [`RedlineIngest`] — the capture route's `IngestObserver` (A6): every
 //!   fork of `POST /v1/prompts/ingest` that was Redline's and not the
 //!   memory's — the restore-trigger answer, the agent-seat header, the
-//!   launch and orchestration handoffs, the project registry, the capture
+//!   launch handoff, the project registry, the capture
 //!   setting, the transcript backfill. The bodies are the old handler's.
 
 use std::sync::{Arc, OnceLock};
@@ -39,7 +39,7 @@ use polis_core::host::{
 use polis_core::ledger::Origin;
 use polis_llm::{async_trait, Agent, AgentError, AgentReply, AgentRequest, Usage, UsageSink};
 use polis_memory::{Polis, PolisHandle};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::db::Database;
 use crate::ledger;
@@ -362,61 +362,12 @@ impl IngestObserver for RedlineIngest {
     fn on_agent_prompt_skipped(&self, cx: &IngestContext<'_>, bh: &str) {
         let claude_session_id = cx.session_id;
         let v = cx.payload;
-        let cwd = cx.cwd;
         // The draft→launched-session handoff: this hook fire is the first
         // moment the spawned session's claude id is known. When the skipped
         // body was a drafter launch, link the new session under its draft —
         // the seam the whole temporal hierarchy hinges on.
         if let Some(sid) = claude_session_id {
             bind_launch_lineage(&self.store, sid, bh, v);
-        }
-        // The Orchestrate handoff, same seam: when the skipped body was an
-        // Orchestrate launch, this hook fire is the first moment the
-        // orchestrator session's claude id is known — link it under the plan
-        // session it executes, and flip the run chip to `running` (the claim
-        // itself proves the orchestrator came up, so the beacon fires even if
-        // the payload carried no session id for the lineage row).
-        if let Some(plan_sid) = ledger::claim_orchestration_prompt(bh) {
-            if let Some(sid) = claude_session_id {
-                let db = self.store.database();
-                if let Err(e) =
-                    ledger::record_session_link(&db, "session", sid, "session", &plan_sid)
-                {
-                    tracing::warn!(error = %e, "failed to link orchestrator session to its plan session");
-                }
-                // The one moment the orchestrator's transcript path is in
-                // hand: anchor the run for the live monitor and start its
-                // watcher. Runs execute in arbitrary project dirs — the path
-                // must come from the payload, never be assumed under a
-                // Redline project key.
-                if let Some(tp) = v
-                    .get("transcript_path")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|p| !p.is_empty())
-                {
-                    // Fold the launch-time terminal stash into the durable
-                    // row (B5) — the one moment the row exists to hold it.
-                    let launch_terminal = self
-                        .app
-                        .try_state::<crate::LaunchedTerminals>()
-                        .and_then(|l| l.get(&plan_sid));
-                    match db.upsert_orchestration(
-                        &plan_sid,
-                        sid,
-                        tp,
-                        cwd,
-                        launch_terminal.as_deref(),
-                    ) {
-                        Ok(()) => {
-                            crate::runwatch::start(&self.app, self.store.clone(), plan_sid.clone())
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to anchor orchestration for the run monitor")
-                        }
-                    }
-                }
-            }
-            crate::advance_run_state(&self.app, &self.store, &plan_sid, "running");
         }
     }
 

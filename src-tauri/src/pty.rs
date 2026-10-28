@@ -700,8 +700,8 @@ const PTY_CHUNK: usize = 512;
 const PTY_CHUNK_PAUSE: Duration = Duration::from_millis(4);
 
 /// The verified twin of `pty_write`: an unregistered id is an ERROR, not a
-/// silent no-op. Every *programmatic* injection (the Orchestrate handoff,
-/// plan launches, restore) goes through this — a write into a terminal that
+/// silent no-op. Every *programmatic* injection (plan launches, builds,
+/// restore) goes through this — a write into a terminal that
 /// does not exist must be distinguishable from one that landed. The soft
 /// `pty_write`/`pty_write_bytes` contract stays untouched for the best-effort
 /// auto-continue inject and user keystrokes.
@@ -1970,7 +1970,7 @@ mod tests {
     fn pty_write_bytes_checked_errors_for_missing_id() {
         // The verified twin: a programmatic injection into a terminal that
         // does not exist must fail loudly — this indistinguishability is what
-        // let the Orchestrate handoff evaporate silently.
+        // let a programmatic launch evaporate silently.
         let state = PtyState::new();
         let err = pty_write_bytes_checked(&state, "no-such-tab", b"claude\r")
             .expect_err("missing id must be an error");

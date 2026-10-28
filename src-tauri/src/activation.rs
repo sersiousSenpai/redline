@@ -536,7 +536,9 @@ pub fn stage(candidate_bundle: &Path, installed_bundle: &Path, txn_id: &str) -> 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveWork {
-    /// Runs with durable state the runner can pick up again.
+    /// Work with durable state that comes back after a restart. Nothing
+    /// produces entries since native runs were removed; the field stays so
+    /// stored activation snapshots and the restart summary keep one shape.
     pub resumable_runs: Vec<String>,
     /// Everything that will not come back, with what the user can do about it.
     pub interrupted: Vec<InterruptedWork>,
@@ -554,32 +556,6 @@ impl LiveWork {
 /// Take stock of everything running.
 pub fn live_work(app: &AppHandle) -> LiveWork {
     let mut work = LiveWork::default();
-    if let Some(store) = app.try_state::<crate::state::SessionStore>() {
-        if let Ok(runs) = store.database().runner_list() {
-            for run in runs {
-                match run.status.as_str() {
-                    // A running run has durable per-node state and its own
-                    // interrupted-run recovery; it comes back.
-                    "running" | "paused" => {
-                        work.resumable_runs.push(run.run_id.clone());
-                        let mid_turn = run
-                            .nodes
-                            .iter()
-                            .filter(|n| crate::runner_graph::live(&n.status))
-                            .count();
-                        if mid_turn > 0 {
-                            work.blocking.push(format!(
-                                "{mid_turn} task{} still running in {}",
-                                if mid_turn == 1 { "" } else { "s" },
-                                run.run_id
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
     if let Some(pending) = app.try_state::<crate::PendingResponses>() {
         for session in pending.held_sessions() {
             work.interrupted.push(InterruptedWork {

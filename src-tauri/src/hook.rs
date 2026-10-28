@@ -209,39 +209,11 @@ fn ensure_restore_permission_unlocked_at(path: &std::path::Path) {
     }
 }
 
-/// The locally visible ways Claude Code's native multi-agent workflows can be
-/// silently disabled. Workflows degrade to sequential execution with **no
-/// error** when disabled, so the Orchestrate launch modal warns up front on
-/// the two signals Redline can actually see: `"disableWorkflows": true` in
-/// `~/.claude/settings.json`, and `CLAUDE_CODE_DISABLE_WORKFLOWS` in the
-/// environment Redline's PTYs inherit. (The plan-tier toggle is not locally
-/// detectable — the launch toast covers that gap by telling the user to
-/// expect a workflow approval card.)
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowAvailability {
-    pub disabled_in_settings: bool,
-    pub disabled_in_env: bool,
-    /// Which settings file turned it off, so the modal can name the file
-    /// instead of saying "somewhere". `None` when nothing did.
-    pub settings_source: Option<String>,
-    /// Always true, and stated rather than implied: the run executes inside
-    /// `$SHELL -l`, which sources the user's rc files AFTER Redline's own
-    /// environment is inherited. An `export CLAUDE_CODE_DISABLE_WORKFLOWS=1`
-    /// in `~/.zshrc` is therefore fully active in the run and completely
-    /// invisible here. `disabled_in_env: false` means "not in OUR env",
-    /// never "not set" — the durable answer is the run's own mode chip.
-    pub env_unreadable: bool,
-}
-
-/// Every settings file that can carry `disableWorkflows`, in ASCENDING
-/// precedence — later entries override earlier ones.
-///
-/// `settings_path()` alone resolved only `~/.claude/settings.json`, so a flag
-/// in `settings.local.json`, in the project's `.claude/`, or in managed
-/// settings was simply unread and the probe reported "available" with
-/// confidence it had not earned.
-pub fn workflow_settings_files(project_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+/// Every Claude Code settings file that applies to a project, in ASCENDING
+/// precedence — later entries override earlier ones: the user's
+/// `settings.json` and `settings.local.json`, the project's two, then managed
+/// (enterprise) settings.
+pub fn claude_settings_files(project_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if let Some(home) = &home {
@@ -268,45 +240,6 @@ pub fn workflow_settings_files(project_dir: Option<&std::path::Path>) -> Vec<Pat
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
     serde_json::from_str::<Value>(&fs::read_to_string(path).ok()?).ok()
-}
-
-/// The highest-precedence file that states `disableWorkflows`, and what it
-/// said. A file that doesn't mention the key does not override one that does.
-fn disable_workflows_from(files: &[PathBuf]) -> (bool, Option<String>) {
-    let mut disabled = false;
-    let mut source = None;
-    for f in files {
-        let Some(stated) = read_json(f)
-            .as_ref()
-            .and_then(|j| j.get("disableWorkflows"))
-            .and_then(|v| v.as_bool())
-        else {
-            continue;
-        };
-        disabled = stated;
-        source = stated.then(|| f.display().to_string());
-    }
-    (disabled, source)
-}
-
-pub fn workflow_availability(project_dir: Option<&std::path::Path>) -> WorkflowAvailability {
-    workflow_availability_for(&workflow_settings_files(project_dir))
-}
-
-pub fn workflow_availability_for(files: &[PathBuf]) -> WorkflowAvailability {
-    let (disabled_in_settings, settings_source) = disable_workflows_from(files);
-    let disabled_in_env = std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS")
-        .map(|v| {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
-    WorkflowAvailability {
-        disabled_in_settings,
-        disabled_in_env,
-        settings_source,
-        env_unreadable: true,
-    }
 }
 
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
@@ -1603,72 +1536,8 @@ mod tests {
     }
 
     #[test]
-    fn workflow_availability_reads_disable_flag() {
-        let path = tmppath();
-        // Absent file → not disabled.
-        assert!(!workflow_availability_for(&[path.clone()]).disabled_in_settings);
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&json!({"disableWorkflows": true})).unwrap(),
-        )
-        .unwrap();
-        assert!(workflow_availability_for(&[path.clone()]).disabled_in_settings);
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&json!({"disableWorkflows": false})).unwrap(),
-        )
-        .unwrap();
-        assert!(!workflow_availability_for(&[path.clone()]).disabled_in_settings);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// The probe read exactly one file — `~/.claude/settings.json` — so a
-    /// flag in `settings.local.json` or the project's own `.claude/` was
-    /// invisible and the modal reported "available" with confidence it had
-    /// not earned. Precedence is ascending: the later file wins, and a file
-    /// that doesn't mention the key overrides nothing.
-    #[test]
-    fn workflow_availability_walks_settings_files_in_precedence_order() {
-        let dir = std::env::temp_dir().join(format!("redline-wf-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let user = dir.join("settings.json");
-        let local = dir.join("settings.local.json");
-        let project = dir.join("project.json");
-        let files = vec![user.clone(), local.clone(), project.clone()];
-
-        // Nothing on disk at all → not disabled, and no source to blame.
-        let a = workflow_availability_for(&files);
-        assert!(!a.disabled_in_settings);
-        assert!(a.settings_source.is_none());
-        // The env is ALWAYS unreadable — the run happens in `$SHELL -l`.
-        assert!(a.env_unreadable);
-
-        // The local file alone disables it, and names itself.
-        std::fs::write(&local, r#"{"disableWorkflows": true}"#).unwrap();
-        let a = workflow_availability_for(&files);
-        assert!(a.disabled_in_settings);
-        assert_eq!(a.settings_source.as_deref(), Some(local.to_string_lossy().as_ref()));
-
-        // A silent higher-precedence file does not override a stated one.
-        std::fs::write(&project, r#"{"model": "opus"}"#).unwrap();
-        assert!(workflow_availability_for(&files).disabled_in_settings);
-
-        // A stated higher-precedence file does.
-        std::fs::write(&project, r#"{"disableWorkflows": false}"#).unwrap();
-        let a = workflow_availability_for(&files);
-        assert!(!a.disabled_in_settings);
-        assert!(a.settings_source.is_none());
-
-        // A lower-precedence file cannot re-enable it.
-        std::fs::write(&user, r#"{"disableWorkflows": true}"#).unwrap();
-        assert!(!workflow_availability_for(&files).disabled_in_settings);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn workflow_settings_files_are_ordered_user_then_project_then_managed() {
-        let files = workflow_settings_files(Some(std::path::Path::new("/tmp/repo")));
+    fn claude_settings_files_are_ordered_user_then_project_then_managed() {
+        let files = claude_settings_files(Some(std::path::Path::new("/tmp/repo")));
         let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
         let project_idx = names
             .iter()
@@ -1682,15 +1551,4 @@ mod tests {
         // Managed settings outrank everything a user can write.
         assert_eq!(local_idx, names.len() - 2);
     }
-
-}
-
-
-/// Per-child settings ensure the claim veto exists even when the global plan
-/// hook was installed by an older build. A dead bridge fails closed for writes.
-pub fn runner_settings() -> Value {
-    json!({"hooks":{"PreToolUse":[{"matcher":"Edit|Write|NotebookEdit","hooks":[{
-        "type":"command", "timeout":20,
-        "command":r#"if [ -n "$REDLINE_RUN_ID" ] && [ -n "$REDLINE_RUN_NODE" ] && [ -n "$REDLINE_RUN_ATTEMPT" ]; then curl --fail --silent --show-error --max-time 15 -X POST -H 'Content-Type: application/json' -H "x-redline-run-id: $REDLINE_RUN_ID" -H "x-redline-run-node: $REDLINE_RUN_NODE" -H "x-redline-run-attempt: $REDLINE_RUN_ATTEMPT" --data-binary @- "${REDLINE_RUN_CLAIM_URL:-http://127.0.0.1:7676/v1/runs/claim}" || { printf '%s\n' 'Redline write ownership service is unavailable; retry after it returns.' >&2; exit 2; }; else printf '%s\n' 'Redline write ownership requires an active run attempt.' >&2; exit 2; fi"#
-    }]}]}})
 }

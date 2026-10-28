@@ -9,18 +9,17 @@
 //!   `assistant` lines are message-*start* snapshots — `output_tokens` reads
 //!   `2` on a message that finished at `134`. The real per-message totals ride
 //!   `stream_event`/`message_delta`, which carries no `message.id` of its own.
-//! - **transcripts** (the PTY plan session, and `runwatch`'s per-agent
-//!   `agent-<id>.jsonl`). Here the `assistant` lines DO carry final usage —
+//! - **transcripts** (the PTY plan session and the agents' own
+//!   `.jsonl` files). Here the `assistant` lines DO carry final usage —
 //!   and repeat the same `message.id` once per content block.
 //!
 //! Both hazards are the same hazard: usage is **cumulative per message**, so
 //! anything that `+=` per line over-reports. Measured on this repo's own
-//! `tests/golden/runwatch/agent_head.jsonl`, the summing version reports
+//! `tests/golden/transcript/agent_head.jsonl`, the summing version reports
 //! 103,574 cache-creation tokens against a true 38,847 — **2.7× inflated**.
 //!
 //! [`TurnMeter::observe`] is therefore the only place in the codebase allowed
-//! to read a `usage` object. `runwatch` delegates to it, the stream readers
-//! delegate to it, and the transcript tailer delegates to it, so a third copy
+//! to read a `usage` object. The stream readers delegate to it, and the transcript tailer delegates to it, so a third copy
 //! of the rule can't drift back in.
 //!
 //! ### The rule
@@ -695,8 +694,8 @@ pub fn from_codex_turn(v: &Value, model: Option<&str>) -> TurnMeter {
 /// spent its input tokens; an errored turn spent them too. Booking only the
 /// success path produces numbers that look right and are wrong, which is a
 /// worse failure than the zeros this replaces: before this, `seat_burn` was
-/// written by exactly one caller (`runwatch`, hardcoded to `orchestrator`), so
-/// 19 of 20 seats reported zero burn forever.
+/// written by exactly one caller, hardcoded to one seat, so 19 of 20 seats
+/// reported zero burn forever.
 ///
 /// `spawns` is 1 because a turn IS one `claude` subprocess — which is what
 /// makes the per-seat rollup an economics-by-subprocess view.
@@ -704,7 +703,7 @@ pub fn book(db: &crate::db::Database, seat: &str, m: &TurnMeter) {
     if m.is_empty() || m.total_tokens() == 0 {
         return;
     }
-    let day = crate::runwatch::local_day(crate::state::now_millis());
+    let day = crate::transcript::local_day(crate::state::now_millis());
     if let Err(e) = db.add_seat_burn(
         seat,
         &day,
@@ -835,13 +834,13 @@ mod tests {
         m
     }
 
-    /// THE regression this module exists for. `runwatch::apply_agent_line`
-    /// summed usage on every `assistant` line, and consecutive lines repeat
-    /// one `message.id` with cumulative usage — so cache-creation read 2.7×
-    /// its true value in the Runs surface and the seat burn summary.
+    /// THE regression this module exists for. A reader that summed usage on
+    /// every `assistant` line, where consecutive lines repeat one
+    /// `message.id` with cumulative usage, read cache-creation at 2.7× its
+    /// true value in the seat burn summary.
     #[test]
     fn dedupes_cumulative_usage_by_message_id() {
-        let m = fold_file("tests/golden/runwatch/agent_head.jsonl");
+        let m = fold_file("tests/golden/transcript/agent_head.jsonl");
         assert_eq!(m.input_tokens, 6, "summing every line would read 12");
         assert_eq!(m.output_tokens, 440, "summing every line would read 454");
         assert_eq!(
@@ -1081,18 +1080,6 @@ mod tests {
                  that drain's tokens vanish"
             );
         }
-    }
-
-    /// Native task and structured-model readers share cancellation-safe
-    /// booking in the runner.
-    #[test]
-    fn runner_books_on_drop() {
-        let runner=include_str!("runner.rs");
-        assert!(runner.contains("crate::turn::push_meta("));
-        assert!(runner.contains(".meter.observe(&v)"));
-        assert!(runner.contains("impl Drop for MeterBooking"));
-        assert!(runner.contains("crate::meter::book(&self.db, &self.seat, &meter)"));
-        assert!(runner.matches("MeterBooking {").count() >= 4,"model and task readers retain cancellation-safe booking guards");
     }
 
     /// The daemon seats roll their own drain loop (they parse structured

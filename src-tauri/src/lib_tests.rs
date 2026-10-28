@@ -1153,63 +1153,6 @@ fn delete_session_inner_force_drains_held_then_deletes() {
     );
 }
 
-#[test]
-fn orchestrate_plan_inner_denies_with_stand_down_and_approves() {
-    let store = make_store();
-    let pending = PendingResponses::new();
-    let expected_modes = ExpectedModes::new();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan(
-        "s1",
-        "/tmp/d",
-        md.to_string(),
-        reparse_sections(md),
-        true,
-        false,
-    );
-    let (rx, _token) = pending.register("s1", None).expect("register");
-    expected_modes.set("s1", SubmissionMode::Ask);
-
-    orchestrate_plan_inner(&store, &pending, &expected_modes, "s1")
-        .expect("orchestrate with a held sender must succeed");
-
-    // The held ExitPlanMode got a DENY carrying the stand-down text — the
-    // session was launched in plan mode, so a deny keeps it read-only.
-    let resp = rx.blocking_recv().expect("oneshot must have been sent");
-    assert_eq!(resp.hook_specific_output.permission_decision, "deny");
-    assert_eq!(
-        resp.hook_specific_output.permission_decision_reason,
-        ORCHESTRATE_STAND_DOWN
-    );
-    // Redline-side state matches a plain Approve.
-    let session = store.get("s1").expect("session exists");
-    assert_eq!(session.status, SessionStatus::Approved);
-    assert_eq!(session.attach_state, AttachState::Idle);
-    // The in-flight Ask mode was drained like approve_plan drains it.
-    assert!(expected_modes.take("s1").is_none());
-    // The pending slot is consumed — no double-fire window.
-    assert!(pending.take("s1").is_none());
-}
-
-#[test]
-fn a_team_build_stands_the_plan_session_down_read_only() {
-    let store = make_store();
-    let pending = PendingResponses::new();
-    let expected_modes = ExpectedModes::new();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
-    let (rx, _token) = pending.register("s1", None).expect("register");
-    approve_with_stand_down(&store, &pending, &expected_modes, "s1", SCALED_STAND_DOWN).expect("held");
-    let resp = rx.blocking_recv().expect("sent");
-    // A deny, so the plan-mode session that wrote it cannot collide with the team.
-    assert_eq!(resp.hook_specific_output.permission_decision, "deny");
-    assert!(resp.hook_specific_output.permission_decision_reason.contains("a team of agents will build it"));
-    assert!(resp.hook_specific_output.permission_decision_reason.contains("Do NOT implement this plan"));
-    assert_eq!(store.get("s1").unwrap().status, SessionStatus::Approved);
-    // Nothing held: the stand-down cannot fire twice.
-    assert!(approve_with_stand_down(&store, &pending, &expected_modes, "s1", SCALED_STAND_DOWN).is_err());
-}
-
 /// A plan with one research comment (Search from the plan) and one plain
 /// question on the same block.
 fn research_fixture() -> (SessionStore, String, String) {
@@ -1325,174 +1268,6 @@ fn mark_plan_build_requires_an_approved_plan_and_a_known_mode() {
 }
 
 #[test]
-fn orchestrate_plan_inner_errs_without_held_sender() {
-    let store = make_store();
-    let pending = PendingResponses::new();
-    let expected_modes = ExpectedModes::new();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan(
-        "s1",
-        "/tmp/d",
-        md.to_string(),
-        reparse_sections(md),
-        true,
-        false,
-    );
-
-    let err = orchestrate_plan_inner(&store, &pending, &expected_modes, "s1")
-        .expect_err("no held sender → Err (the command marks Detached)");
-    assert!(err.contains("no plan"), "got: {err}");
-}
-
-#[test]
-fn orchestrate_stall_step_fires_only_on_orchestrating() {
-    // Only a run that never produced a beacon past the click is stalled;
-    // any later state (or no orchestration at all) retires the watchdog.
-    assert!(orchestrate_stall_should_fire(Some("orchestrating")));
-    for s in [
-        None,
-        Some("running"),
-        Some("in_code_review"),
-        Some("landed"),
-        Some("stalled"),
-    ] {
-        assert!(!orchestrate_stall_should_fire(s), "must not fire on {s:?}");
-    }
-}
-
-/// The launch watchdog covers `orchestrating` and nothing after it — a run
-/// that reached `running` and then went quiet for an hour had no backstop
-/// short of the abandoned-run sweep's full day.
-#[test]
-fn running_silence_stalls_only_a_quiet_unheld_running_run() {
-    let window = RUNNING_SILENCE_WINDOW.as_millis() as i64;
-    let quiet = window + 1;
-
-    assert!(running_silence_should_stall(Some("running"), quiet, window, false, false));
-
-    // Not past the window yet.
-    assert!(!running_silence_should_stall(Some("running"), window, window, false, false));
-    // The launch window is the other half's territory; terminal states and
-    // the deliberate overnight park are nobody's.
-    for state in [
-        None,
-        Some("orchestrating"),
-        Some("in_code_review"),
-        Some("awaiting_review"),
-        Some("landed"),
-        Some("stalled"),
-    ] {
-        assert!(
-            !running_silence_should_stall(state, quiet, window, false, false),
-            "must not fire on {state:?}"
-        );
-    }
-    // Quiet BECAUSE a human is holding it is not stalled — saying so would
-    // be a lie the user has to undo.
-    assert!(!running_silence_should_stall(Some("running"), quiet, window, true, false));
-    assert!(!running_silence_should_stall(Some("running"), quiet, window, false, true));
-}
-
-/// P0 (overnight queue): a queued run parks at `awaiting_review`, and the
-/// morning approve walks it to `landed` through the EXISTING verdict
-/// mapping — `set_run_state` enforces no ordering, but this pins it.
-#[test]
-fn awaiting_review_parks_and_approve_walks_to_landed() {
-    // Deliberately NOT live: no watcher wakes for a parked run.
-    assert!(!runwatch::is_live_run_state(Some("awaiting_review")));
-    // The verdict mapping is state-free: approve → landed.
-    assert_eq!(review_verdict_run_state(true), "landed");
-    assert_eq!(review_verdict_run_state(false), "running");
-    let store = make_store();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan(
-        "s1",
-        "/tmp/d",
-        md.to_string(),
-        reparse_sections(md),
-        true,
-        false,
-    );
-    // The park (queued run ended, review deferred)…
-    assert!(store.set_run_state("s1", "awaiting_review"));
-    assert_eq!(
-        store.database().get_run_state("s1").as_deref(),
-        Some("awaiting_review")
-    );
-    // …and the morning approve, via the same mapping a held review uses.
-    assert!(store.set_run_state("s1", review_verdict_run_state(true)));
-    assert_eq!(store.database().get_run_state("s1").as_deref(), Some("landed"));
-}
-
-/// The parked (no-held-curl) verdict seam behind `submit_review_feedback`:
-/// the landed-walk + unresolved-annotation filing happen ONLY on an
-/// approve of a linked, still-awaiting review; a feedback verdict holds
-/// the park; a missing link or a walked-on chip rejects outright.
-#[test]
-fn parked_verdict_lands_only_on_approve() {
-    use ParkedVerdict::*;
-    assert_eq!(parked_verdict(true, Some("awaiting_review"), true), Land);
-    assert_eq!(parked_verdict(true, Some("awaiting_review"), false), Hold);
-    // No durable review→plan link (the destroyed-state failure): reject
-    // regardless of the verdict.
-    assert_eq!(
-        parked_verdict(false, Some("awaiting_review"), true),
-        NotParked
-    );
-    assert_eq!(
-        parked_verdict(false, Some("awaiting_review"), false),
-        NotParked
-    );
-    // A chip that already walked on (or never parked) is not a parked
-    // review — approve must not re-land it, feedback must not hold it.
-    for rs in [Some("landed"), Some("running"), Some("stalled"), None] {
-        assert_eq!(
-            parked_verdict(true, rs, true),
-            NotParked,
-            "run_state {rs:?}"
-        );
-        assert_eq!(
-            parked_verdict(true, rs, false),
-            NotParked,
-            "run_state {rs:?}"
-        );
-    }
-
-    // Driven against a seeded awaiting_review session: only the Land
-    // verdict walks the chip; Hold leaves the park standing.
-    let store = make_store();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan(
-        "s1",
-        "/tmp/d",
-        md.to_string(),
-        reparse_sections(md),
-        true,
-        false,
-    );
-    assert!(store.set_run_state("s1", "awaiting_review"));
-    let verdict_for = |approve: bool| {
-        parked_verdict(
-            true,
-            store.database().get_run_state("s1").as_deref(),
-            approve,
-        )
-    };
-    // Feedback first: the park holds, nothing walks.
-    assert_eq!(verdict_for(false), Hold);
-    assert_eq!(
-        store.database().get_run_state("s1").as_deref(),
-        Some("awaiting_review")
-    );
-    // Approve: Land → the chip resolves awaiting_review → landed.
-    assert_eq!(verdict_for(true), Land);
-    assert!(store.set_run_state("s1", review_verdict_run_state(true)));
-    assert_eq!(store.database().get_run_state("s1").as_deref(), Some("landed"));
-    // And a re-submit against the landed chip is no longer parked.
-    assert_eq!(verdict_for(true), NotParked);
-}
-
-#[test]
 fn store_run_state_transitions_update_memory_and_db() {
     let store = make_store();
     let md = "# Plan\n\nBody.\n";
@@ -1505,116 +1280,22 @@ fn store_run_state_transitions_update_memory_and_db() {
         false,
     );
 
-    assert!(store.set_run_state("s1", "orchestrating"));
+    assert!(store.set_run_state("s1", "building"));
     assert!(
-        !store.set_run_state("s1", "orchestrating"),
+        !store.set_run_state("s1", "building"),
         "same value → no transition (no event, no journal)"
     );
-    assert!(store.set_run_state("s1", "running"));
+    assert!(store.set_run_state("s1", "landed"));
     // Both the in-memory summary (the chip's source) and the DB agree.
     let summary = store.list().into_iter().find(|s| s.session_id == "s1").unwrap();
-    assert_eq!(summary.run_state.as_deref(), Some("running"));
-    assert_eq!(store.database().get_run_state("s1").as_deref(), Some("running"));
+    assert_eq!(summary.run_state.as_deref(), Some("landed"));
+    assert_eq!(store.database().get_run_state("s1").as_deref(), Some("landed"));
     // Unknown session: quietly false.
-    assert!(!store.set_run_state("ghost", "running"));
+    assert!(!store.set_run_state("ghost", "building"));
     // One journal line per REAL transition.
     let journal = store.database().list_journal_since(0, 100).unwrap();
     let n = journal.iter().filter(|r| r.kind == "run_state").count();
     assert_eq!(n, 2);
-}
-
-#[test]
-fn plan_runs_report_resolve_get_round_trip() {
-    let store = make_store();
-    let db = store.database();
-    assert!(db.get_plan_run("s1").is_none());
-    assert!(
-        !db.resolve_plan_run("s1", "resolved", None).unwrap(),
-        "no report row → nothing to resolve"
-    );
-
-    db.upsert_plan_run("s1", r#"{"summary":"x"}"#, Some("/tmp/wf.js"), true)
-        .unwrap();
-    let run = db.get_plan_run("s1").unwrap();
-    assert!(run.workflow_ran);
-    assert_eq!(run.script_path.as_deref(), Some("/tmp/wf.js"));
-    assert!(run.resolution.is_none());
-
-    assert!(db
-        .resolve_plan_run("s1", "needs_follow_up", Some("check X"))
-        .unwrap());
-    let run = db.get_plan_run("s1").unwrap();
-    assert_eq!(run.resolution.as_deref(), Some("needs_follow_up"));
-    assert_eq!(run.resolution_note.as_deref(), Some("check X"));
-    assert!(run.resolved_at.is_some());
-
-    // A re-run's fresh report reopens the human verdict.
-    db.upsert_plan_run("s1", r#"{"summary":"y"}"#, None, false).unwrap();
-    let run = db.get_plan_run("s1").unwrap();
-    assert!(!run.workflow_ran);
-    assert!(run.script_path.is_none());
-    assert!(run.resolution.is_none(), "re-report resets the resolution");
-}
-
-#[test]
-fn orchestrations_anchor_discovery_round_trip() {
-    let store = make_store();
-    let db = store.database();
-    assert!(db.get_orchestration("s1").is_none());
-    // Discovery before an anchor is a no-op, not an insert.
-    db.update_orchestration_discovery("s1", Some("wf_x"), None, None, None)
-        .unwrap();
-    assert!(db.get_orchestration("s1").is_none());
-
-    db.upsert_orchestration(
-        "s1",
-        "claude-1",
-        "/t/p1.jsonl",
-        Some("/proj"),
-        Some("tab-1"),
-    )
-    .unwrap();
-    let row = db.get_orchestration("s1").unwrap();
-    assert_eq!(row.claude_session_id, "claude-1");
-    assert_eq!(row.transcript_path, "/t/p1.jsonl");
-    assert_eq!(row.terminal_id.as_deref(), Some("tab-1"));
-    assert!(row.run_id.is_none());
-
-    db.update_orchestration_discovery(
-        "s1",
-        Some("wf_a"),
-        Some("/t/p1/wf"),
-        None,
-        Some("sequential"),
-    )
-    .unwrap();
-    // Partial update: passed values win (the sequential→workflow mode
-    // upgrade), omitted columns keep what was discovered.
-    db.update_orchestration_discovery("s1", None, None, Some("/t/s.js"), Some("workflow"))
-        .unwrap();
-    let row = db.get_orchestration("s1").unwrap();
-    assert_eq!(row.run_id.as_deref(), Some("wf_a"));
-    assert_eq!(row.transcript_dir.as_deref(), Some("/t/p1/wf"));
-    assert_eq!(row.script_path.as_deref(), Some("/t/s.js"));
-    assert_eq!(row.mode.as_deref(), Some("workflow"));
-
-    // Re-run: the anchor overwrites and discovery resets — but a re-run
-    // with no fresh terminal keeps the launch tab it already knew.
-    db.upsert_orchestration("s1", "claude-2", "/t/p2.jsonl", None, None).unwrap();
-    let row = db.get_orchestration("s1").unwrap();
-    assert_eq!(row.claude_session_id, "claude-2");
-    assert!(row.run_id.is_none(), "re-run resets discovery");
-    assert!(row.mode.is_none());
-    assert_eq!(
-        row.terminal_id.as_deref(),
-        Some("tab-1"),
-        "an omitted terminal must not wipe the recorded launch tab"
-    );
-
-    db.upsert_orchestration("s0", "claude-0", "/t/p0.jsonl", None, None).unwrap();
-    let rows = db.list_orchestrations().unwrap();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].plan_session_id, "s0", "newest launch first");
 }
 
 #[test]
@@ -1631,8 +1312,8 @@ fn clear_run_state_nulls_columns_and_journals() {
     );
     let db = store.database();
 
-    assert!(store.set_run_state("s1", "orchestrating"));
-    assert_eq!(db.get_run_state("s1").as_deref(), Some("orchestrating"));
+    assert!(store.set_run_state("s1", "building"));
+    assert_eq!(db.get_run_state("s1").as_deref(), Some("building"));
 
     assert!(store.clear_run_state("s1"), "a set state must clear");
     assert_eq!(db.get_run_state("s1"), None, "run_state back to NULL");
@@ -1646,52 +1327,12 @@ fn clear_run_state_nulls_columns_and_journals() {
         "clear must journal"
     );
     // `set_run_state` after a clear works normally (NULL → value).
-    assert!(store.set_run_state("s1", "orchestrating"));
-    assert_eq!(db.get_run_state("s1").as_deref(), Some("orchestrating"));
+    assert!(store.set_run_state("s1", "building"));
+    assert_eq!(db.get_run_state("s1").as_deref(), Some("building"));
 }
 
 #[test]
-fn reset_run_rows_is_idempotent_and_safe_on_a_session_that_never_ran() {
-    let store = make_store();
-    let md = "# Plan\n\nBody.\n";
-    store.upsert_plan(
-        "s1",
-        "/tmp/d",
-        md.to_string(),
-        reparse_sections(md),
-        true,
-        false,
-    );
-    let db = store.database();
-
-    // Never ran: nothing to delete, nothing to clear — must not panic.
-    reset_run_rows(&store, "s1");
-    assert_eq!(db.get_run_state("s1"), None);
-
-    // A full run's traces all go.
-    store.set_run_state("s1", "running");
-    db.upsert_orchestration("s1", "claude-1", "/t/p.jsonl", None, Some("tab-1"))
-        .unwrap();
-    db.upsert_plan_run("s1", r#"{"summary":"x"}"#, None, true).unwrap();
-    orchestration_review_links()
-        .lock()
-        .unwrap()
-        .insert("rev-test-reset".to_string(), "s1".to_string());
-
-    reset_run_rows(&store, "s1");
-    assert_eq!(db.get_run_state("s1"), None);
-    assert!(db.get_orchestration("s1").is_none());
-    assert!(db.get_plan_run("s1").is_none());
-    assert!(
-        !orchestration_review_links().lock().unwrap().values().any(|v| v == "s1"),
-        "the stale review link must be evicted"
-    );
-    // Twice in a row is fine.
-    reset_run_rows(&store, "s1");
-}
-
-#[test]
-fn manual_plan_state_records_completion_reopen_and_refuses_active_work() {
+fn manual_plan_state_records_completion_reopen_and_refuses_a_held_plan() {
     let store = make_store(); let pending = PendingResponses::new();
     let md = "# Plan\n\nBody.\n";
     store.upsert_plan("manual", "/tmp/d", md.into(), reparse_sections(md), true, false);
@@ -1712,8 +1353,6 @@ fn manual_plan_state_records_completion_reopen_and_refuses_active_work() {
     let (_rx, _token) = pending.register("manual", None).unwrap();
     assert!(set_plan_state_inner(&store, &pending, "manual", "completed").unwrap_err().contains("waiting"));
     pending.take("manual");
-    store.set_run_state("manual", "running");
-    assert!(set_plan_state_inner(&store, &pending, "manual", "approved").unwrap_err().contains("live run"));
 }
 
 #[test]
@@ -1783,115 +1422,6 @@ fn unapprove_plan_supersedes_the_approval_and_keeps_the_chain_intact() {
 
     // Double un-approve: no longer approved → refused, and nothing broke.
     assert!(unapprove_plan_inner(&store, "s1").is_err());
-}
-
-#[test]
-fn orchestrator_parent_session_only_matches_the_orchestrate_lineage() {
-    // A7's gate: `session → session` links are written exclusively by the
-    // Orchestrate ingest claim, so their presence IS "this is an
-    // orchestrator" — and nothing else may trip it.
-    let store = make_store();
-    let db = store.database();
-    db.insert_session_link("session", "orch-1", "session", "plan-1", 1)
-        .unwrap();
-    db.insert_session_link("session", "drafted-1", "drafter", "d-1", 2)
-        .unwrap();
-    db.insert_session_link("voice", "plan-2", "session", "plan-2", 3)
-        .unwrap();
-    assert_eq!(
-        db.orchestrator_parent_session("orch-1").as_deref(),
-        Some("plan-1")
-    );
-    assert_eq!(db.orchestrator_parent_session("drafted-1"), None);
-    assert_eq!(db.orchestrator_parent_session("plan-2"), None);
-    assert_eq!(db.orchestrator_parent_session("unknown"), None);
-}
-
-#[test]
-fn orchestration_report_body_parses_and_validates() {
-    let v = serde_json::json!({
-        "planSessionId": "s1",
-        "scriptPath": "/Users/me/.claude/projects/x/wf.js",
-        "workflowRan": true,
-        "summary": "done",
-        "subtasks": [
-            {"title": "t", "planSection": "A1", "verified": true, "skipped": false, "notes": ""}
-        ]
-    });
-    let b = parse_orchestration_report(&v).unwrap();
-    assert_eq!(b.plan_session_id, "s1");
-    assert!(b.workflow_ran);
-    assert_eq!(b.subtasks.len(), 1);
-
-    // Only planSessionId is required; everything else defaults.
-    let b = parse_orchestration_report(&serde_json::json!({"planSessionId": "s2"})).unwrap();
-    assert!(!b.workflow_ran);
-    assert!(b.script_path.is_none());
-    assert!(b.subtasks.is_empty());
-
-    assert!(parse_orchestration_report(&serde_json::json!({"planSessionId": "  "})).is_err());
-    assert!(parse_orchestration_report(&serde_json::json!({})).is_err());
-}
-
-/// Producers wave: undelivered subtasks survive the exit report as open
-/// work items — tolerant parse, plan_run provenance, idempotent re-POST,
-/// orchestrator seat credit.
-#[test]
-fn exit_report_files_undelivered_subtasks_as_work_items() {
-    let db = db::Database::open_in_memory().unwrap();
-    let subtasks = vec![
-        // Delivered — never files.
-        serde_json::json!({"title": "done one", "verified": true, "skipped": false}),
-        // Unverified — files, notes ride the body.
-        serde_json::json!({"title": "flaky one", "verified": false, "skipped": false,
-                           "planSection": "B2", "notes": "verify step timed out"}),
-        // Skipped — files.
-        serde_json::json!({"title": "skipped one", "verified": true, "skipped": true}),
-        // Tolerance: no title / no flags / non-object → all skipped quietly.
-        serde_json::json!({"verified": false}),
-        serde_json::json!({"title": "shapeless"}),
-        serde_json::json!("not an object"),
-    ];
-    let filed = file_exit_report_items(&db, "plan-9", &subtasks, Some("/tmp/proj"));
-    assert_eq!(filed, 2);
-    let items = db.list_work_items(None, None, 50).unwrap();
-    assert_eq!(items.len(), 2);
-    for item in &items {
-        assert_eq!(item.origin_kind.as_deref(), Some("plan_run"));
-        assert_eq!(item.origin_id.as_deref(), Some("plan-9"));
-        assert_eq!(item.project_path.as_deref(), Some("/tmp/proj"));
-        assert_eq!(item.kind, "task");
-        assert_eq!(item.status, "open");
-    }
-    let flaky = items.iter().find(|i| i.title == "flaky one").unwrap();
-    let body = flaky.body.as_deref().unwrap();
-    assert!(body.contains("NOT verified"));
-    assert!(body.contains("Plan section: B2"));
-    assert!(body.contains("verify step timed out"));
-    assert!(items.iter().any(|i| i.title == "skipped one"));
-    // The orchestrator seat's items_filed became real…
-    assert_eq!(db.get_seat_stat("orchestrator").unwrap().items_filed, 2);
-    // …and a re-POSTed report files nothing new (idempotent).
-    assert_eq!(
-        file_exit_report_items(&db, "plan-9", &subtasks, Some("/tmp/proj")),
-        0
-    );
-    assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 2);
-    assert_eq!(db.get_seat_stat("orchestrator").unwrap().items_filed, 2);
-    assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
-}
-
-#[test]
-fn orchestrate_stand_down_reads_calm_and_forbids_reexecution() {
-    // The deny reason renders inside Claude Code's red Error box — it must
-    // lead with the defusing ✅ and carry the three prohibitions.
-    assert!(ORCHESTRATE_STAND_DOWN.starts_with("✅"));
-    for needle in ["Do NOT implement", "do not revise", "ExitPlanMode"] {
-        assert!(
-            ORCHESTRATE_STAND_DOWN.contains(needle),
-            "stand-down text is missing `{needle}`"
-        );
-    }
 }
 
 #[tokio::test]
@@ -2364,57 +1894,20 @@ fn codex_approval_finishes_the_planning_turn_and_revision_continues_it() {
     }
     let revision = codex_stop_response(deny_response("revise this plan"));
     assert_eq!(revision, json!({"decision":"block","reason":"revise this plan"}));
-    let stand_down = codex_stop_response(deny_response(ORCHESTRATE_STAND_DOWN));
+    let stand_down = codex_stop_response(deny_response(BUILD_LATER_STAND_DOWN));
     assert!(!stand_down["reason"].as_str().unwrap().contains("Begin implementing"));
     let claude = serde_json::to_value(allow_response("approved")).unwrap();
     assert_eq!(claude.as_object().unwrap().len(), 1);
     assert_eq!(claude["hookSpecificOutput"]["permissionDecision"], "allow");
 }
 
-// --- T4.1: the orchestrate -> review link survives a restart ------------
-
-/// The in-memory link map is this boot's fast path and dies with the
-/// process. A live orchestrated review outlives a restart (the human comes
-/// back to it in the morning), and before the durable mirror its verdict
-/// landed on nothing: `advance_run_state` was never called and the run's
-/// chip sat in `in_code_review` forever. The live DB has exactly one such
-/// session, stuck 18+ days.
-#[test]
-fn review_link_survives_link_map_loss() {
-    let db = Database::open_in_memory().unwrap();
-    let review_id = "rev-t41";
-    let plan_sid = "plan-t41";
-
-    register_orchestration_review_link(&db, review_id, plan_sid);
-    assert_eq!(
-        orchestration_review_link(&db, review_id).as_deref(),
-        Some(plan_sid),
-        "the map serves the link while the process lives"
-    );
-
-    // The restart: the process-global map is gone, the DB is not.
-    orchestration_review_links()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(review_id);
-    assert_eq!(
-        orchestration_review_link(&db, review_id).as_deref(),
-        Some(plan_sid),
-        "the durable mirror is what makes the morning verdict land"
-    );
-
-    // A review that was never orchestrated still resolves to nothing —
-    // the fallback must not invent a link.
-    assert_eq!(orchestration_review_link(&db, "rev-unknown"), None);
-}
-
-// --- T4.2: landing a run closes the work it opened ----------------------
+// --- T4.2: landing a plan closes the work it opened ---------------------
 
 /// `work_items` carried 595 rows and had never closed one — every close
 /// path existed, none was reached from a transition. Landing is the
 /// transition that means "done"; nothing else is.
 #[test]
-fn landing_a_run_closes_its_sessions_open_items() {
+fn landing_a_plan_closes_its_sessions_open_items() {
     use crate::work::WorkItem;
     let db = Database::open_in_memory().unwrap();
     let item = |id: &str, origin_kind: &str, origin_id: &str, status: &str| WorkItem {
@@ -2445,7 +1938,7 @@ fn landing_a_run_closes_its_sessions_open_items() {
     // …one already closed (must not be re-stamped)…
     db.insert_work_item(&item("w-3", "session", "s1", "closed"))
         .unwrap();
-    // …the exit-report residue, which is exactly the UNDELIVERED work…
+    // …an item filed from somewhere else about this plan…
     db.insert_work_item(&item("w-4", "plan_run", "s1", "open"))
         .unwrap();
     // …and another session's work.
@@ -2454,13 +1947,7 @@ fn landing_a_run_closes_its_sessions_open_items() {
 
     // Only `landed` retires work.
     assert!(run_state_closes_work("landed"));
-    for s in [
-        "running",
-        "in_code_review",
-        "awaiting_review",
-        "stalled",
-        "orchestrating",
-    ] {
+    for s in ["building", "approved"] {
         assert!(!run_state_closes_work(s), "{s} must not close work");
     }
 
@@ -2479,7 +1966,7 @@ fn landing_a_run_closes_its_sessions_open_items() {
     assert_eq!(
         status("w-4"),
         "open",
-        "exit-report residue IS the undelivered work — landing is not evidence it got done"
+        "only items whose origin IS the session close"
     );
     assert_eq!(status("w-5"), "open", "another session's work is untouched");
 
@@ -2490,75 +1977,3 @@ fn landing_a_run_closes_its_sessions_open_items() {
     assert!(close_run_work_items(&db, "s1").is_empty());
 }
 
-// --- T4.3: the abandoned-run sweep --------------------------------------
-
-/// The decision table, in the shape of `watchdog_step_decision_table`.
-/// Every clause is a veto, because the cost of a false positive is a chip
-/// that lies to the user about a run that is actually fine.
-#[test]
-fn abandoned_run_decision_table() {
-    let window = ABANDONED_RUN_WINDOW.as_millis() as i64;
-    let day = window + 1;
-
-    // The shape the sweep exists for: a run that claimed the work, or
-    // opened a review, and then went silent for a day.
-    assert!(
-        abandoned_run_should_stall(Some("running"), day, window, false, false),
-        "a silent `running` run is abandoned"
-    );
-    assert!(
-        abandoned_run_should_stall(Some("in_code_review"), day, window, false, false),
-        "a silent `in_code_review` run is abandoned"
-    );
-
-    // States the sweep must not touch.
-    for state in [
-        // the 5-minute launch watchdog's territory
-        Some("orchestrating"),
-        // a deliberate overnight park
-        Some("awaiting_review"),
-        // already terminal
-        Some("landed"),
-        Some("stalled"),
-        // never orchestrated at all
-        None,
-    ] {
-        assert!(
-            !abandoned_run_should_stall(state, day, window, false, false),
-            "must not stall {state:?}"
-        );
-    }
-
-    // Inside the window: not yet.
-    assert!(!abandoned_run_should_stall(Some("running"), window, window, false, false));
-    assert!(!abandoned_run_should_stall(Some("running"), 0, window, false, false));
-
-    // The two vetoes: a human is demonstrably still holding it.
-    assert!(
-        !abandoned_run_should_stall(Some("running"), day, window, true, false),
-        "a held plan POST means Claude is blocked waiting on the reviewer"
-    );
-    assert!(
-        !abandoned_run_should_stall(Some("in_code_review"), day, window, false, true),
-        "a held code review linked to this run is the opposite of abandoned"
-    );
-    assert!(
-        !abandoned_run_should_stall(Some("running"), day, window, true, true),
-        "both vetoes together still veto"
-    );
-}
-
-/// `held_ids` is the sweep's evidence source; pin that it reports exactly
-/// the reviews holding a curl.
-#[test]
-fn pending_reviews_reports_its_held_ids() {
-    let pending = PendingReviews::new();
-    assert!(pending.held_ids().is_empty());
-    let (_rx, _token) = pending.register("rev-1");
-    assert_eq!(pending.held_ids(), vec!["rev-1".to_string()]);
-    let _ = pending.take("rev-1");
-    assert!(
-        pending.held_ids().is_empty(),
-        "a released curl stops vetoing the sweep"
-    );
-}

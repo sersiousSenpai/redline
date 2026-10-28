@@ -430,7 +430,8 @@ impl ReleaseStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Release {
     pub release_id: String,
-    /// The native run whose agents prepared it, if any.
+    /// The run that prepared it, if any. Only releases stored while native
+    /// runs existed carry one; a new capture leaves it empty.
     pub run_id: Option<String>,
     /// The checkout it was captured from.
     pub repository: String,
@@ -1565,8 +1566,8 @@ fn db(app: &AppHandle) -> Result<std::sync::Arc<crate::db::Database>, String> {
 /// Returns as soon as the copy is made: the agents' work, and then the
 /// pipeline, come afterwards. The user keeps using the installed Redline
 /// throughout.
-#[tauri::command(async)]
-pub async fn self_develop_start(
+#[tauri::command]
+pub fn self_develop_start(
     app: AppHandle,
     plan_session_id: Option<String>,
     run_id: Option<String>,
@@ -1584,24 +1585,17 @@ pub async fn self_develop_start(
 
     let capture = capture(&repo, &root)?;
 
-    // The plan's tasks are decomposed against the CANDIDATE root, not the
-    // user's checkout. That one substitution is what turns the existing native
-    // runner into a self-development runner: claims, check barriers, retries
-    // and independent review all work exactly as they do, and every write the
-    // agents make lands in the copy.
-    let (run_id, plan_revisions) = match (&plan_session_id, &run_id) {
-        (Some(session_id), _) => {
-            let graph = decompose_against_candidate(&app, session_id, &root).await?;
-            let revision = app
-                .try_state::<crate::state::SessionStore>()
-                .and_then(|store| store.get(session_id))
-                .and_then(|session| session.revisions.last().map(|r| r.version_number.to_string()))
-                .map(|v| vec![format!("{session_id}@{v}")])
-                .unwrap_or_default();
-            (Some(graph.run_id), revision)
-        }
-        (None, existing) => (existing.clone(), Vec::new()),
-    };
+    // The approved plan revision this release implements, when one is named,
+    // so the sealed manifest can say so. The work itself happens in the
+    // candidate copy, never in the user's checkout.
+    let plan_revisions = plan_session_id
+        .as_deref()
+        .and_then(|session_id| {
+            let session = app.try_state::<crate::state::SessionStore>()?.get(session_id)?;
+            let v = session.revisions.last()?.version_number;
+            Some(vec![format!("{session_id}@{v}")])
+        })
+        .unwrap_or_default();
 
     let now = release_manifest::now_secs();
     let release = Release {
@@ -1635,36 +1629,6 @@ pub async fn self_develop_start(
 /// candidate was captured so the sealed manifest can name them.
 fn plan_revisions_key(release_id: &str) -> String {
     format!("redline.selfDevelop.planRevisions.{release_id}")
-}
-
-/// Decompose a plan into a run graph rooted in the candidate workspace.
-async fn decompose_against_candidate(
-    app: &AppHandle,
-    plan_session_id: &str,
-    candidate_root: &Path,
-) -> Result<crate::runner_graph::RunGraph, String> {
-    let store = app
-        .try_state::<crate::state::SessionStore>()
-        .ok_or("the session store is not available")?;
-    let session = store.get(plan_session_id).ok_or("unknown plan session")?;
-    let plan = session
-        .revisions
-        .last()
-        .ok_or("that plan has no revision")?
-        .raw_plan_markdown
-        .clone();
-    let runner = app
-        .try_state::<crate::runner::RunnerState>()
-        .ok_or("the runner is not available")?;
-    let graph = crate::runner::decompose_plan(
-        runner.db.clone(),
-        plan_session_id,
-        &candidate_root.to_string_lossy(),
-        &plan,
-    )
-    .await?;
-    let _ = app.emit("run-graph", crate::runner::graph_event(&graph));
-    Ok(graph)
 }
 
 #[tauri::command]

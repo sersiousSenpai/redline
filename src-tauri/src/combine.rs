@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 
 //! Combine N plan sessions into ONE brief that a fresh plan session
-//! synthesises into a single orchestration-ready plan.
+//! synthesises into a single plan.
 //!
 //! Why this lives in Rust rather than a TS module: the bulk of the feature is
 //! contract prose, and prose in a TS module is boot bytes. `bootJsBytes` sits
@@ -219,8 +219,8 @@ fn default_project(sources: &[SourceRow]) -> Option<String> {
 fn warnings(sources: &[SourceRow]) -> Vec<String> {
     let mut out = Vec::new();
 
-    // A run that already shipped or was stood down. Combining it re-plans
-    // code that exists.
+    // A plan that already shipped (or, on an older row, a run that was stood
+    // down). Combining it re-plans code that exists.
     let terminal: Vec<String> = sources
         .iter()
         .filter(|r| matches!(r.run_state.as_deref(), Some("landed") | Some("abandoned")))
@@ -295,7 +295,7 @@ pub fn compose(sources: &[SourceRow], instruction: &str) -> CombineBrief {
     // running order before the rules, and the numbers here are the same ones
     // the sidebar's pick markers wore.
     brief.push_str(&format!(
-        "# Combine {} plans → one orchestration-ready plan\n\nSources, in order:\n\n",
+        "# Combine {} plans → one plan\n\nSources, in order:\n\n",
         sources.len()
     ));
     for (i, row) in sources.iter().enumerate() {
@@ -409,7 +409,7 @@ mod tests {
             .take(12)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(head.starts_with("# Combine 2 plans → one orchestration-ready plan"));
+        assert!(head.starts_with("# Combine 2 plans → one plan"));
         assert!(head.contains("1. **Auth rework** — redline, v1, in_review"));
         assert!(head.contains("2. **Billing migration** — redline, v1, in_review"));
         // The human's own sentence is above the fold, not under the contract.

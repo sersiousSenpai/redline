@@ -106,7 +106,7 @@ impl Request {
         let questions = (self.kind == Kind::Question).then(|| questions(&self.input));
         let summary = match questions.as_ref().and_then(|q| q.first()) {
             Some(first) => first.question.clone(),
-            None => crate::runwatch::summarize_tool_input(&self.input),
+            None => crate::transcript::summarize_tool_input(&self.input),
         };
         ConvoAsk {
             ask_id,
@@ -343,7 +343,7 @@ mod tests {
         let (p, _) = pending(PERMISSION);
         assert_eq!(p.ask.kind, "permission");
         assert_eq!(p.ask.tool_name, "Bash");
-        assert_eq!(p.ask.summary, "touch a-allow.txt", "the run monitor's one-line summary");
+        assert_eq!(p.ask.summary, "touch a-allow.txt", "the transcript summarizer's one line");
         assert_eq!(p.ask.input.as_ref().unwrap()["command"], "touch a-allow.txt");
         assert_eq!(p.ask.suggestions.as_ref().unwrap().len(), 2);
         assert_eq!(

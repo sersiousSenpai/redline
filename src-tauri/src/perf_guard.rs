@@ -375,8 +375,7 @@ mod tests {
     }
 
     /// The commands a surface polls or a click waits on, each of which reads
-    /// SQLite (the Runs canvas and list, the orchestration drawer, a chat's
-    /// build probe and meters, a browser chat's model pick, session reads) or
+    /// SQLite (a chat's build probe and meters, a browser chat's model pick, session reads) or
     /// the disk (an agent transcript tail, a restore's transcript scan, the
     /// install steps, the workspace and harness manifests). On the main
     /// thread every one of them waits behind whatever holds the database or
@@ -388,21 +387,10 @@ mod tests {
     fn polled_and_db_commands_stay_off_the_main_thread() {
         let off_main = crate::codehealth::off_main_commands(include_str!("lib.rs"));
         for func in [
-            "runner_list",
-            "runner_get",
-            "runner_graph_view",
-            "runner_report",
-            "runner_review",
-            // The Runs list re-reads on every `orchestration-live` event.
-            "list_orchestrations",
-            "orchestration_snapshot",
-            "orchestration_agent_tail",
             "companion_build_activity",
             "thread_meters",
             "browse_thread_harness",
             "browse_thread_set_harness",
-            // Polled through a launch handoff.
-            "get_run_state",
             // Re-read on every turn while the activity panel is open.
             "monochat_traces",
             // Its liveness check takes each terminal's session lock, which PTY
@@ -583,30 +571,6 @@ mod tests {
         assert!(src.contains(".name(\"fs-watch\".into())"));
     }
 
-    /// Run events name a run and its revision; they never carry the graph.
-    /// A graph carries every node's output, and every mounted listener
-    /// deserializes a broadcast whether it renders the run or not.
-    #[test]
-    fn run_events_carry_an_id_and_a_revision() {
-        let runner = include_str!("runner.rs");
-        assert!(runner.contains("app.emit(\"run-graph\", graph_event(g))"));
-        for (file, src) in [
-            ("runner.rs", runner),
-            ("lib.rs", include_str!("lib.rs")),
-            ("self_develop.rs", include_str!("self_develop.rs")),
-        ] {
-            for event in ["\"run-graph\"", "\"runner-changed\""] {
-                for (at, _) in src.match_indices(&format!("emit({event}, ")) {
-                    let arg = &src[at + event.len() + 7..];
-                    assert!(
-                        arg[..arg.find('(').unwrap_or(0)].ends_with("graph_event"),
-                        "{file}: {event} must carry runner::graph_event, not the graph"
-                    );
-                }
-            }
-        }
-    }
-
     /// Not a perf budget but the same mechanism: a source-shape invariant that
     /// a refactor could silently undo, with real stakes.
     ///
@@ -722,7 +686,6 @@ mod tests {
             ("memchat.rs", include_str!("memchat.rs")),
             ("draft_chat.rs", include_str!("draft_chat.rs")),
             ("voice.rs", include_str!("voice.rs")),
-            ("runner.rs", include_str!("runner.rs")),
             ("ai_review.rs", include_str!("ai_review.rs")),
         ];
         for (file, src) in readers {

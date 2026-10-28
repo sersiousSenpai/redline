@@ -16,7 +16,6 @@
 
 static PTY: &str = include_str!("../src/pty.rs");
 static STATE: &str = include_str!("../src/state.rs");
-static KEEPER: &str = include_str!("../src/keeper.rs");
 static LIB: &str = include_str!("../src/lib.rs");
 static FORK: &str = include_str!("../src/fork.rs");
 static EXTENSION_HOST: &str = include_str!("../src/extension_host.rs");
@@ -39,16 +38,10 @@ const CONTRACT: &[(&str, &str, &str, &str)] = &[
         "a comment write that misses SQLite loses the reviewer's own work, silently",
     ),
     (
-        "keeper.rs",
-        KEEPER,
-        "\"run_stalled\"",
-        "a run going quiet for a day is the signal that produced an 18-day ghost",
-    ),
-    (
         "lib.rs",
         LIB,
         "\"review_submit_lost\"",
-        "a whole review round delivered nowhere while the run chip moved anyway",
+        "a whole review round delivered nowhere while the pane said it was sent",
     ),
     (
         "fork.rs",

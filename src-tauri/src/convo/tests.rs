@@ -236,7 +236,7 @@ fn ids_are_the_line_uuid_suffixed_only_when_a_line_makes_several() {
     assert_eq!(mode.events[0].id, "@2:77", "no uuid: the line's place");
     assert_eq!(mode.events[0].body, Body::ModeChange { mode: "plan".into() });
     let stamped = parse(json!({"type": "system", "subtype": "turn_duration", "durationMs": 9, "uuid": "u3", "timestamp": "2026-10-18T08:16:01.791Z"}));
-    assert_eq!(stamped.events[0].ts, crate::runwatch::iso_millis("2026-10-18T08:16:01.791Z").unwrap());
+    assert_eq!(stamped.events[0].ts, crate::transcript::iso_millis("2026-10-18T08:16:01.791Z").unwrap());
     assert_eq!(stamped.events[0].body, Body::TurnEnd { duration_ms: Some(9) });
 }
 

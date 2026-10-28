@@ -9,8 +9,8 @@
 //! badge and no economics.
 //!
 //! Its numbers therefore come from the **session transcript**, which
-//! Experiment (j) confirmed carries the same `assistant` shape as an
-//! orchestrated agent's (`message.{id, model, stop_reason, usage}` with final
+//! Experiment (j) confirmed carries the same `assistant` shape as a
+//! subagent transcript's (`message.{id, model, stop_reason, usage}` with final
 //! per-message usage, plus a top-level `effort`). That is what makes this a
 //! second FEED into `meter::TurnMeter` rather than a second meter.
 //!
@@ -57,7 +57,7 @@ const TAIL_SESSIONS: i64 = 12;
 
 /// Bytes read per session per pass. A transcript that grew more than this
 /// since the last pass tail-seeks (dropping the torn line) rather than
-/// blocking the tick — the same rule `runwatch` uses.
+/// blocking the tick — `transcript::read_new_lines`'s rule.
 const READ_CAP: u64 = 2 * 1024 * 1024;
 
 /// A plan session's meter changed. `pty.rs` has no turn registry to probe, so
@@ -75,11 +75,10 @@ struct PlanMeterEvent {
 /// "what has this session cost", not "what did the last turn cost".
 #[derive(Default)]
 struct Tail {
-    cursor: crate::runwatch::Cursor,
+    cursor: crate::transcript::Cursor,
     meter: TurnMeter,
     /// Tokens already booked, so a re-read (relaunch, cursor reset) books the
-    /// delta and not the total. Same high-water discipline as
-    /// `runwatch::flush_seat_burn`, for the same reason.
+    /// delta and not the total: a high-water mark, never a re-sum.
     booked: Booked,
 }
 
@@ -139,7 +138,7 @@ fn tail_loop(app: AppHandle, store: SessionStore, stop: Arc<AtomicBool>) {
 /// Pure enough to test: everything that touches the world goes through `db`
 /// and the path.
 fn pass(db: &Database, sid: &str, path: &Path, tail: &mut Tail) -> bool {
-    let (lines, _skipped) = crate::runwatch::read_new_lines(path, &mut tail.cursor, READ_CAP);
+    let (lines, _skipped) = crate::transcript::read_new_lines(path, &mut tail.cursor, READ_CAP);
     if lines.is_empty() {
         return false;
     }
@@ -183,7 +182,7 @@ fn book_delta(db: &Database, tail: &mut Tail) {
     if delta == Booked::default() {
         return;
     }
-    let day = crate::runwatch::local_day(crate::state::now_millis());
+    let day = crate::transcript::local_day(crate::state::now_millis());
     // `spawns` is 0: the plan session is ONE long-lived process the user
     // started, not a turn-per-subprocess seat. Counting a spawn per tail pass
     // would make the roster's spawn column a measure of the tick rate.
@@ -244,7 +243,7 @@ mod tests {
         .unwrap();
         let dir = tmpdir();
         let path = dir.join("t.jsonl");
-        let fixture = std::fs::read_to_string("tests/golden/runwatch/agent_head.jsonl").unwrap();
+        let fixture = std::fs::read_to_string("tests/golden/transcript/agent_head.jsonl").unwrap();
         let half: Vec<&str> = fixture.lines().collect();
         let (first, second) = half.split_at(6);
         std::fs::write(&path, format!("{}\n", first.join("\n"))).unwrap();

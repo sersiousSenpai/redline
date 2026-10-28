@@ -438,7 +438,7 @@ pub fn work_ready_count(store: tauri::State<'_, crate::state::SessionStore>) -> 
         .map_err(|e| e.to_string())
 }
 
-/// The Work tab's read-only rollup (the Runs surface).
+/// The work graph's read-only rollup: items grouped by project, with counts.
 #[tauri::command]
 pub fn get_work_graph(
     store: tauri::State<'_, crate::state::SessionStore>,

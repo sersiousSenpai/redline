@@ -375,18 +375,24 @@ fn file_claim_close_events_append_and_keep_chain_green() {
 fn deleting_the_origin_row_leaves_the_item_standing_and_ready() {
     let db = Database::open_in_memory().unwrap();
     let now = 1_000_000;
-    db.upsert_plan_run("X", "{}", None, false).unwrap();
+    db.lock_conn()
+        .execute(
+            "INSERT INTO sessions(session_id,project_path,project_name,created_at)
+             VALUES('X','/tmp/x','x',1)",
+            [],
+        )
+        .unwrap();
     let mut it = item("rl-orph", now);
-    it.origin_kind = Some("plan_run".to_string());
+    it.origin_kind = Some("session".to_string());
     it.origin_id = Some("X".to_string());
     db.insert_work_item(&it).unwrap();
     // The origin dies — provenance is a TEXT breadcrumb, never a foreign
     // key, so nothing may cascade (the direct regression test for the
     // old CASCADE defect).
-    assert!(db.delete_plan_run("X").unwrap());
-    assert!(db.get_plan_run("X").is_none());
+    db.delete_session("X").unwrap();
+    assert!(db.load_session("X").unwrap().is_none());
     let survivor = db.get_work_item("rl-orph").expect("item outlives origin");
-    assert_eq!(survivor.origin_kind.as_deref(), Some("plan_run"));
+    assert_eq!(survivor.origin_kind.as_deref(), Some("session"));
     assert_eq!(survivor.origin_id.as_deref(), Some("X"));
     assert_eq!(ready_ids(&db, now), vec!["rl-orph"], "still ready");
 }

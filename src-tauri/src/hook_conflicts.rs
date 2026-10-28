@@ -105,7 +105,7 @@ fn sources(backend: Option<&str>, project: Option<&Path>) -> Vec<Source> {
     let mut out = Vec::new();
     if backend.is_none() || backend == Some("claude-code") {
         let user_local = crate::hook::settings_path().with_file_name("settings.local.json");
-        for path in crate::hook::workflow_settings_files(project) {
+        for path in crate::hook::claude_settings_files(project) {
             // Claude's local override is project-scoped, not a user file.
             if path == user_local {
                 continue;

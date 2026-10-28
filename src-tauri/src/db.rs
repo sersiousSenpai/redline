@@ -111,49 +111,6 @@ pub struct JournalRow {
     pub detail: Option<String>,
 }
 
-/// One orchestrated run's durable record: the orchestrator's exit report
-/// (its *claims* — Redline pairs them against independently observed ground
-/// truth in the report GUI), the workflow script path, and the human
-/// resolution that closes the run.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanRunRow {
-    pub plan_session_id: String,
-    pub report_json: String,
-    pub script_path: Option<String>,
-    pub workflow_ran: bool,
-    /// resolved | needs_follow_up | abandoned; None = awaiting the human mark.
-    pub resolution: Option<String>,
-    pub resolution_note: Option<String>,
-    pub resolved_at: Option<i64>,
-    pub created_at: i64,
-}
-
-/// One orchestrated launch's live-monitor anchor: where the orchestrator's
-/// transcript lives, written at the ingest-claim beacon. The discovery
-/// columns are NULL until the run watcher finds the Workflow launch line
-/// (or falls back to sequential mode) in that transcript.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrchestrationRow {
-    pub plan_session_id: String,
-    pub claude_session_id: String,
-    pub transcript_path: String,
-    pub cwd: Option<String>,
-    pub started_at: i64,
-    pub run_id: Option<String>,
-    pub transcript_dir: Option<String>,
-    pub script_path: Option<String>,
-    /// 'workflow' | 'sequential'; None until the watcher knows.
-    pub mode: Option<String>,
-    /// The dock terminal tab the run was launched into (captured at launch,
-    /// folded in at the ingest claim) — lets "stand down" name the tab to
-    /// close. None for runs launched before the column existed.
-    pub terminal_id: Option<String>,
-    /// Joined from `sessions.run_state` (never stored here).
-    pub run_state: Option<String>,
-}
-
 /// One seat's roster stats (P3): facts about what the seat actually did.
 /// Facts live here in the DB — the seat config JSON records intent
 /// (model/effort/charter), never history.
@@ -2244,15 +2201,6 @@ impl Database {
                 );
             }
         }
-        // Run lifecycle (orchestrated executions): the run-state machine rides
-        // in nullable columns beside the frozen three-value `status`, so
-        // reconciliation and the liveness watchdog never see it. Only
-        // orchestrated runs populate it — a plain Approve leaves both NULL.
-        // Values: orchestrating | running | awaiting_review (the run finished
-        // its work and parked for the human's morning review — NOT live, no
-        // watcher; transition wiring is a later unit) | in_code_review |
-        // landed | stalled | abandoned (a stand-down; terminal). NULL = no
-        // run (a plain Approve, or a reset after a failed handoff).
         // Which harness authored the plan, and at what model. `redline_provider`
         // has ridden the normalized Codex payload since the receive side was
         // built, but nothing ever read it. Not cosmetic: RESTORE branches on
@@ -2285,11 +2233,23 @@ impl Database {
             let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN meter_json TEXT"), []);
         }
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", []);
+        // An approved plan's build state rides in nullable columns beside the
+        // frozen three-value `status`, so reconciliation and the liveness
+        // watchdog never see it. Values written today: `building` (an agent
+        // is building it in a terminal) and `landed` (marked Completed);
+        // NULL is "approved · not built". Rows from before native runs were
+        // removed may still hold that era's values (running, stalled, …).
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN run_state TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE sessions ADD COLUMN run_updated_at INTEGER",
             [],
         );
+        // `plan_runs`, `orchestrations` (below), the `run_*` graph tables
+        // (`migrate_v2`) and `scaled_runs` (`migrate_v5`) belonged to the
+        // orchestration-run feature, which is gone. Nothing reads or writes
+        // them any more; their DDL stays so every install keeps one schema
+        // shape, and no migration ever drops a user's table.
+        //
         // The run's durable record: the orchestrator's exit report (claims),
         // the workflow script path, and the human resolution. One row per
         // plan session — a re-run overwrites the report, the resolution is a
@@ -2834,54 +2794,6 @@ impl Database {
             })
         })?;
         rows.collect()
-    }
-
-    /// Write a scaled build's durable state (config, limits, phase).
-    pub fn upsert_scaled_run(&self, ctl: &crate::scaled::RunCtl) -> rusqlite::Result<()> {
-        let now = crate::state::now_millis();
-        let json = |v: serde_json::Result<String>| v.unwrap_or_else(|_| "null".into());
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO scaled_runs (run_id, plan_session_id, config_json, limits_json, phase_json, started_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT(run_id) DO UPDATE SET config_json = ?3, limits_json = ?4, phase_json = ?5, started_at = ?6, updated_at = ?7",
-            params![
-                ctl.run_id,
-                ctl.plan_session_id,
-                json(serde_json::to_string(&ctl.config)),
-                json(serde_json::to_string(&ctl.limits)),
-                json(serde_json::to_string(&ctl.phase)),
-                ctl.started_at,
-                now
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// A scaled build rebuilt from its row. A pre-flight that was waiting
-    /// when the app went down cannot still be held, so it reads as Launching
-    /// (the lead's next Workflow call brings a fresh one).
-    pub fn get_scaled_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::scaled::RunCtl>> {
-        let conn = self.read_conn();
-        let row = conn
-            .query_row(
-                "SELECT plan_session_id, config_json, limits_json, phase_json, started_at FROM scaled_runs WHERE run_id = ?1",
-                params![run_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<i64>>(4)?)),
-            )
-            .optional()?;
-        let Some((plan, config, limits, phase, started_at)) = row else { return Ok(None) };
-        let Ok(config) = serde_json::from_str(&config) else { return Ok(None) };
-        let mut ctl = crate::scaled::RunCtl::new(run_id, &plan, config);
-        if let Ok(limits) = serde_json::from_str(&limits) {
-            ctl.limits = limits;
-        }
-        ctl.phase = match serde_json::from_str(&phase) {
-            Ok(crate::scaled::Phase::Preflight) | Err(_) => crate::scaled::Phase::Launching,
-            Ok(phase) => phase,
-        };
-        ctl.started_at = started_at;
-        Ok(Some(ctl))
     }
 
     /// The newest journal rows of one kind, newest first. The chat room's
@@ -4872,8 +4784,8 @@ impl Database {
             ),
             "drafter" | "drafter_chat" => ("SELECT title FROM drafts WHERE draft_id = ?1", id),
             // `plan_run` is a work-item origin breadcrumb whose id IS a plan
-            // session id (the orchestrator's exit report files under it), so
-            // it resolves through the same row a `session` ref does.
+            // session id (older exit reports filed under it), so it resolves
+            // through the same row a `session` ref does.
             "session" | "plan_run" => (
                 "SELECT project_name FROM sessions WHERE session_id = ?1",
                 id,
@@ -5125,10 +5037,10 @@ impl Database {
 
     // --- class runs + lake delta ---
 
-    /// Friction rows for the Orchestration digest: every `in_review` session with
+    /// Friction rows for the librarian's digest: every `in_review` session with
     /// its **open**-comment count and `created_at`, oldest first. Returns
     /// `(session_id, project_name, created_at, unresolved_count)`. Pure read;
-    /// the orchestrator ranks these.
+    /// the librarian ranks these.
     ///
     /// Open means the comment is still waiting on somebody: `draft` (written,
     /// not submitted), `submitted` (sent, no resolution back yet), `reopened`
@@ -5524,12 +5436,10 @@ impl Database {
         Ok(())
     }
 
-    /// Run-lifecycle transition (orchestrated executions). Stamps
+    /// Build-state transition (`building`, `landed`). Stamps
     /// `run_updated_at` and journals the transition (the Companion feed gets
     /// a per-plan timeline for free). Returns whether the state actually
     /// changed — callers emit the chip event only on a real transition.
-    /// A later beacon simply overwrites `stalled`; there is no ordering
-    /// enforcement, the beacons are the truth.
     pub fn set_run_state(&self, session_id: &str, state: &str) -> rusqlite::Result<bool> {
         let changed = {
             let conn = self.lock_conn();
@@ -5567,8 +5477,8 @@ impl Database {
         Ok(changed)
     }
 
-    /// A session's current run state (orchestrated runs only; `None` for a
-    /// plain Approve or an unknown session).
+    /// A session's current build state, read straight from its row.
+    #[cfg(test)]
     pub fn get_run_state(&self, session_id: &str) -> Option<String> {
         let conn = self.read_conn();
         conn.query_row(
@@ -5580,227 +5490,9 @@ impl Database {
         .flatten()
     }
 
-    /// Insert-or-replace a run's exit report. The resolution columns are
-    /// preserved-by-reset deliberately: a re-run's fresh report reopens the
-    /// human verdict (the previous resolution described a previous run).
-    pub fn upsert_plan_run(
-        &self,
-        plan_session_id: &str,
-        report_json: &str,
-        script_path: Option<&str>,
-        workflow_ran: bool,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO plan_runs (plan_session_id, report_json, script_path, workflow_ran,
-                                    resolution, resolution_note, resolved_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)
-             ON CONFLICT(plan_session_id) DO UPDATE SET
-                report_json = excluded.report_json,
-                script_path = excluded.script_path,
-                workflow_ran = excluded.workflow_ran,
-                resolution = NULL,
-                resolution_note = NULL,
-                resolved_at = NULL,
-                created_at = excluded.created_at",
-            params![
-                plan_session_id,
-                report_json,
-                script_path,
-                workflow_ran as i64,
-                crate::ledger::now_millis()
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// The human verdict on a run: resolved / needs_follow_up / abandoned.
-    /// Returns false when no report row exists to resolve.
-    pub fn resolve_plan_run(
-        &self,
-        plan_session_id: &str,
-        resolution: &str,
-        note: Option<&str>,
-    ) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let n = conn.execute(
-            "UPDATE plan_runs SET resolution = ?1, resolution_note = ?2, resolved_at = ?3
-             WHERE plan_session_id = ?4",
-            params![resolution, note, crate::ledger::now_millis(), plan_session_id],
-        )?;
-        Ok(n > 0)
-    }
-
-    pub fn get_plan_run(&self, plan_session_id: &str) -> Option<PlanRunRow> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT plan_session_id, report_json, script_path, workflow_ran,
-                    resolution, resolution_note, resolved_at, created_at
-             FROM plan_runs WHERE plan_session_id = ?1",
-            params![plan_session_id],
-            |row| {
-                Ok(PlanRunRow {
-                    plan_session_id: row.get(0)?,
-                    report_json: row.get(1)?,
-                    script_path: row.get(2)?,
-                    workflow_ran: row.get::<_, i64>(3)? != 0,
-                    resolution: row.get(4)?,
-                    resolution_note: row.get(5)?,
-                    resolved_at: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            },
-        )
-        .ok()
-    }
-
-    /// Anchor a fresh orchestrated launch. A re-run overwrites the anchor and
-    /// resets the discovery columns — the previous run's artifacts describe a
-    /// previous run, and the watcher re-discovers from the new transcript.
-    pub fn upsert_orchestration(
-        &self,
-        plan_session_id: &str,
-        claude_session_id: &str,
-        transcript_path: &str,
-        cwd: Option<&str>,
-        terminal_id: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO orchestrations (plan_session_id, claude_session_id, transcript_path,
-                                         cwd, started_at, run_id, transcript_dir, script_path, mode,
-                                         terminal_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, ?6)
-             ON CONFLICT(plan_session_id) DO UPDATE SET
-                claude_session_id = excluded.claude_session_id,
-                transcript_path = excluded.transcript_path,
-                cwd = excluded.cwd,
-                started_at = excluded.started_at,
-                run_id = NULL,
-                transcript_dir = NULL,
-                script_path = NULL,
-                mode = NULL,
-                terminal_id = COALESCE(excluded.terminal_id, terminal_id)",
-            params![
-                plan_session_id,
-                claude_session_id,
-                transcript_path,
-                cwd,
-                crate::ledger::now_millis(),
-                terminal_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Backfill discovery columns as the watcher learns them. COALESCE-style
-    /// partial update: a passed value wins, an omitted (None) column keeps
-    /// what was already discovered. New-value-wins matters for `mode` — a
-    /// premature sequential fallback upgrades to `workflow` the moment the
-    /// launch line appears.
-    pub fn update_orchestration_discovery(
-        &self,
-        plan_session_id: &str,
-        run_id: Option<&str>,
-        transcript_dir: Option<&str>,
-        script_path: Option<&str>,
-        mode: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE orchestrations SET
-                run_id = COALESCE(?2, run_id),
-                transcript_dir = COALESCE(?3, transcript_dir),
-                script_path = COALESCE(?4, script_path),
-                mode = COALESCE(?5, mode)
-             WHERE plan_session_id = ?1",
-            params![plan_session_id, run_id, transcript_dir, script_path, mode],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_orchestration(&self, plan_session_id: &str) -> Option<OrchestrationRow> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
-                    o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
-                    o.terminal_id, s.run_state
-             FROM orchestrations o
-             LEFT JOIN sessions s ON s.session_id = o.plan_session_id
-             WHERE o.plan_session_id = ?1",
-            params![plan_session_id],
-            Self::orchestration_from_row,
-        )
-        .ok()
-    }
-
-    /// Every anchored run, newest launch first, with the live run-state joined
-    /// in (the History tab's data source and the rehydration sweep's input).
-    pub fn list_orchestrations(&self) -> rusqlite::Result<Vec<OrchestrationRow>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
-                    o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
-                    o.terminal_id, s.run_state
-             FROM orchestrations o
-             LEFT JOIN sessions s ON s.session_id = o.plan_session_id
-             ORDER BY o.started_at DESC, o.rowid DESC",
-        )?;
-        let rows = stmt
-            .query_map([], Self::orchestration_from_row)?
-            .filter_map(Result::ok)
-            .collect();
-        Ok(rows)
-    }
-
-    /// `plan_session_id → mode` for every run whose mode the watcher has
-    /// settled. Its own tiny query rather than a `list_orchestrations` walk
-    /// because the sidebar's run chip needs one string per session and
-    /// nothing else — and it needs it on every summary refresh.
-    ///
-    /// The mode matters at chip scale because `sequential` is not a
-    /// configuration, it is a DEGRADATION: `runwatch` writes it when no
-    /// Workflow run was found and the orchestrator fell back to running the
-    /// plan one subtask at a time. Rendered neutrally (or not at all) it is
-    /// indistinguishable from the multi-agent run the user asked for.
-    pub fn run_modes(&self) -> std::collections::HashMap<String, String> {
-        let conn = self.read_conn();
-        let mut out = std::collections::HashMap::new();
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT plan_session_id, mode FROM orchestrations WHERE mode IS NOT NULL",
-        ) else {
-            return out;
-        };
-        let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) else {
-            return out;
-        };
-        for (sid, mode) in rows.filter_map(Result::ok) {
-            out.insert(sid, mode);
-        }
-        out
-    }
-
-    fn orchestration_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrchestrationRow> {
-        Ok(OrchestrationRow {
-            plan_session_id: row.get(0)?,
-            claude_session_id: row.get(1)?,
-            transcript_path: row.get(2)?,
-            cwd: row.get(3)?,
-            started_at: row.get(4)?,
-            run_id: row.get(5)?,
-            transcript_dir: row.get(6)?,
-            script_path: row.get(7)?,
-            mode: row.get(8)?,
-            terminal_id: row.get(9)?,
-            run_state: row.get(10)?,
-        })
-    }
-
-    /// Clear a session's run columns back to NULL — "this session has no run".
+    /// Clear a session's run columns back to NULL — "approved · not built".
     /// Exists because `set_run_state` takes `&str` and structurally cannot
-    /// write NULL; the click-is-not-evidence rollback needs exactly that.
+    /// write NULL; a manual state change and a rescinded approval need it.
     /// Returns whether anything was cleared. Journals as `run_state: cleared`.
     pub fn clear_run_state(&self, session_id: &str) -> rusqlite::Result<bool> {
         let changed = {
@@ -5822,28 +5514,6 @@ impl Database {
             );
         }
         Ok(changed)
-    }
-
-    /// Drop a run's monitor anchor. `reset_run` uses this so the Runs surface
-    /// shows nothing rather than a stale corpse (a re-run's upsert would reset
-    /// the columns anyway; the delete is about honest emptiness).
-    pub fn delete_orchestration(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let n = conn.execute(
-            "DELETE FROM orchestrations WHERE plan_session_id = ?1",
-            params![plan_session_id],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Drop a run's exit report (the `reset_run` counterpart for `plan_runs`).
-    pub fn delete_plan_run(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let n = conn.execute(
-            "DELETE FROM plan_runs WHERE plan_session_id = ?1",
-            params![plan_session_id],
-        )?;
-        Ok(n > 0)
     }
 
     /// Startup sweep: a held POST never survives a restart, so every session
@@ -8649,102 +8319,7 @@ mod work_graph_tests;
 #[path = "db_tests.rs"]
 mod tests;
 
-// Native execution graph transactions. doc_json is the rehydration artifact;
-// normalized rows and its revision are written in the SAME transaction.
 impl Database {
-    fn runner_read(
-        conn: &Connection,
-        run_id: &str,
-    ) -> Result<crate::runner_graph::RunGraph, String> {
-        let json: String = conn
-            .query_row(
-                "SELECT doc_json FROM run_graphs WHERE run_id=?1",
-                [run_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        serde_json::from_str(&json).map_err(|e| e.to_string())
-    }
-    fn runner_claim_rows(
-        conn: &Connection,
-        run_id: &str,
-    ) -> Result<Vec<crate::runner_graph::RunClaim>, String> {
-        let mut stmt = conn.prepare("SELECT path,node_id,claimed_at,released_at FROM run_claims WHERE run_id=?1 ORDER BY path,node_id").map_err(|e|e.to_string())?;
-        let rows = stmt
-            .query_map([run_id], |r| {
-                Ok(crate::runner_graph::RunClaim {
-                    path: r.get(0)?,
-                    node_id: r.get(1)?,
-                    claimed_at: r.get(2)?,
-                    released_at: r.get(3)?,
-                })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
-        Ok(rows)
-    }
-    fn runner_write(
-        conn: &Connection,
-        graph: &crate::runner_graph::RunGraph,
-    ) -> Result<(), String> {
-        crate::runner_graph::validate(graph)?;
-        let json = serde_json::to_string(graph).map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO run_graphs(run_id,plan_session_id,project_path,status,doc_json,rev,max_write_parallel,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,doc_json=excluded.doc_json,rev=excluded.rev,max_write_parallel=excluded.max_write_parallel,updated_at=excluded.updated_at", params![graph.run_id,graph.plan_session_id,graph.project_path,graph.status,json,graph.rev,graph.max_write_parallel,graph.created_at,graph.updated_at]).map_err(|e|e.to_string())?;
-        conn.execute("DELETE FROM run_nodes WHERE run_id=?1", [&graph.run_id])
-            .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM run_edges WHERE run_id=?1", [&graph.run_id])
-            .map_err(|e| e.to_string())?;
-        for n in &graph.nodes {
-            conn.execute("INSERT INTO run_nodes(run_id,node_id,kind,title,brief,plan_block_id,seat,backend,model,effort,scope_hint,enforce_scope,verify_cmd,status,attempt,max_attempts,child_session_id,started_at,ended_at,meter_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",params![graph.run_id,n.id,n.kind,n.title,n.brief,n.plan_block_id,n.seat,n.backend,n.model,n.effort,serde_json::to_string(&n.scope_hint).unwrap(),n.enforce_scope,n.verify_cmd,n.status,n.attempt,n.max_attempts,n.child_session_id,n.started_at,n.ended_at,n.meter.as_ref().map(serde_json::Value::to_string)]).map_err(|e|e.to_string())?;
-            if crate::runner_graph::terminal(&n.status) {
-                conn.execute("UPDATE run_claims SET released_at=?3 WHERE run_id=?1 AND node_id=?2 AND released_at IS NULL",params![graph.run_id,n.id,graph.updated_at]).map_err(|e|e.to_string())?;
-            }
-        }
-        for e in &graph.edges {
-            conn.execute(
-                "INSERT INTO run_edges(run_id,from_id,to_id,type) VALUES(?1,?2,?3,?4)",
-                params![graph.run_id, e.from, e.to, e.edge_type],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-    pub fn runner_create(&self, graph: &crate::runner_graph::RunGraph) -> Result<(), String> {
-        let mut conn = self.lock_conn();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        if tx
-            .query_row(
-                "SELECT 1 FROM run_graphs WHERE run_id=?1",
-                [&graph.run_id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
-            return Err("run already exists".into());
-        }
-        Self::runner_write(&tx, graph)?;
-        tx.commit().map_err(|e| e.to_string())
-    }
-    pub fn runner_get(&self, run_id: &str) -> Result<crate::runner_graph::RunGraph, String> {
-        Self::runner_read(&self.read_conn(), run_id)
-    }
-    pub fn runner_list(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
-        let conn = self.read_conn();
-        let mut stmt = conn
-            .prepare("SELECT doc_json FROM run_graphs ORDER BY updated_at DESC LIMIT 100")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
-        rows.into_iter()
-            .map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-            .collect()
-    }
     // --- candidate releases (Build Redline) --------------------------------
 
     /// Insert or replace a release row. The status transition is checked by
@@ -8839,134 +8414,4 @@ impl Database {
             .into_iter()
             .find(|r| r.status().holds_activation()))
     }
-
-    pub fn runner_claims(
-        &self,
-        run_id: &str,
-    ) -> Result<Vec<crate::runner_graph::RunClaim>, String> {
-        Self::runner_claim_rows(&self.read_conn(), run_id)
-    }
-    /// Check, mutate, normalize, and release terminal claims under one DB lock.
-    pub fn runner_update(
-        &self,
-        run_id: &str,
-        base_rev: Option<i64>,
-        change: impl FnOnce(
-            &mut crate::runner_graph::RunGraph,
-            &[crate::runner_graph::RunClaim],
-        ) -> Result<(), String>,
-    ) -> Result<crate::runner_graph::RunGraph, String> {
-        // Keep the transaction machinery shared across the runner's many
-        // distinct closures while preserving the public single-use contract.
-        let mut change = Some(change);
-        self.runner_update_inner(run_id, base_rev, &mut |graph, claims| {
-            change.take().expect("runner update callback called once")(graph, claims)
-        })
-    }
-    #[inline(never)]
-    fn runner_update_inner(
-        &self,
-        run_id: &str,
-        base_rev: Option<i64>,
-        change: &mut dyn FnMut(
-            &mut crate::runner_graph::RunGraph,
-            &[crate::runner_graph::RunClaim],
-        ) -> Result<(), String>,
-    ) -> Result<crate::runner_graph::RunGraph, String> {
-        let mut conn = self.lock_conn();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let mut graph = Self::runner_read(&tx, run_id)?;
-        let previous = graph.rev;
-        if base_rev.is_some_and(|r| r != previous) {
-            return Err(format!(
-                "409: stale revision; current revision is {previous}"
-            ));
-        }
-        let claims = Self::runner_claim_rows(&tx, run_id)?;
-        change(&mut graph, &claims)?;
-        graph.rev = previous + 1;
-        graph.updated_at = crate::state::now_millis();
-        Self::runner_write(&tx, &graph)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(graph)
-    }
-    /// A claim is both a permission decision and a durable write. The partial
-    /// unique index is the final invariant; the lock also serializes barriers.
-    pub fn runner_claim(&self, run_id: &str, node_id: &str, path: &str, attempt: u32) -> Result<(), String> {
-        use crate::runner_graph::{check_coverage, live, scope_matches};
-        let mut conn = self.lock_conn();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let g = Self::runner_read(&tx, run_id)?;
-        if !["running", "paused"].contains(&g.status.as_str()) {
-            return Err("run is not active".into());
-        }
-        let node = g
-            .nodes
-            .iter()
-            .find(|n| n.id == node_id && n.kind == "task" && live(&n.status))
-            .ok_or("node has no active write-capable turn")?;
-        if attempt == 0 || node.attempt != attempt {
-            return Err("stale run attempt cannot claim writes".into());
-        }
-        if node.enforce_scope && !node.scope_hint.iter().any(|p| scope_matches(p, path)) {
-            return Err(format!("{path} is outside this node's enforced scope"));
-        }
-        let claims = Self::runner_claim_rows(&tx, run_id)?;
-        for check in g
-            .nodes
-            .iter()
-            .filter(|n| matches!(n.kind.as_str(), "check" | "review") && live(&n.status))
-        {
-            if check.kind == "review" || check.check_global || check_coverage(&g, check, &claims).contains(path) {
-                return Err(format!("{path} is busy: check {} holds a verification barrier; continue other work and retry after it finishes",check.id));
-            }
-        }
-        if let Some(c) = claims
-            .iter()
-            .find(|c| c.path == path && c.node_id != node_id && c.released_at.is_none())
-        {
-            return Err(format!("{path} is busy: node {} owns it; continue other work and retry after that node finishes",c.node_id));
-        }
-        tx.execute("INSERT INTO run_claims(run_id,path,node_id,claimed_at,released_at) VALUES(?1,?2,?3,?4,NULL) ON CONFLICT(run_id,path,node_id) DO UPDATE SET released_at=NULL",params![run_id,path,node_id,crate::state::now_millis()]).map_err(|e|e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())
-    }
-    /// Never pretend a process survived an application restart. Claims remain
-    /// held until the human explicitly retries or skips their interrupted node.
-    pub fn runner_recover(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
-        let candidates = {
-            let conn = self.read_conn();
-            let mut stmt=conn.prepare("SELECT doc_json FROM run_graphs WHERE status='running' OR run_id IN (SELECT run_id FROM run_nodes WHERE status IN ('running','verifying'))").map_err(|e|e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| r.get::<_, String>(0))
-                .map_err(|e| e.to_string())?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| e.to_string())?;
-            rows.into_iter()
-                .map(|s| {
-                    serde_json::from_str::<crate::runner_graph::RunGraph>(&s)
-                        .map_err(|e| e.to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut recovered = Vec::new();
-        for g in candidates {
-            if g.status == "running" || g.nodes.iter().any(|n| crate::runner_graph::live(&n.status))
-            {
-                recovered.push(self.runner_update(&g.run_id,None,|g,_| {
-                    g.status="paused".into();g.pause_reason=Some("restart".into());
-                    for n in &mut g.nodes { if crate::runner_graph::live(&n.status) { n.status="awaiting_human".into(); n.output.push_str("\nRedline restarted during this turn. Retry with the saved session or skip this node."); } }
-                    Ok(())
-                })?);
-            }
-        }
-        Ok(recovered)
-    }
 }
-
-#[cfg(test)]
-#[path = "db_runner_tests.rs"]
-mod runner_tests;
-
-#[cfg(test)]
-#[path = "db_runner_persistence_tests.rs"]
-mod runner_persistence_tests;
