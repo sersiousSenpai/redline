@@ -176,7 +176,6 @@ describe("one set of plan verbs on screen", () => {
     await act(async () => root.render(createElement(Footer, {
       comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
       onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      termCollapsed: false, termTabCount: 0, onExpandTerminal: () => {},
       planVerbs: false,
     })));
     expect(host.textContent).toContain("no pending comments");
