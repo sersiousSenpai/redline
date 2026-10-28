@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
-//! Localhost), a "Sessions" label with Combine, the joined-session
-//! shadow, then project groups from lib/sessionGroups — Needs you first while
-//! something does — each holding the rich plan rows (status colour, v{n},
-//! pending count, unseen pulse, build-state chips, detached/codex chips, the revision
-//! tree and a ⋯ menu), chat rows, and the launches whose plan has not arrived.
+//! Browser, Localhost — D30), a "Sessions" label with Combine, the
+//! joined-session shadow, then project sections from lib/sessionGroups —
+//! Needs you first while something does — each split into Plans (the rich
+//! plan rows: status colour, v{n}, pending count, unseen pulse, build-state
+//! chips, detached/codex chips, the revision tree and a ⋯ menu, and the
+//! launches whose plan has not arrived) and Chats, each group collapsible
+//! with its own count and spinner (D31). A row click opens its session as a
+//! tab of the set on screen (D29).
 //! Under each plan row sit its terminals in the shared status vocabulary
 //! (workbench/status.ts): needs you is an amber opacity pulse, working is the
 //! shared Spinner, idle is nothing, exited is muted. A "New tab" row closes it.
@@ -15,12 +18,13 @@
 //! so only the rows that changed render.
 
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, FileText, Globe, House, MessageSquare, Plus, Terminal } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Globe, House, MessageSquare, Plus, Server, Terminal } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
 import { ResumePill } from "./ResumePill";
 import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
+import { usePersistedState } from "../theme/usePersistedState";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
@@ -35,6 +39,7 @@ import {
   type FlowChat,
   type FlowLaunch,
   type NeedReason,
+  type SidebarGroup,
   type SidebarItem,
   type SidebarSection,
   type StatusIcon,
@@ -48,9 +53,9 @@ import {
 import { detachedPillTitle } from "../lib/restoreHarness";
 import "./SessionSidebar.css";
 
-/** The sidebar's Places: Home (the door and its tabs) and the Localhost
- *  dashboard. */
-export type SidebarPlace = "home" | "servers";
+/** The sidebar's Places (D30): Home (the door and its tabs), the Browser
+ *  (its tab in the set on screen) and the Localhost dashboard. */
+export type SidebarPlace = "home" | "browser" | "servers";
 
 /** A terminal under its plan row, in the shared status vocabulary. */
 export interface SidebarTerminal {
@@ -209,6 +214,7 @@ interface LightCan {
 
 const PLACE_TITLES: Record<SidebarPlace, string> = {
   home: "Home — the front door and its tabs",
+  browser: "Browser — its tab, here",
   servers: "Localhost — your local dev servers",
 };
 
@@ -270,8 +276,15 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     [],
   );
 
-  // Section ids opened past their "Show N more", and the archived fold.
+  // Section and group ids opened past their "Show N more", and the archived fold.
   const [openSections, setOpenSections] = useState<ReadonlySet<string>>(() => new Set());
+  // The Plans and Chats groups the user folded away (D31), kept per viewer.
+  const [collapsedList, setCollapsedList] = usePersistedState<string[]>("redline.sidebar.collapsedGroups", []);
+  const collapsed = useMemo(() => new Set(Array.isArray(collapsedList) ? collapsedList : []), [collapsedList]);
+  const toggleGroup = useCallback((id: string) => setCollapsedList((prev) => {
+    const list = Array.isArray(prev) ? prev : [];
+    return list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-64);
+  }), [setCollapsedList]);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const toggleSection = useCallback((id: string) => setOpenSections((prev) => {
     const next = new Set(prev);
@@ -286,8 +299,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     return keys.length ? new Set(keys.map((id) => itemKey("plan", id))) : undefined;
   }, [terminals]);
   const model = useMemo(
-    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections, pinned }),
-    [sessions, chats, launches, needs, working, activeKey, openSections, pinned],
+    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections, pinned, collapsed }),
+    [sessions, chats, launches, needs, working, activeKey, openSections, pinned, collapsed],
   );
 
   // Combine selection. Local because nothing outside the sidebar watches it —
@@ -430,8 +443,9 @@ function SessionSidebarBase(props: SessionSidebarProps) {
             ))}
           </ul>
         )}
+        {onSelectPlace && <PlaceRow id="browser" icon={Globe} label="Browser" current={place === "browser"} onSelect={selectPlace} />}
         {onSelectPlace && (
-          <PlaceRow id="servers" icon={Globe} label="Localhost" current={place === "servers"} onSelect={selectPlace}
+          <PlaceRow id="servers" icon={Server} label="Localhost" current={place === "servers"} onSelect={selectPlace}
             end={portsSummary ? <span className="rl-sb-place-ports" title={ports.join(" · ")}>{portsSummary}</span> : null} />
         )}
       </div>
@@ -466,7 +480,13 @@ function SessionSidebarBase(props: SessionSidebarProps) {
         {model.sections.map((section) => (
           <Section key={section.id} section={section} open={openSections.has(section.id)} onToggle={toggleSection}
             onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}>
-            {section.rows.map(row)}
+            {section.groups.length === 0
+              ? section.rows.map(row)
+              : section.groups.map((group) => (
+                  <Group key={group.id} group={group} open={openSections.has(group.id)} onToggle={toggleSection} onCollapse={toggleGroup}>
+                    {group.rows.map(row)}
+                  </Group>
+                ))}
           </Section>
         ))}
         {empty && (
@@ -578,13 +598,59 @@ function Section({ section, open, onToggle, onAdd, children }: {
           </button>
         )}
       </div>
-      <ul className="rl-sb-rows">{children}</ul>
-      {(section.hidden > 0 || (open && section.foldable)) && (
-        <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
-          {open ? "Show less" : `Show ${section.hidden} more`}
-        </button>
+      {section.groups.length > 0 ? children : (
+        <>
+          <ul className="rl-sb-rows">{children}</ul>
+          {(section.hidden > 0 || (open && section.foldable)) && (
+            <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
+              {open ? "Show less" : `Show ${section.hidden} more`}
+            </button>
+          )}
+        </>
       )}
     </section>
+  );
+}
+
+/** A project's Plans or Chats (D31): a header that folds the group away,
+ *  with its count and — while any of its agents is mid-turn — the shared
+ *  Spinner; then its rows and its own "Show N more". */
+function Group({ group, open, onToggle, onCollapse, children }: {
+  group: SidebarGroup;
+  open: boolean;
+  onToggle: (id: string) => void;
+  onCollapse: (id: string) => void;
+  children: ReactNode;
+}) {
+  const listId = useId();
+  const shown = !group.collapsed;
+  return (
+    <div className="rl-sb-group" data-group={group.kind} data-collapsed={group.collapsed || undefined}>
+      <button
+        type="button"
+        className="rl-sb-group-head"
+        aria-expanded={shown}
+        aria-controls={listId}
+        title={shown ? `Fold ${group.label.toLowerCase()} away` : `Show ${group.label.toLowerCase()}`}
+        onClick={() => onCollapse(group.id)}
+      >
+        {shown ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
+        <span className="rl-sb-group-label">{group.label}</span>
+        <span className="rl-sb-group-count" aria-label={`${group.count} ${group.count === 1 ? group.kind.slice(0, -1) : group.kind}`}>{group.count}</span>
+        {group.working > 0 && (
+          <span className="rl-sb-group-working" title={`${group.working} working`}>
+            <Spinner size={9} />
+            <span className="sr-only">{group.working} working</span>
+          </span>
+        )}
+      </button>
+      {shown && <ul id={listId} className="rl-sb-rows">{children}</ul>}
+      {shown && (group.hidden > 0 || (open && group.foldable)) && (
+        <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(group.id)}>
+          {open ? "Show less" : `Show ${group.hidden} more`}
+        </button>
+      )}
+    </div>
   );
 }
 

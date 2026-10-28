@@ -8942,7 +8942,9 @@ function App() {
   // Localhost ports beside it, and each session's terminals
   // in the shared status vocabulary — its agent's terminal from
   // `useSessionTerminals`, its state from the CLI's own hooks.
-  const sidebarPlace = view.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
+  // The Place on screen (D30): Localhost or the Browser when one is the
+  // focused pane, else Home on Home's set.
+  const sidebarPlace = view.focusedKind === "servers" ? "servers" as const : view.focusedKind === "browser" ? "browser" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
   // Read off the Localhost scan (see `ptyKey` below for when it runs).
   // Sorted, deduped and kept by value: a scan that finds the same servers
   // (each 15 s while Localhost is up, in whatever order lsof lists them)
@@ -9027,9 +9029,10 @@ function App() {
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
     // A row's ports chip: the server in a browser tab, as Localhost's cards.
     onOpenPort: (url: string) => openUrlInBrowser(url),
-    // The Places (W1): Home is the workbench's Home set (its door lands),
-    // Localhost opens in the current set.
-    onSelectPlace: (place: "home" | "servers") => {
+    // The Places (W1, D30): Home is the workbench's Home set (its door
+    // lands); the Browser and Localhost open — or come forward — as tabs of
+    // the set on screen.
+    onSelectPlace: (place: "home" | "browser" | "servers") => {
       if (place === "home") {
         tripDoor();
         setActiveId(null);
@@ -9659,7 +9662,7 @@ function App() {
         {sidebarCollapsed && (
           <Suspense fallback={<div className="shrink-0" style={{ width: `${SIDEBAR_EDGE_W}px` }} />}>
             <SidebarEdge
-              place={sidebarPlace === "home" || sidebarPlace === "servers" ? sidebarPlace : null}
+              place={sidebarPlace}
               sessions={sidebarEdgeSessions}
               onPlace={sidebarHandlers.onSelectPlace}
               onSession={sidebarHandlers.onSelect}

@@ -231,6 +231,46 @@ describe("the grouped sidebar", () => {
     expect([...host.querySelectorAll(".rl-sb-label span[id]")].map((l) => l.textContent)).toEqual(["redline"]);
   });
 
+  it("splits a project into Plans and Chats, each folding away on its header, its count kept (D31)", async () => {
+    localStorage.removeItem("redline.sidebar.collapsedGroups");
+    await renderWith({
+      sessions: [summary("a", 2), summary("b", 1)],
+      chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }],
+      working: new Set(["chat:c"]),
+    });
+    const heads = () => [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-group-head")];
+    expect(heads().map((h) => [h.querySelector(".rl-sb-group-label")?.textContent, h.querySelector(".rl-sb-group-count")?.textContent, h.getAttribute("aria-expanded")])).toEqual([
+      ["Plans", "2", "true"],
+      ["Chats", "1", "true"],
+    ]);
+    // A group with an agent at work wears the shared Spinner, and says so.
+    expect(heads()[1].querySelector(".rl-sb-group-working .rl-spinner")).not.toBeNull();
+    expect(heads()[0].querySelector(".rl-sb-group-working")).toBeNull();
+    const group = (kind: string) => host.querySelector(`.rl-sb-group[data-group="${kind}"]`)!;
+    expect(group("plans").querySelectorAll("li.rl-session-row")).toHaveLength(2);
+    expect(group("chats").textContent).toContain("Status check");
+    await click(heads()[1]);
+    expect(heads()[1].getAttribute("aria-expanded")).toBe("false");
+    expect(group("chats").textContent).not.toContain("Status check");
+    expect(heads()[1].querySelector(".rl-sb-group-count")?.textContent).toBe("1");
+    // Kept for the next launch, per viewer.
+    expect(JSON.parse(localStorage.getItem("redline.sidebar.collapsedGroups") ?? "[]")).toEqual(["project:/repo/redline|chats"]);
+    await click(heads()[1]);
+    expect(group("chats").textContent).toContain("Status check");
+    localStorage.removeItem("redline.sidebar.collapsedGroups");
+  });
+
+  it("a plan row's menu opens it as a workspace (D29)", async () => {
+    const onOpenWorkspace = vi.fn();
+    await renderWith({ sessions: [summary("a", 1)], onOpenWorkspace });
+    await click(host.querySelector(".rl-row-menu-trigger"));
+    const item = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Open as workspace"));
+    expect(item).toBeDefined();
+    await click(item!);
+    expect(onOpenWorkspace).toHaveBeenCalledWith("a");
+    expect(full.onSelect).not.toHaveBeenCalled();
+  });
+
   it("Home alone without onSelectPlace, calling onNewPlan (else onNewSession); a project's + starts a session there", async () => {
     await renderWith({ sessions: [summary("a", 1)] });
     expect([...host.querySelectorAll(".rl-sb-place")].map((b) => b.textContent)).toEqual(["Home"]);
@@ -253,14 +293,17 @@ describe("the grouped sidebar", () => {
     const onSelectPlace = vi.fn();
     await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: "servers", onSelectPlace, localhostPorts: [":5173", ":7676", ":3000", ":8080"] });
     const places = [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-place")];
-    // Home and Localhost: the Runs place went with the run feature.
-    expect(places.map((b) => b.dataset.place)).toEqual(["home", "servers"]);
-    expect(places.map((b) => b.getAttribute("aria-current"))).toEqual([null, "page"]);
-    expect(places[1].querySelector(".rl-sb-place-ports")!.textContent).toBe(":5173 · :7676 · :3000 +1");
+    // Home, Browser and Localhost (D30); the Runs place went with the run feature.
+    expect(places.map((b) => b.dataset.place)).toEqual(["home", "browser", "servers"]);
+    expect(places.map((b) => b.textContent?.replace(/:.*$/, ""))).toEqual(["Home", "Browser", "Localhost"]);
+    expect(places.map((b) => b.getAttribute("aria-current"))).toEqual([null, null, "page"]);
+    expect(places[2].querySelector(".rl-sb-place-ports")!.textContent).toBe(":5173 · :7676 · :3000 +1");
     // Another Place owns the stage: no session row reads as open.
     expect(host.querySelector("li.rl-session-row button[aria-current]")).toBeNull();
-    await click(places[1]);
+    await click(places[2]);
     expect(onSelectPlace).toHaveBeenCalledWith("servers");
+    await click(places[1]);
+    expect(onSelectPlace).toHaveBeenCalledWith("browser");
     await click(places[0]);
     expect(onSelectPlace).toHaveBeenCalledWith("home");
     expect(full.onNewSession).not.toHaveBeenCalled();

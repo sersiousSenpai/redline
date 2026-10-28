@@ -104,6 +104,29 @@
 .rl-sb-add:hover { background: var(--color-fill-2); color: var(--color-ink); }
 
 .rl-sb-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+
+/* A project's Plans and Chats (D31): a quiet header row that folds the
+   group, its count beside the word, a spinner while any agent works. */
+.rl-sb-group { display: flex; flex-direction: column; }
+.rl-sb-group-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  margin: 0 6px;
+  padding: 0 10px 0 8px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-4);
+  font-size: var(--rl-text-chrome);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-sb-group-head > svg { flex: none; color: var(--color-ink-5); }
+.rl-sb-group-head:hover { background: var(--color-fill-1); color: var(--color-ink-3); }
+.rl-sb-group-head:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
+.rl-sb-group-label { font-weight: 500; }
+.rl-sb-group-count { color: var(--color-ink-5); font-variant-numeric: tabular-nums; }
+.rl-sb-group-working { display: inline-flex; align-items: center; color: var(--color-mode-plan-fg); }
 .rl-sb-rows[data-archived] > li { opacity: 0.72; }
 .rl-sb-empty { margin: 10px 16px; font-size: 12.5px; line-height: 1.5; color: var(--color-ink-4); }
 .rl-sb-empty b { font-weight: 600; color: var(--color-ink-3); }

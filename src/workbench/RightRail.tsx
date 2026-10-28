@@ -26,6 +26,7 @@ import {
   Minimize2,
   PanelRightClose,
   PanelRightOpen,
+  Server,
   type LucideIcon,
 } from "lucide-react";
 
@@ -219,15 +220,16 @@ export type EdgeSessionTone = "needs" | "review" | "done" | "idle";
 
 export interface SidebarEdgeProps {
   /** Which Place is current, if one is. */
-  place: "home" | "servers" | null;
+  place: "home" | "browser" | "servers" | null;
   sessions: readonly { id: string; title: string; tone: EdgeSessionTone; active: boolean }[];
-  onPlace: (place: "home" | "servers") => void;
+  onPlace: (place: "home" | "browser" | "servers") => void;
   onSession: (id: string) => void;
   /** ◧: the full sidebar (⌘B). */
   onExpand: () => void;
 }
 
-/** The collapsed sidebar's icon pose (D18): Home and Localhost, then each
+/** The collapsed sidebar's icon pose (D18): the Places (Home, Browser,
+ *  Localhost — D30), then each
  *  session as a status dot — amber pulsing when it needs you, amber in
  *  review, green when approved — and the way back open at the foot. */
 function SidebarEdgeBase({ place, sessions, onPlace, onSession, onExpand }: SidebarEdgeProps) {
@@ -236,8 +238,11 @@ function SidebarEdgeBase({ place, sessions, onPlace, onSession, onExpand }: Side
       <button type="button" className="rl-rail-edge-btn" data-current={place === "home" ? "" : undefined} title="Home" aria-label="Home" onClick={() => onPlace("home")}>
         <House size={16} aria-hidden />
       </button>
-      <button type="button" className="rl-rail-edge-btn" data-current={place === "servers" ? "" : undefined} title="Localhost" aria-label="Localhost" onClick={() => onPlace("servers")}>
+      <button type="button" className="rl-rail-edge-btn" data-current={place === "browser" ? "" : undefined} title="Browser" aria-label="Browser" onClick={() => onPlace("browser")}>
         <Globe size={16} aria-hidden />
+      </button>
+      <button type="button" className="rl-rail-edge-btn" data-current={place === "servers" ? "" : undefined} title="Localhost" aria-label="Localhost" onClick={() => onPlace("servers")}>
+        <Server size={16} aria-hidden />
       </button>
       {sessions.length > 0 && <span className="rl-side-edge-rule" aria-hidden />}
       <div className="rl-side-edge-list">

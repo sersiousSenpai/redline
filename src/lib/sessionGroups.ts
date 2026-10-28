@@ -11,7 +11,11 @@
 //!
 //! Sections: **Needs you** first (Claude is blocked on you: a question, a
 //! permission, a run waiting on its code review, a stalled run), only while
-//! something does; then one group per project, the most recent first.
+//! something does; then one section per project, the most recent first, and
+//! in each project two groups (D31): **Plans** (plans, and the launches
+//! whose plan has not arrived) and **Chats** (companion chats), each with
+//! its own count and working state, each collapsible, each folding at its
+//! own "Show N more".
 //!
 //! Where a row is in its life (planning, in review, approved, building,
 //! built) is the row's own status line (`rowStatus`), in its colour, on every
@@ -67,6 +71,28 @@ export interface SidebarItem {
 
 export type SectionKind = "needs" | "project";
 
+/** A project's two groups (D31): plans (launches among them) and chats. */
+export type GroupKind = "plans" | "chats";
+
+export interface SidebarGroup {
+  /** `<section id>|plans` · `<section id>|chats`: keys "Show N more" and
+   *  the collapsed state. */
+  id: string;
+  kind: GroupKind;
+  label: "Plans" | "Chats";
+  /** The rows to render, in order (none while collapsed). */
+  rows: SidebarItem[];
+  /** Rows folded behind "Show N more". */
+  hidden: number;
+  foldable: boolean;
+  /** Every row the group holds, shown or not. */
+  count: number;
+  /** Rows whose agent is mid-turn: the group's own spinner. */
+  working: number;
+  /** The user folded the group away. */
+  collapsed: boolean;
+}
+
 export interface SidebarSection {
   /** `needs` · `project:<path>` (`project:` alone for rows with no folder).
    *  Stable across renders: it keys "Show N more". */
@@ -76,13 +102,16 @@ export interface SidebarSection {
   label: string;
   /** The folder a project group's "+" starts a session in; null otherwise. */
   projectPath: string | null;
-  /** The rows to render, in order. */
+  /** The rows to render, in order: a project's groups' rows, Plans first. */
   rows: SidebarItem[];
   /** Rows folded behind "Show N more". */
   hidden: number;
   /** More rows than the section shows at rest, so it can fold back once
    *  opened ("Show less"). */
   foldable: boolean;
+  /** A project's Plans and Chats (D31), each only while it has a row; none
+   *  for Needs you, which is one list. */
+  groups: SidebarGroup[];
 }
 
 export interface SidebarModel {
@@ -104,8 +133,10 @@ export interface SidebarInput {
   /** Item keys whose Claude is mid-turn. A launch's own `working` counts too. */
   working?: ReadonlySet<string>;
   activeKey?: string | null;
-  /** Section ids the user opened past their "Show N more". */
+  /** Section and group ids the user opened past their "Show N more". */
   expanded?: ReadonlySet<string>;
+  /** Group ids the user collapsed (D31). */
+  collapsed?: ReadonlySet<string>;
   /** Row keys that never fold away: the rows with terminals nested under
    *  them, so a terminal (one kept running after its wall closed above
    *  all) is always one click from its wall. */
@@ -113,7 +144,7 @@ export interface SidebarInput {
 }
 
 /** Rows a section shows before "Show N more". Needs you never folds: each
- *  row there is something to act on. A project folds at six. */
+ *  row there is something to act on. A project's group folds at six. */
 export const SECTION_LIMIT: Record<SectionKind, number> = {
   needs: Infinity,
   project: 6,
@@ -226,14 +257,47 @@ function fold(
   rows: SidebarItem[],
   input: SidebarInput,
 ): SidebarSection {
-  const limit = input.expanded?.has(id) ? Infinity : SECTION_LIMIT[kind];
-  const visible = rows.filter((row, index) => index < limit || row.key === input.activeKey || !!input.pinned?.has(row.key));
-  return { id, kind, label, projectPath, rows: visible, hidden: rows.length - visible.length, foldable: rows.length > SECTION_LIMIT[kind] };
+  const { rows: visible, hidden, foldable } = folded(id, kind, rows, input);
+  return { id, kind, label, projectPath, rows: visible, hidden, foldable, groups: [] };
 }
 
-/** Project groups, the most recently active folder first. A group is named
- *  for its folder (a plan's recorded project name when one has it); rows
- *  with no folder close the list, as Chats when they are all chats. */
+/** The first `limit` rows, plus the open row and the pinned ones. */
+function folded(id: string, kind: SectionKind, rows: SidebarItem[], input: SidebarInput): { rows: SidebarItem[]; hidden: number; foldable: boolean } {
+  const limit = input.expanded?.has(id) ? Infinity : SECTION_LIMIT[kind];
+  const visible = rows.filter((row, index) => index < limit || row.key === input.activeKey || !!input.pinned?.has(row.key));
+  return { rows: visible, hidden: rows.length - visible.length, foldable: rows.length > SECTION_LIMIT[kind] };
+}
+
+/** Which group a row belongs to: a chat is a chat; a plan and a launch
+ *  (a plan on its way) are plans. */
+export const groupOf = (item: Pick<SidebarItem, "kind">): GroupKind => (item.kind === "chat" ? "chats" : "plans");
+
+/** A project section split into its Plans and Chats (D31). */
+function projectSection(id: string, label: string, projectPath: string | null, rows: SidebarItem[], input: SidebarInput): SidebarSection {
+  const groups: SidebarGroup[] = [];
+  for (const [kind, name] of [["plans", "Plans"], ["chats", "Chats"]] as const) {
+    const all = rows.filter((row) => groupOf(row) === kind);
+    if (all.length === 0) continue;
+    const groupId = `${id}|${kind}`;
+    const collapsed = !!input.collapsed?.has(groupId);
+    const shown = collapsed ? { rows: [], hidden: 0, foldable: false } : folded(groupId, "project", all, input);
+    groups.push({ id: groupId, kind, label: name, ...shown, count: all.length, working: all.filter((row) => row.working).length, collapsed });
+  }
+  return {
+    id,
+    kind: "project",
+    label,
+    projectPath,
+    rows: groups.flatMap((group) => group.rows),
+    hidden: groups.reduce((sum, group) => sum + group.hidden, 0),
+    foldable: groups.some((group) => group.foldable),
+    groups,
+  };
+}
+
+/** Project sections, the most recently active folder first. A section is
+ *  named for its folder (a plan's recorded project name when one has it);
+ *  rows with no folder close the list, as "No project". */
 function projectSections(items: SidebarItem[], input: SidebarInput): SidebarSection[] {
   const groups = new Map<string, SidebarItem[]>();
   for (const item of items) {
@@ -249,12 +313,9 @@ function projectSections(items: SidebarItem[], input: SidebarInput): SidebarSect
     return byRecency(a.rows[0], b.rows[0]);
   });
   return ordered.map(({ path, rows }) => {
-    if (!path) {
-      const label = rows.every((row) => row.kind === "chat") ? "Chats" : "Other";
-      return fold("project:", "project", label, null, rows, input);
-    }
+    if (!path) return projectSection("project:", "No project", null, rows, input);
     const named = rows.find((row) => row.session?.projectName)?.session?.projectName;
-    return fold(`project:${path}`, "project", named || basename(path), path, rows, input);
+    return projectSection(`project:${path}`, named || basename(path), path, rows, input);
   });
 }
 

@@ -184,10 +184,10 @@ describe("Show N more", () => {
     expect(shape({ sessions, pinned: new Set(["plan:p8"]) })).toEqual([["din", [...first, "plan:p8"], 2]]);
   });
 
-  it("an expanded section shows everything, and can fold back only while it has more than its limit", () => {
-    const [open] = buildSidebar({ sessions, expanded: new Set(["project:/code/din"]) }).sections;
+  it("an expanded group shows everything, and can fold back only while it has more than its limit", () => {
+    const [open] = buildSidebar({ sessions, expanded: new Set(["project:/code/din|plans"]) }).sections;
     expect([open.rows.length, open.hidden, open.foldable]).toEqual([9, 0, true]);
-    const [few] = buildSidebar({ sessions: sessions.slice(0, 6), expanded: new Set(["project:/code/din"]) }).sections;
+    const [few] = buildSidebar({ sessions: sessions.slice(0, 6), expanded: new Set(["project:/code/din|plans"]) }).sections;
     expect(few.foldable).toBe(false);
   });
 
@@ -205,8 +205,10 @@ describe("project groups", () => {
       sessions: [plan("a", { projectPath: "/code/din/", updatedAt: 10 }), plan("b", { projectPath: "/code/mos", projectName: "machineos", updatedAt: 20 })],
       chats: [chat("c", { projectPath: "/code/din", updatedAt: 30 })],
     });
+    // The newest row leads its folder (the chat), and its Plans come
+    // before its Chats (D31).
     expect(model.sections.map((s) => [s.label, s.projectPath, s.rows.map((r) => r.key)])).toEqual([
-      ["din", "/code/din", ["chat:c", "plan:a"]],
+      ["din", "/code/din", ["plan:a", "chat:c"]],
       ["machineos", "/code/mos", ["plan:b"]],
     ]);
   });
@@ -216,11 +218,50 @@ describe("project groups", () => {
     expect(model.sections[0].label).toBe("research");
   });
 
-  it("rows without a folder close the list: Chats when all chats, Other otherwise", () => {
+  it("rows without a folder close the list, as No project, in the same two groups", () => {
     const chatsOnly = buildSidebar({ sessions: [plan("a", { updatedAt: 1 })], chats: [chat("c", { projectPath: null, updatedAt: 99 })] });
-    expect(chatsOnly.sections.map((s) => [s.label, s.projectPath])).toEqual([["din", "/code/din"], ["Chats", null]]);
+    expect(chatsOnly.sections.map((s) => [s.label, s.projectPath, s.groups.map((g) => g.label)])).toEqual([["din", "/code/din", ["Plans"]], ["No project", null, ["Chats"]]]);
     const mixed = buildSidebar({ sessions: [], chats: [chat("c", { projectPath: null })], launches: [launch("t", { projectPath: null })] });
-    expect(mixed.sections.map((s) => s.label)).toEqual(["Other"]);
+    expect(mixed.sections.map((s) => [s.label, s.groups.map((g) => g.label)])).toEqual([["No project", ["Plans", "Chats"]]]);
+  });
+});
+
+// D31: chats and plans are separate groups under each project.
+describe("a project's Plans and Chats", () => {
+  const input: SidebarInput = {
+    sessions: [plan("p1", { updatedAt: 50 }), plan("p2", { updatedAt: 20 })],
+    chats: [chat("c1", { updatedAt: 60 }), chat("c2", { updatedAt: 10 })],
+    launches: [launch("t1", { startedAt: 40 })],
+    working: new Set(["chat:c1"]),
+  };
+  const groups = (over: Partial<SidebarInput> = {}) => buildSidebar({ ...input, ...over }).sections[0].groups;
+
+  it("puts plans and launches in Plans, chats in Chats, each newest first, with its count and working state", () => {
+    expect(groups().map((g) => [g.id, g.label, g.rows.map((r) => r.key), g.count, g.working])).toEqual([
+      ["project:/code/din|plans", "Plans", ["plan:p1", "launch:t1", "plan:p2"], 3, 1],
+      ["project:/code/din|chats", "Chats", ["chat:c1", "chat:c2"], 2, 1],
+    ]);
+    // The section's rows are its groups', Plans first.
+    expect(buildSidebar(input).sections[0].rows.map((r) => r.key)).toEqual(["plan:p1", "launch:t1", "plan:p2", "chat:c1", "chat:c2"]);
+  });
+
+  it("a collapsed group keeps its count and shows no rows; the other is untouched", () => {
+    const [plans, chats] = groups({ collapsed: new Set(["project:/code/din|chats"]) });
+    expect([chats.collapsed, chats.rows, chats.count, chats.hidden]).toEqual([true, [], 2, 0]);
+    expect([plans.collapsed, plans.rows.length]).toEqual([false, 3]);
+  });
+
+  it("each group folds at its own limit", () => {
+    const many = { sessions: Array.from({ length: 8 }, (_, i) => plan(`p${i}`, { updatedAt: 90 - i })), chats: Array.from({ length: 7 }, (_, i) => chat(`c${i}`, { updatedAt: 50 - i })) };
+    const [plans, chats] = buildSidebar(many).sections[0].groups;
+    expect([plans.rows.length, plans.hidden, chats.rows.length, chats.hidden]).toEqual([6, 2, 6, 1]);
+    expect(buildSidebar(many).sections[0].hidden).toBe(3);
+  });
+
+  it("a row that needs you leaves its group for Needs you; Needs you stays one list", () => {
+    const model = buildSidebar({ ...input, needs: { "chat:c2": "Question" } });
+    expect(model.sections[0]).toMatchObject({ label: "Needs you", groups: [] });
+    expect(model.sections[1].groups.find((g) => g.kind === "chats")!.rows.map((r) => r.key)).toEqual(["chat:c1"]);
   });
 });
 
