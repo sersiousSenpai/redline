@@ -5,7 +5,8 @@
 //! where no listener of the app's own document can hear the keyboard at
 //! all — the same reason ⌘W is a menu item (lib.rs).
 //!
-//! File ▸ New Tab ⌘T, Reopen Closed Tab ⌘⇧T, Close Window ⌘⇧W, and a Tabs
+//! File ▸ New Tab ⌘T, Reopen Closed Tab ⌘⇧T, Close Window ⌘⇧W, Go to File…
+//! ⌘P (the rail's quick open; lib.rs's Print… moved to ⌘⌥P), and a Tabs
 //! submenu — Previous / Next Tab ⌘⇧[ / ⌘⇧], Tab 1–8 ⌘1–⌘8, Last Tab ⌘9.
 //! (⌘⌥← / ⌘⌥→ are aliases of the cycle, matched by the frontend and
 //! forwarded from pages by browser_signals.js: a menu item carries one
@@ -26,6 +27,8 @@ pub const WB_NEW_TAB_ID: &str = "wb_new_tab";
 pub const WB_REOPEN_TAB_ID: &str = "wb_reopen_tab";
 /// File ▸ Close Window (⌘⇧W).
 pub const WB_CLOSE_WINDOW_ID: &str = "wb_close_window";
+/// File ▸ Go to File… (⌘P): the quick open over the rail's root.
+pub const WB_GO_TO_FILE_ID: &str = "wb_go_to_file";
 /// The Tabs submenu, between Edit and View.
 pub const WB_TABS_MENU_ID: &str = "wb_tabs";
 /// Tabs ▸ Previous Tab (⌘⇧[).
@@ -37,10 +40,11 @@ pub const WB_LAST_TAB_ID: &str = "wb_last_tab";
 
 /// The File items of the workbench set, in menu order: id, label,
 /// accelerator, the event each emits (no payload).
-pub const WB_FILE_ITEMS: [(&str, &str, &str, &str); 3] = [
+pub const WB_FILE_ITEMS: [(&str, &str, &str, &str); 4] = [
     (WB_NEW_TAB_ID, "New Tab", "CmdOrCtrl+T", "menu-new-tab"),
     (WB_REOPEN_TAB_ID, "Reopen Closed Tab", "CmdOrCtrl+Shift+T", "menu-reopen-tab"),
     (WB_CLOSE_WINDOW_ID, "Close Window", "CmdOrCtrl+Shift+W", "menu-close-window"),
+    (WB_GO_TO_FILE_ID, "Go to File…", "CmdOrCtrl+P", "menu-quick-open"),
 ];
 
 /// Tabs ▸ Previous / Next: id, label, accelerator, the `menu-tab-cycle`
@@ -129,6 +133,16 @@ fn apply<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> tauri::Result<()> {
                 file.insert(&item, close_at)?;
             }
         }
+        if let Some(file) = &file {
+            if file.get(WB_GO_TO_FILE_ID).is_none() {
+                let (id, label, accelerator, _) = WB_FILE_ITEMS[3];
+                let item = MenuItemBuilder::with_id(id, label).accelerator(accelerator).build(app)?;
+                // Beside Print… (now ⌘⌥P), or last when setup left none.
+                let items = file.items()?;
+                let at = items.iter().position(|item| item.id().as_ref() == "print_page").unwrap_or(items.len());
+                file.insert(&item, at)?;
+            }
+        }
         if menu.get(WB_TABS_MENU_ID).is_none() {
             let tabs = tabs_submenu(app)?;
             menu.insert(&tabs, 3.min(menu.items()?.len()))?;
@@ -142,7 +156,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> tauri::Result<()> {
 fn remove_set<R: Runtime>(app: &AppHandle<R>, file: Option<&Submenu<R>>) -> tauri::Result<()> {
     let Some(menu) = app.menu() else { return Ok(()) };
     if let Some(file) = file {
-        for id in [WB_NEW_TAB_ID, WB_REOPEN_TAB_ID, WB_CLOSE_WINDOW_ID] {
+        for id in [WB_NEW_TAB_ID, WB_REOPEN_TAB_ID, WB_CLOSE_WINDOW_ID, WB_GO_TO_FILE_ID] {
             if let Some(item) = file.get(id) {
                 file.remove(&item)?;
             }
@@ -195,6 +209,7 @@ mod tests {
         assert_eq!(event_for(WB_NEW_TAB_ID), Some(("menu-new-tab", None)));
         assert_eq!(event_for(WB_REOPEN_TAB_ID), Some(("menu-reopen-tab", None)));
         assert_eq!(event_for(WB_CLOSE_WINDOW_ID), Some(("menu-close-window", None)));
+        assert_eq!(event_for(WB_GO_TO_FILE_ID), Some(("menu-quick-open", None)));
         assert_eq!(event_for(WB_PREV_TAB_ID), Some(("menu-tab-cycle", Some(-1))));
         assert_eq!(event_for(WB_NEXT_TAB_ID), Some(("menu-tab-cycle", Some(1))));
         for (i, (id, ..)) in WB_INDEX_ITEMS.iter().take(8).enumerate() {
@@ -206,7 +221,7 @@ mod tests {
     #[test]
     fn the_workbench_accelerators_are_in_order() {
         let file: Vec<_> = WB_FILE_ITEMS.iter().map(|(_, _, a, _)| *a).collect();
-        assert_eq!(file, ["CmdOrCtrl+T", "CmdOrCtrl+Shift+T", "CmdOrCtrl+Shift+W"]);
+        assert_eq!(file, ["CmdOrCtrl+T", "CmdOrCtrl+Shift+T", "CmdOrCtrl+Shift+W", "CmdOrCtrl+P"]);
         let cycle: Vec<_> = WB_CYCLE_ITEMS.iter().map(|(_, _, a, _)| *a).collect();
         assert_eq!(cycle, ["CmdOrCtrl+Shift+[", "CmdOrCtrl+Shift+]"]);
         let index: Vec<_> = WB_INDEX_ITEMS.iter().map(|(_, _, a, _)| *a).collect();
@@ -218,6 +233,8 @@ mod tests {
         // would shadow it.
         for (_, _, a, _) in WB_FILE_ITEMS {
             assert_ne!(a, "CmdOrCtrl+W");
+            // Print… is ⌘⌥P now; ⌘P is Go to File.
+            assert_ne!(a, crate::PRINT_ACCELERATOR);
         }
     }
 

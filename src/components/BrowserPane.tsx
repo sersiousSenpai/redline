@@ -2134,7 +2134,7 @@ function BrowserPaneBase({
     window.addEventListener("redline:browser-close-page", close);
     return () => window.removeEventListener("redline:browser-close-page", close);
   }, []);
-  // File ▸ Print… (⌘P) prints the page in front; the page menu offers it too,
+  // File ▸ Print… (⌘⌥P) prints the page in front; the page menu offers it too,
   // beside Save page/PDF, which saves through the tab's own cookies.
   const pageOutputRef = useRef<(command: "browser_print" | "browser_save_page") => void>(() => {});
   pageOutputRef.current = (command) => {

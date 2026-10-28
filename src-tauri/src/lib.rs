@@ -55,6 +55,8 @@ mod extension_host;
 mod extension_scaffold;
 mod feedback;
 mod workbench_menu;
+/// File ▸ Print…: ⌘⌥P, since ⌘P is the workbench's Go to File (W4).
+pub(crate) const PRINT_ACCELERATOR: &str = "CmdOrCtrl+Alt+P";
 mod fork;
 mod fsbrowse;
 mod fswatch;
@@ -13667,10 +13669,11 @@ pub fn run() {
                     .accelerator("CmdOrCtrl+W")
                     .build(app)?;
                 file_submenu.append(&close_tab)?;
-                // ⌘P prints the active browser tab (the pane decides whether
-                // a browser tab is in front; see `menu-print`).
+                // ⌘⌥P prints the active browser tab (the pane decides
+                // whether a browser tab is in front; see `menu-print`). ⌘P
+                // is the workbench's Go to File (workbench_menu.rs).
                 let print = MenuItemBuilder::with_id("print_page", "Print…")
-                    .accelerator("CmdOrCtrl+P")
+                    .accelerator(PRINT_ACCELERATOR)
                     .build(app)?;
                 file_submenu.append_items(&[&PredefinedMenuItem::separator(app)?, &print])?;
             }
