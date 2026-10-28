@@ -100,4 +100,14 @@ describe("panel mask wiring", () => {
     expect(rule).toContain('new CustomEvent("redline:talk-context"');
     expect(rule.indexOf('selectRailTab("discussion")')).toBeGreaterThan(rule.indexOf("return;"));
   });
+  it("Talk is never empty: a pane with no conversation of its own hosts where it sits, and the picker never moves the centre", () => {
+    const memo = app.slice(app.indexOf("const dockContexts = useMemo("), app.indexOf("const dockContext = activeConversation("));
+    expect(memo).toContain("if (own.length > 0) return own;");
+    expect(memo).toContain('conversationContexts({ ...inputs, surface: "document", plateMode: planDiscussable && activeId ? "plan" : "door" })');
+    // ⌘J's palette entry is Talk's; the door has its own.
+    expect(app).toContain("toggleDock: toggleTalk,");
+    const pick = app.slice(app.indexOf("onPickRoot={(path) => {"), app.indexOf("onQuickOpen={openQuickOpen}"));
+    expect(pick).not.toContain("selectFolderTab");
+    expect(pick).not.toContain("showTerminal");
+  });
 });

@@ -3645,25 +3645,9 @@ function App() {
     [selectFolder, setActiveFile],
   );
 
-  // Folder-tab click: activate the folder and, with linked nav on, bring its
-  // terminal forward — the mirror image of focusing a terminal to switch
-  // folders. No-op on the terminal side if no terminal lives in that folder.
-  const selectFolderTab = useCallback(
-    (path: string) => {
-      setFrontDoorProject({ path });
-      activateFolder(path);
-      if (!linkNavRef.current) return;
-      // Its terminal comes forward when it is this session's: a folder tab
-      // never carries you to another session.
-      const termId = folderTermRef.current.get(path);
-      const state = wb.getState();
-      if (termId && state.owners[termId] === state.activeKey) showTerminal(termId);
-    },
-    [activateFolder, setFrontDoorProject, showTerminal],
-  );
 
-  // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane)
-  // and cycle the sidebar tab (↑). A capture-phase window
+  // Shift + arrows toggle the side columns (← sidebar, → rail), aliases of
+  // ⌘B / ⌘⌥B. A capture-phase window
   // listener so the keystroke is caught — and swallowed — even when the xterm
   // terminal has focus (its handler sits on a bubble-phase helper textarea, so
   // capture runs first and stopPropagation keeps the shell from seeing the
@@ -3705,14 +3689,9 @@ function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [
     // The toggles close over the EFFECTIVE flags to pick their direction, so
-    // the listener re-subscribes when one flips — the same cadence it already
-    // has for the sidebar tabs below.
+    // the listener re-subscribes when one flips.
     toggleSidebar,
     togglePane,
-    openFolders,
-    sidebarTab,
-    selectSessions,
-    selectFolderTab,
   ]);
 
   useEffect(() => {
@@ -5576,40 +5555,50 @@ function App() {
   // which one leads. That split is the point: the precedence is unit-tested
   // and App only wires.
   const planDiscussable = sessionReady && !!latest;
-  const dockContexts = useMemo(
-    () =>
-      conversationContexts({
-        voiceEnabled,
-        chatEnabled,
-        surface: mainSurface,
-        plateMode,
-        activeId: planDiscussable ? activeId : null,
-        planTitle: activeSummary?.planTitle ?? null,
-        drafterDraftId,
-        drafterTitle: null,
-        browseId: browserDock.browseId,
-        browseTitle: browserDock.title,
-        browsePill: browserDock.pill,
-        cartId: browserDock.cartId,
-        missionId: browserDock.missionId,
-        missionTitle: browserDock.missionTitle,
-        companionId: chatId,
-        companionTitle: chatTitle,
-      }),
-    [
+  // Talk is never empty (W4): a pane with no conversation of its own — a
+  // terminal wall, a file, an Agent tab, a review, a door without a chat —
+  // hosts the conversation of where it sits, asked of the same
+  // `conversationContexts`: inside a session its plan's voice, on Home the
+  // Companion chat (its room lands through chatHost).
+  const dockContexts = useMemo(() => {
+    const inputs = {
       voiceEnabled,
       chatEnabled,
-      mainSurface,
+      surface: mainSurface,
       plateMode,
-      planDiscussable,
-      activeId,
-      activeSummary?.planTitle,
+      activeId: planDiscussable ? activeId : null,
+      planTitle: activeSummary?.planTitle ?? null,
       drafterDraftId,
-      browserDock,
-      chatId,
-      chatTitle,
-    ],
-  );
+      drafterTitle: null,
+      browseId: browserDock.browseId,
+      browseTitle: browserDock.title,
+      browsePill: browserDock.pill,
+      cartId: browserDock.cartId,
+      missionId: browserDock.missionId,
+      missionTitle: browserDock.missionTitle,
+      companionId: chatId,
+      companionTitle: chatTitle,
+    };
+    const own = conversationContexts(inputs);
+    if (own.length > 0) return own;
+    const where = conversationContexts({ ...inputs, surface: "document", plateMode: planDiscussable && activeId ? "plan" : "door" });
+    // A companion chat already on screen as a pane is that conversation; the
+    // rail does not mirror it (one room, one host).
+    return chatPane ? where.filter((c) => c.kind !== "companion") : where;
+  }, [
+    voiceEnabled,
+    chatEnabled,
+    mainSurface,
+    plateMode,
+    planDiscussable,
+    activeId,
+    activeSummary?.planTitle,
+    drafterDraftId,
+    browserDock,
+    chatId,
+    chatTitle,
+    chatPane,
+    ]);
   const dockContext = activeConversation(dockContexts, conversationPin);
   const dockContextKeyRef = useRef<string | null>(null);
   dockContextKeyRef.current = dockContext?.key ?? null;
@@ -8816,7 +8805,9 @@ function App() {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
             if (d) { tripDoor(); navigateTo({ surface: d.id, tab: t.tab }); }
           },
-          toggleDock: toggleDoor,
+          // ⌘J's own: the rail's Talk. The door has its own entry.
+          toggleDock: toggleTalk,
+          toggleDoor,
           openConversation: (kind) => {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
@@ -8871,6 +8862,8 @@ function App() {
       togglePane,
       revealTerm,
       setDocZoom,
+      toggleTalk,
+      toggleDoor,
     ],
   );
 
@@ -8891,9 +8884,9 @@ function App() {
         <div ref={setDockSlotEl} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
       ) : dockContext.kind === "companion" ? (
         chatOpening ? (
-          <EmptyState title="Chat" body="Starting a conversation…" />
+          <div className="px-4 py-4"><EmptyState title="Chat" body="Starting a conversation…" /></div>
         ) : !chatId ? (
-          <EmptyState
+          <div className="px-4 py-4"><EmptyState
             title="Companion"
             body={
               "One conversation that follows you across every " +
@@ -8905,7 +8898,7 @@ function App() {
               label: "Start a conversation",
               onAction: startChat,
             }}
-          />
+          /></div>
         ) : (
           // The chat itself, carried out of the door: its host lands here.
           <div ref={setChatDockSlot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
@@ -8995,7 +8988,7 @@ function App() {
       const d = (e as CustomEvent<OpenFileDetail>).detail;
       if (!d?.path) return;
       setActiveFile(d.path);
-      wb.dispatch({ type: "openFile", path: d.path, line: d.line, mode: d.mode ?? "preview" });
+      wb.dispatch({ type: "openFile", path: d.path, line: d.line, mode: d.mode ?? "preview", at: Date.now() });
     };
     // lib/fileLinks' OPEN_FILE_EVENT, spelt here so the module stays off the
     // boot path (fileLinks.test pins the two together).
@@ -9033,8 +9026,11 @@ function App() {
           root={railFilesRoot}
           roots={wbActiveKey === HOME_KEY ? railHomeRoots : undefined}
           onPickRoot={(path) => {
+            // The door's project follows the pick; the centre does not — a
+            // root pick never brings a terminal forward (no linked nav here).
             setRailHomeRootPick(path);
-            selectFolderTab(path);
+            setFrontDoorProject({ path });
+            activateFolder(path);
           }}
           activeFile={activeFile}
           onOpenFile={handleOpenFile}

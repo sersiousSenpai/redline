@@ -266,7 +266,7 @@ describe("buildCommands: conversations", () => {
       .filter((c) => c.group === "Conversations")
       .map((c) => c.title);
     expect(titles).toEqual([
-      "Show / hide the conversation",
+      "Talk: show / hide the conversation",
       "Discuss: Ship the palette",
       "Discuss: Companion",
       "Open chat: Naming things",
@@ -300,6 +300,16 @@ describe("buildCommands: conversations", () => {
       (c) => c.id === "toggle-dock",
     )!;
     expect(toggle.keys).toEqual(["⌘", "J"]);
+  });
+
+  it("gives the front door its own entry with its own chord (⌘J is Talk's)", () => {
+    const toggleDoor = vi.fn();
+    const deps = convDeps();
+    const door = buildCommands({ ...deps, actions: { ...deps.actions, toggleDoor } }).find((c) => c.id === "toggle-door")!;
+    expect(door.keys).toEqual(["⇧", "⏎"]);
+    door.run();
+    expect(toggleDoor).toHaveBeenCalled();
+    expect(buildCommands(convDeps()).find((c) => c.id === "toggle-dock")!.title).toMatch(/^Talk/);
   });
 
   it("a build with no dock wiring offers no conversation commands", () => {

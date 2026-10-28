@@ -679,4 +679,8 @@ describe("openFile (W4: the Files rail, ⌘P, file:line links)", () => {
     // Nothing to do is identity.
     expect(reduce(s, { type: "openFile", path: "/a.ts", mode: "preview" })).toBe(s);
   });
+  it("is pure: the reveal nonce is the caller's, never the clock's", () => {
+    const s = reduce(home(door()), { type: "openFile", path: "/a.ts", mode: "preview", line: 3 });
+    expect(focused(s).data).toEqual({ path: "/a.ts", line: 3 });
+  });
 });

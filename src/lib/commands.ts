@@ -137,8 +137,10 @@ export interface CommandDeps {
     navigateTo?: (t: NavTarget) => void;
     /** Open the dock on one of `conversations`. */
     openConversation?: (kind: string) => void;
-    /** ⌘J — show / hide the conversation column. */
+    /** ⌘J — the rail's Talk: open or put away the conversation. */
     toggleDock?: () => void;
+    /** The front door, open or closed (⇧⏎ opens it). */
+    toggleDoor?: () => void;
     /** Come back to a chat by id (it opens in the dock). */
     openChat?: (id: string) => void;
     snapBack: () => void;
@@ -214,12 +216,22 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
     }
   }
 
-  // Conversations — the dock's own contents, reachable by name. `⌘J` opens
-  // whichever one the surface leads with; these pick.
+  if (actions.toggleDoor) {
+    commands.push({
+      id: "toggle-door",
+      title: "Show / hide the front door",
+      group: "Plans",
+      keys: keysFor("front-door"),
+      run: actions.toggleDoor,
+    });
+  }
+
+  // Conversations — the rail's Talk, reachable by name. `⌘J` opens
+  // whichever one the pane leads with; these pick.
   if (actions.toggleDock) {
     commands.push({
       id: "toggle-dock",
-      title: "Show / hide the conversation",
+      title: "Talk: show / hide the conversation",
       group: "Conversations",
       keys: keysFor("dock"),
       run: actions.toggleDock,

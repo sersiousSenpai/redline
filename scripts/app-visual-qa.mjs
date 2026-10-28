@@ -52,7 +52,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -90,6 +90,8 @@ const SCENE = {
   "rail-folded": { board: "workbench" },
   "quick-open": { board: "workbench" },
   "file-pane": { board: "workbench" },
+  "rail-file-talk": { board: "workbench" },
+  "rail-home-talk": { board: "workbench" },
 };
 const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
@@ -166,6 +168,15 @@ const DRIVES = {
     { do: "click", within: ".rl-rail", text: "queue.ts", up: ".rl-file-row", why: "preview queue.ts" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-strip [role=tab][data-preview]')", timeout: 8000, why: "a preview tab" },
   ],
+  // Talk is never empty: a file pane in a session hosts its plan's voice,
+  // Home the Companion.
+  "rail-file-talk": [
+    ...PLAN_FILES,
+    { do: "click", within: ".rl-rail", text: "queue.ts", up: ".rl-file-row", why: "preview queue.ts" },
+    ...RAIL_TAB("talk"),
+    { do: "waitFor", expr: "!!document.querySelector('[data-rail-talk]')", timeout: 8000, why: "Talk holds a conversation" },
+  ],
+  "rail-home-talk": [...AT_HOME, ...RAIL_TAB("talk"), { do: "waitFor", expr: "!!document.querySelector('[data-rail-talk]')", timeout: 8000, why: "Talk holds the Companion" }],
   home: AT_HOME,
   "door-tab": [
     ...AT_HOME,

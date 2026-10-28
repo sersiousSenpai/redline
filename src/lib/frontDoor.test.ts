@@ -356,7 +356,7 @@ describe("the island never moves on its own", () => {
     // A plan from the palette, a recent or a chat's receipt must not land
     // under a door left open over it.
     expect(app.match(/const doorNavKey = `([^`]*)`;/)![1]).toContain("${doorTrip}");
-    const palette = app.slice(app.indexOf("openSession: (id) => {"), app.indexOf("toggleDock: toggleDoor,"));
+    const palette = app.slice(app.indexOf("openSession: (id) => {"), app.indexOf("toggleDock: toggleTalk,"));
     expect(palette.match(/tripDoor\(\);/g)).toHaveLength(3);
     expect(app.slice(app.indexOf("const openDoorRecent = (r: DoorRecent) => {"), app.indexOf("// Leaving the room carries"))).toContain("tripDoor();");
     // W1: the session is selected before "document", which acts on the
