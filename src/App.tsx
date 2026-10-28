@@ -2706,6 +2706,8 @@ function App() {
   }, [hookWorking, sessionTerminals, terminalKinds, termStatuses, heldTermIds]);
   // The launch on screen: the active `launch:` set's terminal (its Agent tab).
   const wbLaunchId = launchIdOf(wbActiveKey);
+  // Pages in the browser that could not load (BrowserPane reports the count).
+  const [browserNeeds, setBrowserNeeds] = useState(0);
   const activeLaunchId = wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null;
   // Each session's "Resuming…" (lib/autoResumeController publishes it).
   const resumePillsNow = useResumePills();
@@ -2713,6 +2715,9 @@ function App() {
   // title and version, and its status in the shared vocabulary (the
   // session's terminal needs you / is working, from `sidebarActivity`).
   const describePane = useCallback((pane: AnyPane) => {
+    // The browser wears the amber dot while a page in it could not load
+    // (BrowserPane's `onNeedsChange`), as a terminal that needs you does.
+    if (pane.kind === "browser") return { status: browserNeeds > 0 ? ("needs" as const) : undefined };
     // A wall wears the worst of its tiles, in the one vocabulary the fleet
     // derives (TerminalTabs' `onStatesChange`).
     if (pane.kind === "terminals") return { status: wallStatus(pane.data.tiles, termStatuses) };
@@ -2736,7 +2741,7 @@ function App() {
       title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
       status: resume ? (resume.tone === "working" ? ("working" as const) : ("needs" as const)) : flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
-  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds, resumePillsNow]);
+  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds, resumePillsNow, browserNeeds]);
   // The strip's right-hand cluster: the tile as a contextual entry — the
   // session's plan beside the surface in this tab, or the surface alone.
   const stageTile = (() => {
@@ -8949,6 +8954,9 @@ function App() {
   // Sorted, deduped and kept by value: a scan that finds the same servers
   // (each 15 s while Localhost is up, in whatever order lsof lists them)
   // must not re-render or repaint the sidebar.
+  // The ports the Localhost scan lists: the browser's "dev server" mark is
+  // for these alone.
+  const devServerPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b), [devServers.scan]));
   const sidebarPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b).map((p) => `:${p}`), [devServers.scan]));
   // Each session's own servers (W7) are its ports chip; the sidebar matches
   // them to sessions (lib/sessionPorts). The scan runs while Localhost is on
@@ -10532,6 +10540,8 @@ function App() {
                   dockPill={dockPill}
                   onOpenDockPill={openDockPill}
                   onDockState={setBrowserDock}
+                  devServerPorts={devServerPorts}
+                  onNeedsChange={setBrowserNeeds}
                 />
       , browserHost)}
       {hookConflicts.dialogOpen && (

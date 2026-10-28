@@ -58,8 +58,12 @@ export default function BrowserTabRail(props: Props) {
   const closeTab = (id: string) => { if (id === props.activeId || tabNodes.current.get(id)?.contains(document.activeElement)) closingFocus.current = id; props.onCloseTab(id); };
   useLayoutEffect(() => { if (!closingFocus.current || props.tabs.some(tab => tab.id === closingFocus.current)) return; closingFocus.current = null; tabNodes.current.get(props.activeId)?.focus(); }, [props.tabs, props.activeId]);
   const renderTab = (tab: TilePage, index: number) => {
-    const acting = !!props.acting?.has(tab.id), working = acting || !!props.loading?.has(tab.id);
-    const needs = !working && !!props.failed?.[tab.id];
+    // A page that could not load needs you even while its navigation still
+    // "loads": a refused or unresolved address never commits, so its
+    // loading flag would otherwise hide the amber dot forever.
+    const failed = !!props.failed?.[tab.id];
+    const acting = !!props.acting?.has(tab.id), working = acting || (!failed && !!props.loading?.has(tab.id));
+    const needs = !acting && failed;
     const suspended = !working && !needs && !!props.suspended?.has(tab.id);
     const badge = props.tileBadges?.[tab.browseId];
     const title = tab.title || "New tab";

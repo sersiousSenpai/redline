@@ -45,6 +45,11 @@ it("speaks the one status vocabulary in each icon's corner and keeps tile number
   expect(tab(1).dataset.status).toBe("needs"); expect(tab(1).querySelector(".rb-needs-dot")).not.toBeNull();
   expect(tab(1).getAttribute("aria-label")).toContain("this page could not load");
   expect(tab(0).dataset.status).toBeUndefined();
+  // A refused address never commits, so its navigation still "loads": the
+  // failure wins, the amber dot shows (the re-walk's 127.0.0.1:1).
+  mount({ failed: { "tab-1": "Could not connect" }, loading: new Set(["tab-1"]) });
+  expect(tab(1).dataset.status).toBe("needs"); expect(tab(1).querySelector(".rb-needs-dot")).not.toBeNull();
+  expect(tab(1).querySelector(".rl-spinner")).toBeNull();
 });
 it("lists recently closed pages at the strip's foot and reopens one", () => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });

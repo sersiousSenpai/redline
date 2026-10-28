@@ -27,13 +27,23 @@ interface Props {
   onResearch?: () => void;
   /** One discussion across tabs (🔗), when the page chat can be linked. */
   linked?: boolean; onToggleLinked?: () => void;
+  /** The ports the Localhost scan lists as running dev servers: the address
+   *  wears "dev server" only for one of them, never for any loopback port
+   *  (127.0.0.1:1 refused the connection and still read as a dev server). */
+  devServerPorts?: readonly number[];
 }
 
-/** A local dev server's address: localhost, 127.0.0.1 or 0.0.0.0. */
-export function isDevServerUrl(url: string): boolean {
+/** A local dev server's address: localhost, 127.0.0.1 or 0.0.0.0, on a port
+ *  the Localhost discovery lists as serving. Without the list (`undefined`)
+ *  nothing is called a dev server: a loopback address alone says nothing
+ *  about whether anything answers there. */
+export function isDevServerUrl(url: string, ports?: readonly number[]): boolean {
+  if (!ports?.length) return false;
   try {
-    const { protocol, hostname } = new URL(url);
-    return /^https?:$/.test(protocol) && /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(hostname);
+    const { protocol, hostname, port } = new URL(url);
+    if (!/^https?:$/.test(protocol) || !/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(hostname)) return false;
+    const n = Number(port || (protocol === "https:" ? 443 : 80));
+    return ports.includes(n);
   } catch {
     return false;
   }
@@ -45,7 +55,7 @@ export function BrowserChrome(props: Props) {
   const act = (fn: () => void) => () => { props.onMenu(false); fn(); };
   const address = props.address.trim();
   const secure = /^https:\/\//i.test(address);
-  const devServer = !props.newTab && isDevServerUrl(address);
+  const devServer = !props.newTab && isDevServerUrl(address, props.devServerPorts);
   return <header className="rb-chrome" aria-label="Browser navigation">
     <div className="rb-navigation-row">
       <div className="rb-history"><button type="button" className="rb-icon-button" aria-label="Back" title="Back" disabled={props.newTab} onClick={props.onBack}><ArrowLeft size={16}/></button>

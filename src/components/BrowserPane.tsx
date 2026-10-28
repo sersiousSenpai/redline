@@ -310,6 +310,12 @@ interface BrowserPaneProps {
   onDockState?: (s: BrowserDockState) => void;
   /** Opens Memory — the new-tab page's "Ask Memory" and its footer links. */
   onOpenMemory?: () => void;
+  /** The ports the Localhost scan lists as serving: the address bar's "dev
+   *  server" mark is for these alone. */
+  devServerPorts?: readonly number[];
+  /** How many pages could not load (they need you): the pane's tab wears the
+   *  amber dot while any does. */
+  onNeedsChange?: (count: number) => void;
 }
 
 const hostnameOf = (u: string): string => {
@@ -340,6 +346,8 @@ function BrowserPaneBase({
   onCloseDock,
   onDockState,
   onOpenMemory,
+  devServerPorts,
+  onNeedsChange,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
   const tileSlotsRef = useRef(new Map<string, HTMLDivElement>());
@@ -2210,6 +2218,11 @@ function BrowserPaneBase({
     }, NAV_COMMIT_MS));
   };
   useEffect(() => () => { for (const t of navWatchRef.current.values()) window.clearTimeout(t); navWatchRef.current.clear(); }, []);
+  // The pane's tab wears the amber dot while any page could not load — the
+  // rail's dots, said once for the whole browser (App's `describePane`).
+  const failedCount = tabs.filter((tab) => pageErrors[tab.id]).length;
+  useEffect(() => { onNeedsChange?.(failedCount); }, [failedCount, onNeedsChange]);
+  useEffect(() => () => onNeedsChange?.(0), [onNeedsChange]);
 
   const navigate = (raw: string, id: string = activeIdRef.current) => {
     // Omnibox: a URL-like entry navigates; anything else becomes a web search.
@@ -2513,7 +2526,7 @@ function BrowserPaneBase({
       {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} failed={pageErrors} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
-      {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
+      {!browserFullscreen && <BrowserChrome devServerPorts={devServerPorts} tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
         onAddressFocus={(focused) => {
           addrFocusedRef.current = focused;
           if (focused) void Webview.getCurrent().setFocus().catch(() => {});

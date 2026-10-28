@@ -128,9 +128,16 @@ describe("the address bar per the design", () => {
     await render();
     expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-lock")).toBe(true);
     expect(host.querySelector(".rb-address-status")).toBeNull();
-    await render({ address: "http://localhost:5173/plan" });
+    await render({ address: "http://localhost:5173/plan", devServerPorts: [5173] });
     expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-globe")).toBe(true);
     expect(host.querySelector(".rb-address-status")?.textContent).toBe("dev server");
+    // A loopback port the Localhost scan does not list is no dev server (the
+    // re-walk's refused 127.0.0.1:1), and nor is anything before a scan.
+    await render({ address: "http://127.0.0.1:1", devServerPorts: [5173] });
+    expect(host.querySelector(".rb-address-status")).toBeNull();
+    await render({ address: "http://localhost:5173/plan" });
+    expect(host.querySelector(".rb-address-status")).toBeNull();
+    await render({ address: "http://localhost:5173/plan", devServerPorts: [5173] });
     await render({ address: "", newTab: true });
     expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-search")).toBe(true);
     expect(host.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.disabled).toBe(true);
