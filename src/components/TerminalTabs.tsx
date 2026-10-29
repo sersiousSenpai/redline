@@ -104,11 +104,15 @@ import {
   type TileActions,
 } from "./TerminalTileMenu";
 import { TileGutter } from "./TileGutter";
-import { CloseConfirmModal } from "./CloseConfirmModal";
+// The quit dialog (PTY helper plan §5), loaded on the first quit that asks.
+const QuitDialog = lazy(() => import("./QuitDialog").then((m) => ({ default: m.QuitDialog })));
 // The tile ✕'s Terminate / Keep running ask: the wall close's own dialog,
 // loaded only when a running terminal's tile is closed.
 const CloseWallDialog = lazy(() => import("../workbench/CloseWallDialog").then((m) => ({ default: m.CloseWallDialog })));
+import { quitAsk, type QuitAsk, type QuitSettings } from "../lib/quitFlow";
+import { markAdopted } from "../lib/attachStagger";
 import {
+  adoptKept,
   readTerminalWorkspace,
   saveTerminalWorkspace,
   type LivePty,
@@ -158,6 +162,10 @@ interface TerminalTabsProps {
    *  which a count can't tell it: close one and open another and the count
    *  never moved. */
   onTabIdsChange?: (ids: string[]) => void;
+  /** A launch found terminals the helper kept running while Redline was
+   *  closed and made them tabs again (and tombstones of the ones that
+   *  exited meanwhile): the host rebinds their sessions. */
+  onAdopted?: (list: readonly LivePty[]) => void;
   /** How many terminals need you (needs-you, or an unread your-turn) —
    *  the footer's "N need you" chip and the ⌘⇧J gate. */
   onNeedsYouChange?: (count: number) => void;
@@ -407,6 +415,7 @@ export const TerminalTabs = memo(
       onPlaceTerminal,
       onTabsChange,
       onTabIdsChange,
+      onAdopted,
       onNeedsYouChange,
       onStatesChange,
       collapsed,
@@ -551,16 +560,37 @@ export const TerminalTabs = memo(
   const [detached, setDetached] = useState<LivePty[]>([]);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
+  // A launch with no tabs to restore (a quit, not a reload) first asks the
+  // terminal helper what it kept running: those become the tabs again, and
+  // until it has answered the host hears no tab list, so `prune` never
+  // takes a kept terminal's tiles and owner away in between.
+  const [adopting, setAdopting] = useState(initialWorkspace.tabs.length === 0);
+  const onAdoptedRef = useRef(onAdopted);
+  onAdoptedRef.current = onAdopted;
   useEffect(() => {
     let gone = false;
     const owned = new Set(tabsRef.current.map((tab) => tab.id));
+    const settle = () => { if (!gone) setAdopting(false); };
+    // A helper that never answers must not hold the host's list back.
+    const giveUp = window.setTimeout(settle, 3000);
     void invoke<LivePty[]>("pty_list").then((list) => {
-      if (!gone) setDetached(list.filter((pty) => pty.alive && !owned.has(pty.id)));
+      if (gone) return;
+      const adopt = owned.size === 0 ? adoptKept(list, owned) : [];
+      if (adopt.length) {
+        markAdopted(adopt.map((t) => t.id));
+        setTabs((prev) => [...prev, ...adopt.filter((t) => !prev.some((p) => p.id === t.id))]);
+      }
+      if (adopt.length || list.some((p) => p.exit !== undefined)) onAdoptedRef.current?.(list);
+      const adopted = new Set(adopt.map((t) => t.id));
+      setDetached(list.filter((pty) => pty.alive && !owned.has(pty.id) && !adopted.has(pty.id)));
     }).catch(() => {
       if (!gone) setRecoveryError("Couldn't check for detached terminals.");
+    }).finally(() => {
+      window.clearTimeout(giveUp);
+      settle();
     });
-    return () => { gone = true; };
-  }, []);
+    return () => { gone = true; window.clearTimeout(giveUp); };
+  }, [setTabs]);
   const [fractionStore, setFractionStore] = usePersistedState<FractionStore>(
     "redline.terminalGrid.fractions",
     {},
@@ -578,9 +608,8 @@ export const TerminalTabs = memo(
     [],
   );
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
-  // Set when a window-close is intercepted because a terminal has moved off its
-  // start dir; drives the Redline-styled confirmation modal.
-  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  // A quit that has something to say (lib/quitFlow): the dialog's content.
+  const [quitting, setQuitting] = useState<QuitAsk | null>(null);
 
   // Clamp at READ time, not in an effect: an effect would give one render
   // where focusedId is undefined and onActiveTabChange(undefined) would reach
@@ -975,8 +1004,9 @@ export const TerminalTabs = memo(
   // hand the host a new array to diff many times a second.
   const tabIdKey = tabs.map((t) => t.id).join(",");
   useEffect(() => {
+    if (adopting) return;
     onTabIdsChange?.(tabIdKey ? tabIdKey.split(",") : []);
-  }, [tabIdKey, onTabIdsChange]);
+  }, [tabIdKey, onTabIdsChange, adopting]);
 
   // A tile's view is genuinely seen once it's shown on a wall on screen.
   useEffect(() => {
@@ -1843,62 +1873,44 @@ export const TerminalTabs = memo(
     [setTabs],
   );
 
-  // Guard the window close: like a real terminal app, confirm before tearing
-  // down a session that has work in flight. We treat "moved off the directory
-  // it opened in" as the signal — a terminal still sitting at its start dir
-  // ($HOME, or its "open here" dir) is disposable and closes without a prompt.
+  // Quitting (quit.rs, lib/quitFlow). A window close is a quit: it goes the
+  // same way as ⌘Q, and nothing is killed by closing a window any more —
+  // terminals end only when the quit says so (Quit and Stop Terminals, or
+  // keeping them is off). ⌘Q and the tray reach here as `quit-requested`;
+  // the page answers at once, then decides whether there is anything to ask.
+  const heldRef = useRef({ ids: heldTerminalIds, titles: heldPlanTitles, label: (id: string) => identity.byId.get(id)?.label });
+  heldRef.current = { ids: heldTerminalIds, titles: heldPlanTitles, label: (id: string) => identity.byId.get(id)?.label };
   useEffect(() => {
     const win = getCurrentWindow();
-    let unlisten: (() => void) | undefined;
+    const offs: (() => void)[] = [];
     let disposed = false;
-
-    const norm = (p: string) => p.replace(/\/+$/, "") || "/";
-    const anyTerminalMoved = async (): Promise<boolean> => {
-      let home = "";
+    const keep = (p: Promise<() => void>) => void p.then((u) => (disposed ? dropListener(u) : offs.push(u))).catch(() => {});
+    const decide = async () => {
+      let ask: QuitAsk | null = null;
       try {
-        home = await homeDir();
+        const [settings, list] = await Promise.all([invoke<QuitSettings>("terminal_settings"), invoke<LivePty[]>("pty_list")]);
+        const { ids, titles, label } = heldRef.current;
+        const alive = new Set(list.filter((p) => p.alive).map((p) => p.id));
+        const held = [...(ids ?? [])].filter((id) => alive.has(id)).map((id) => titles?.get(id) || label(id) || "A plan");
+        ask = quitAsk(settings, list, held);
       } catch {
-        /* compare against explicit cwds only if HOME is unreadable */
+        /* nothing readable: quit as asked */
       }
-      // One batched lookup for the whole fleet; unreadable → treat as not
-      // moved rather than blocking the close.
-      let live: Record<string, string> = {};
-      try {
-        live = await invoke<Record<string, string>>("pty_cwds", {
-          ids: tabsRef.current.map((t) => t.id),
-        });
-      } catch {
-        return false;
-      }
-      for (const t of tabsRef.current) {
-        const initial = t.cwd ?? home;
-        if (!initial) continue;
-        const cur = live[t.id];
-        if (cur && norm(cur) !== norm(initial)) return true;
-      }
-      return false;
+      if (disposed) return;
+      if (ask) setQuitting(ask);
+      else void invoke("app_quit", { stopTerminals: false }).catch(() => {});
     };
-
-    void win
-      .onCloseRequested(async (event) => {
-        let moved = false;
-        try {
-          moved = await anyTerminalMoved();
-        } catch {
-          /* on any failure, don't block the close */
-        }
-        if (!moved) return;
-        event.preventDefault();
-        setShowCloseConfirm(true);
-      })
-      .then((u) => {
-        if (disposed) dropListener(u);
-        else unlisten = u;
-      });
-
+    keep(listen<number>("quit-requested", (e) => {
+      void invoke("quit_ack", { seq: e.payload }).catch(() => {});
+      void decide();
+    }));
+    keep(win.onCloseRequested((event) => {
+      event.preventDefault();
+      void invoke("request_quit", {}).catch(() => void win.destroy());
+    }));
     return () => {
       disposed = true;
-      if (unlisten) dropListener(unlisten);
+      for (const off of offs) dropListener(off);
     };
   }, []);
 
@@ -2150,25 +2162,33 @@ export const TerminalTabs = memo(
           <CloseWallDialog
             running={[closeAsk.label]}
             total={1}
-            onKeep={() => { untileTab(closeAsk.id); setCloseAsk(null); }}
+            onKeep={(afterQuit) => {
+              void invoke("pty_set_meta", { id: closeAsk.id, persist: afterQuit }).catch(() => {});
+              untileTab(closeAsk.id);
+              setCloseAsk(null);
+            }}
             onTerminate={() => { closeTab(closeAsk.id); setCloseAsk(null); }}
             onCancel={() => setCloseAsk(null)}
           />
         </Suspense>,
         document.body,
       )}
-      {showCloseConfirm && (
-        <CloseConfirmModal
-          onConfirm={() => {
-            // destroy() bypasses the onCloseRequested guard we set above —
-            // and normal unmount teardown with it, so kill the shells first
-            // rather than leaving orphans to outlive the window.
-            void invoke("pty_kill_all")
-              .catch(() => {})
-              .finally(() => void getCurrentWindow().destroy());
-          }}
-          onCancel={() => setShowCloseConfirm(false)}
-        />
+      {quitting && createPortal(
+        <Suspense fallback={null}>
+          <QuitDialog
+            ask={quitting}
+            onQuit={(stopTerminals, dontAsk) => {
+              const quit = () => void invoke("app_quit", { stopTerminals }).catch(() => {});
+              if (dontAsk) void invoke("set_terminal_setting", { key: "askOnQuit", on: false }).catch(() => {}).finally(quit);
+              else quit();
+            }}
+            onCancel={() => {
+              setQuitting(null);
+              void invoke("quit_cancel").catch(() => {});
+            }}
+          />
+        </Suspense>,
+        document.body,
       )}
     </div>
   );

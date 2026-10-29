@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { dropListener } from "../lib/dropListener";
+import { scheduleAttach } from "../lib/attachStagger";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -623,7 +624,10 @@ export const TerminalView = memo(function TerminalView({
     // A hidden (display:none / zero-height) host makes fit() compute 0×0; a
     // 0-row PTY corrupts output. Fall back to a sane size when spawning while
     // not yet visible — the [visible] effect re-fits once shown.
-    void enqueuePtyOpChecked(id, async () => {
+    // A just-adopted hidden view attaches on an idle frame (lib/attachStagger):
+    // a relaunch that adopts a fleet of kept terminals never lands every
+    // replay at once.
+    scheduleAttach(id, visibleRef.current, () => void enqueuePtyOpChecked(id, async () => {
       if (disposed) return;
       const live = await invoke<boolean>("pty_is_live", { id });
       if (disposed) return;
@@ -648,7 +652,7 @@ export const TerminalView = memo(function TerminalView({
       if (disposed) return;
       spawnDeferred(id).reject(e);
       term.writeln(`\r\n[redline: failed to connect shell: ${e}]`);
-    });
+    }));
 
     const dataSub = term.onData((d) => {
       const userInput = inputOrigin.takeUserInput();

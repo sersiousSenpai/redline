@@ -21,7 +21,7 @@ interface ReadmeModalProps {
   onClose: () => void;
 }
 
-// Opened from the native app menu's "View README". Mirrors CloseConfirmModal's
+// Opened from the native app menu's "View README". Mirrors CloseWallDialog's
 // overlay/elevated-card styling, sized up for a full document.
 export function ReadmeModal({ onClose }: ReadmeModalProps) {
   return (

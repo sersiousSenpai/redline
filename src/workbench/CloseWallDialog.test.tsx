@@ -5,12 +5,17 @@ import { readFileSync } from "node:fs";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const invokeMock = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
 import { CloseWallDialog } from "./CloseWallDialog";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValue({ helperActive: false, keepOnQuit: true });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -34,8 +39,27 @@ describe("closing a wall with something still running", () => {
     expect(onTerminate).toHaveBeenCalledTimes(1);
     await act(async () => button("Keep running").click());
     expect(onKeep).toHaveBeenCalledTimes(1);
+    expect(onKeep).toHaveBeenCalledWith(false);
     await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("with the terminal helper on, Keep running says whether they outlive a quit, and the box writes it", async () => {
+    invokeMock.mockResolvedValue({ helperActive: true, keepOnQuit: true });
+    const onKeep = vi.fn();
+    await act(async () => root.render(<CloseWallDialog running={["claude 1"]} total={1} onKeep={onKeep} onTerminate={vi.fn()} onCancel={vi.fn()} />));
+    await act(async () => {});
+    expect(host.textContent).toContain("Also after Redline quits");
+    expect(host.textContent).toContain("still running when Redline opens again");
+    const box = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(box.checked).toBe(true);
+    const keep = [...host.querySelectorAll("button")].find((b) => b.textContent === "Keep running")!;
+    await act(async () => keep.click());
+    expect(onKeep).toHaveBeenLastCalledWith(true);
+    await act(async () => box.click());
+    expect(host.textContent).toContain("until Redline quits");
+    await act(async () => keep.click());
+    expect(onKeep).toHaveBeenLastCalledWith(false);
   });
 
   it("speaks Redline's palette: no red anywhere in the dialog", () => {

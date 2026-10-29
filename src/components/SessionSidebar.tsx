@@ -74,6 +74,8 @@ export interface SidebarTerminal {
    *  a server listed here is its session's own, and wears a chip on the
    *  session's row (lib/sessionPorts). */
   ports?: readonly number[];
+  /** Kept through a quit and quiet since the relaunch: when it started. */
+  since?: number;
 }
 
 export interface SessionSidebarProps {
@@ -765,7 +767,8 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
   terminal: SidebarTerminal;
   onSelect?: (sessionId: string, terminalId: string) => void;
 }) {
-  const { id, title, status, kept } = terminal;
+  const { id, title, status, kept, since } = terminal;
+  const sinceText = since && status !== "needs" && status !== "exited" ? `running since ${new Date(since).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : null;
   // Its own menu on right-click, never WebKit's (LAST2), and never the plan
   // row's around it.
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
@@ -782,7 +785,7 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
       <button
         type="button"
         className="rl-sb-term-row"
-        title={`${title} — ${status === "needs" ? "needs you" : status}${kept ? " · kept running, on no wall: click to bring it back" : ""}`}
+        title={`${title} — ${status === "needs" ? "needs you" : status}${sinceText ? ` · ${sinceText}, kept while Redline was closed` : ""}${kept ? " · kept running, on no wall: click to bring it back" : ""}`}
         onClick={() => onSelect?.(sessionId, id)}
       >
         <Terminal size={13} aria-hidden />
@@ -800,7 +803,8 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
           </>
         )}
         {status === "exited" && <span className="rl-sb-term-state">exited</span>}
-        {kept && status === "idle" && <span className="rl-sb-term-state">kept</span>}
+        {sinceText && status !== "working" && <span className="rl-sb-term-state">{sinceText}</span>}
+        {kept && status === "idle" && !sinceText && <span className="rl-sb-term-state">kept</span>}
       </button>
       <RowMenu open={menuAt !== null} onOpenChange={(open) => { if (!open) setMenuAt(null); }} at={menuAt} label={title}
         trigger={false} triggerClassName="rl-sb-dots" actions={actions} />

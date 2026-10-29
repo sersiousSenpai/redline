@@ -288,6 +288,7 @@ const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m
 // spinners read it. The dock pins itself over an Agent pane's CLI view
 // (lib/stageDock).
 import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent, type LaunchProc } from "./lib/sessionTerminals";
+import type { LivePty } from "./lib/terminalWorkspace";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path), warmed the moment a
 // selection shows that menu.
@@ -6546,6 +6547,16 @@ function App() {
   // The rules, the backoff and the loop guard are `lib/autoResume`; the
   // restore is the one above, so a click and the timer share one slot.
   const autoNoticeHere = useAutoNotice(activeId);
+  // A plan session whose CLI kept running in a terminal Redline adopted after
+  // a quit is not detached in any sense that a Restore could fix: resuming
+  // it would run the conversation twice. Live terminal, agent in front (or
+  // not yet sampled) = still running.
+  const agentStillRunning = (sessionId: string): string | null => {
+    const t = sessionTerminalsRef.current.get(sessionId);
+    if (!t || !liveTermIdsRef.current?.includes(t)) return null;
+    const st = termStatusesRef.current.get(t);
+    return st?.state === "exited" ? null : st?.label ?? "its terminal";
+  };
   const autoResume = useAutoResume({
     summaries,
     restoreAttempt,
@@ -6555,6 +6566,7 @@ function App() {
       return d.legacy && !d.chosen;
     },
     start: (sessionId) => {
+      if (agentStillRunning(sessionId)) return Promise.resolve("blocked" as const);
       const target = summaries.find((s) => s.sessionId === sessionId);
       return target ? restorePlanSessionWith({ target }) : Promise.resolve("blocked" as const);
     },
@@ -9030,8 +9042,29 @@ function App() {
   // attention stands in until the layer has mounted.
   const wbOwners = useWorkbench(wb, (st) => st.owners);
   const wbStowed = useWorkbench(wb, (st) => st.stowed);
+  // Terminals the helper kept while Redline was closed (lib/keptMeta): when
+  // each started, for the sidebar's "running since" until it reports again.
+  const [adoptedSince, setAdoptedSince] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const handleAdopted = useCallback((list: readonly LivePty[]) => {
+    setAdoptedSince(new Map(list.filter((p) => p.kept && p.alive && p.startedAt).map((p) => [p.id, p.startedAt!])));
+    void import("./lib/keptMeta").then(({ adoptedBinds }) => {
+      const binds = adoptedBinds(list);
+      bindSessionTerminals(binds);
+      for (const { sessionId, terminalId } of binds) void import("./components/agent/convo/api").then((api) => api.convoPrebind(terminalId, sessionId)).catch(() => {});
+    });
+  }, [bindSessionTerminals]);
+  // Every live terminal's placement goes to the helper as it changes, so a
+  // relaunch puts it back (keyed by value: a status tick is no write).
+  const keptMetaKey = useMemo(() => {
+    if (!liveTermIds) return "";
+    const bySession = new Map([...sessionTerminals].map(([sid, tid]) => [tid, sid]));
+    return JSON.stringify(liveTermIds.map((id) => ({ id, meta: { owner: wbOwners[id], sessionId: bySession.get(id), title: terminalTitles.get(id) || termStatuses.get(id)?.label } })));
+  }, [liveTermIds, sessionTerminals, wbOwners, terminalTitles, termStatuses]);
+  useEffect(() => {
+    if (keptMetaKey) void import("./lib/keptMeta").then((m) => m.syncKeptMeta(JSON.parse(keptMetaKey))).catch(() => {});
+  }, [keptMetaKey]);
   const sidebarTerminals = useMemo(() => {
-    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean; ports?: readonly number[] }[]> = {};
+    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean; ports?: readonly number[]; since?: number }[]> = {};
     const listed = new Set<string>();
     // The rows a terminal can nest under: a current plan's (an archived or
     // deleted one has no row on screen) and a pending launch's own row,
@@ -9047,7 +9080,9 @@ function App() {
       const status = terminalStatus(terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds });
       const kept = wbStowed.includes(terminalId);
       const ports = termPorts.get(terminalId);
-      (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}), ...(ports ? { ports } : {}) });
+      // Kept through a quit and quiet since: "running since <time>".
+      const since = terminalKinds.has(terminalId) ? undefined : adoptedSince.get(terminalId);
+      (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}), ...(ports ? { ports } : {}), ...(since ? { since } : {}) });
     };
     for (const [sessionId, terminalId] of sessionTerminals) {
       if (rows.has(sessionId)) push(sessionId, terminalId, "claude");
@@ -9066,7 +9101,7 @@ function App() {
       if (!listed.has(terminalId) && (!liveTermIds || liveTermIds.includes(terminalId))) push("", terminalId, "terminal");
     }
     return out;
-  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches, termPorts]);
+  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches, termPorts, adoptedSince]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -9301,6 +9336,7 @@ function App() {
           auto: autoNoticeHere,
           onStopAuto: () => { if (activeId) autoResume.cancel(activeId); },
           copy: detachedCopy,
+          stillRunning: activeId ? agentStillRunning(activeId) : null,
           decision: restoreDecision,
           onHarness: (h: RestoreHarness) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),
           blockers: restoreBlockers,
@@ -10220,6 +10256,7 @@ function App() {
             theme={theme}
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
+            onAdopted={handleAdopted}
             onNeedsYouChange={setTermNeedYou}
             onStatesChange={setTermStatuses}
             cli={cliView}
@@ -10567,7 +10604,13 @@ function App() {
           <CloseWallDialog
             running={wallClose.running}
             total={wallClose.tiles.length}
-            onKeep={() => { finishWallClose(wallClose, true); setWallClose(null); }}
+            onKeep={(afterQuit) => {
+              // Kept, and whether past a quit too: the helper reads it at
+              // quit (`KillWhere`), so it is written now.
+              for (const id of wallClose.tiles) void invoke("pty_set_meta", { id, persist: afterQuit }).catch(() => {});
+              finishWallClose(wallClose, true);
+              setWallClose(null);
+            }}
             onTerminate={() => { finishWallClose(wallClose, false); setWallClose(null); }}
             onCancel={() => setWallClose(null)}
           />

@@ -58,6 +58,9 @@ export interface PlanNoticesProps {
     /** Why the last restore failed, when it did. */
     failure: string | null;
     copy: { lede: string; body: string };
+    /** Its CLI is still running, in this terminal (kept through a quit):
+     *  nothing to restore, and resuming would run it twice. */
+    stillRunning?: string | null;
     /** Which harness the restore resumes on; a legacy plan asks. */
     decision: { harness: RestoreHarness; legacy: boolean; chosen: boolean; label: string };
     onHarness: (harness: RestoreHarness) => void;
@@ -128,6 +131,20 @@ export function PlanNotices(p: PlanNoticesProps) {
 
 function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTerminal: (() => void) | null }) {
   const blocked = d.blockers.length > 0;
+  if (d.stillRunning && !d.restoring)
+    return (
+      <Notice
+        title={`Still running in ${d.stillRunning}`}
+        tip={`Its ${d.decision.label} session kept running while Redline was closed, so there is nothing to restore: resuming it would run the conversation twice. If it is asking something, it asks in its terminal.`}
+        onDismiss={d.onDismiss}
+      >
+        {d.onShowTerminal && (
+          <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onShowTerminal}>
+            Open terminal
+          </button>
+        )}
+      </Notice>
+    );
   const tried = d.auto?.phase === "stopped" ? d.auto.attempts : 0;
   // Coming back on its own. Running: the progress, like a click's. Waiting
   // out the backoff: when, and Retry / Copy command — either of which (and

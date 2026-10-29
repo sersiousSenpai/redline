@@ -86,6 +86,17 @@ describe("PlanNotices: classic's plan-pane notices in flow", () => {
     expect(host.textContent).toContain("Claude CLI not found");
   });
 
+  it("a CLI still running in a kept terminal is not offered a Restore: it says where it runs", async () => {
+    const show = vi.fn();
+    const d = detached({ stillRunning: "claude 2" });
+    await render({ ...none, detached: d, onShowTerminal: show });
+    expect(host.textContent).toContain("Still running in claude 2");
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Restore")).toBe(false);
+    await press("Open terminal");
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(d.onRestore).not.toHaveBeenCalled();
+  });
+
   it("restoring shows its progress and the way to its terminal; a failure offers Retry", async () => {
     const show = vi.fn();
     await render({ ...none, detached: detached({ restoring: true, status: "Resuming in the background" }), onShowTerminal: show });

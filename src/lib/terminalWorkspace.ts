@@ -35,6 +35,57 @@ export interface LivePty {
   cwd: string | null;
   pid: number | null;
   alive: boolean;
+  /** Held by the terminal helper: it outlived the last launch, or will. */
+  kept?: boolean;
+  /** Kept running after Redline quits (the close dialog's checkbox). */
+  persist?: boolean;
+  /** Where it belongs, as this app stored it (`pty_set_meta`). */
+  meta?: KeptMeta;
+  /** Unix ms its shell started (helper terminals). */
+  startedAt?: number;
+  /** A tombstone: the wait status of a shell that exited while nobody
+   *  watched. */
+  exit?: number;
+}
+
+/** What the app stores with a kept terminal so a relaunch can put it back:
+ *  its owner (a workbench session key), name, session and harness. Untrusted
+ *  on the way back in, like everything persisted. */
+export interface KeptMeta {
+  owner?: string;
+  title?: string;
+  sessionId?: string;
+  harness?: "claude" | "codex";
+}
+
+export function parseKeptMeta(value: unknown): KeptMeta | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const text = (x: unknown, max: number) => (typeof x === "string" && x ? x.slice(0, max) : undefined);
+  const meta: KeptMeta = {};
+  const owner = text(v.owner, 300);
+  const title = text(v.title, 80);
+  const sessionId = text(v.sessionId, 200);
+  if (owner) meta.owner = owner;
+  if (title) meta.title = title;
+  if (sessionId) meta.sessionId = sessionId;
+  if (v.harness === "claude" || v.harness === "codex") meta.harness = v.harness;
+  return Object.keys(meta).length ? meta : null;
+}
+
+/** A launch with nothing to restore from sessionStorage (a quit, not a
+ *  reload): the terminals the helper kept become the tabs again, in the
+ *  order they started, named as they were. Tombstones and in-process
+ *  terminals are not adopted (an in-process one outliving its page is a
+ *  reload's business and keeps the Reattach banner). */
+export function adoptKept(list: readonly LivePty[], owned: ReadonlySet<string>): TerminalTabState[] {
+  return list
+    .filter((pty) => pty.kept && pty.alive && !owned.has(pty.id))
+    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+    .map((pty) => {
+      const title = parseKeptMeta(pty.meta)?.title;
+      return { id: pty.id, cwd: pty.cwd, ...(title ? { title } : {}) };
+    });
 }
 
 /** Treat persisted state as untrusted: a malformed tab must never send an

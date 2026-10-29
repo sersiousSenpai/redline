@@ -5,13 +5,14 @@ import { act, createRef, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ windowFocused: true, focusChanged: null as null | ((event: { payload: boolean }) => void), notify: vi.fn(), invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
+const mocks = vi.hoisted(() => ({ windowFocused: true, focusChanged: null as null | ((event: { payload: boolean }) => void), notify: vi.fn(), invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean; kept?: boolean; persist?: boolean; startedAt?: number; exit?: number; meta?: unknown }[], closeHandler: null as null | ((event: { preventDefault: () => void }) => void), quitSettings: { helperActive: true, keepOnQuit: true, askOnQuit: true }, cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: mocks.notify }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, handler: (event: { payload: unknown }) => void) => { mocks.listeners.set(name, handler); return () => { if (mocks.listeners.get(name) === handler) mocks.listeners.delete(name); }; } }));
 vi.mock("@tauri-apps/api/path", () => ({ homeDir: async () => "/Users/test/" }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
-  onCloseRequested: async () => () => {},
+  onCloseRequested: async (handler: (event: { preventDefault: () => void }) => void) => { mocks.closeHandler = handler; return () => {}; },
+  destroy: async () => {},
   isFocused: async () => mocks.windowFocused,
   onFocusChanged: async (handler: (event: { payload: boolean }) => void) => { mocks.focusChanged = handler; return () => {}; },
 }) }));
@@ -49,7 +50,7 @@ const click = async (selector: string) => {
 let walls: Record<string, WallData> = {};
 let wallKey: string | null = "w1";
 let changes: [string, WallData][] = [];
-type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null; frame?: WallFrame | null; peers?: PeerWall[]; onPeerFocus?: (key: string) => void; watchIds?: string[]; onProcs?: (rows: readonly unknown[], at: number) => void };
+type MountProps = { onTabIdsChange?: (ids: string[]) => void; onAdopted?: (list: readonly unknown[]) => void; heldTerminalIds?: ReadonlySet<string>; heldPlanTitles?: ReadonlyMap<string, string>; onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null; frame?: WallFrame | null; peers?: PeerWall[]; onPeerFocus?: (key: string) => void; watchIds?: string[]; onProcs?: (rows: readonly unknown[], at: number) => void };
 let props: MountProps = {};
 const order = () => (wallKey ? walls[wallKey]?.tiles ?? [] : []);
 function view() {
@@ -63,6 +64,10 @@ function view() {
         onWallChange={(key, data) => { walls = { ...walls, [key]: data }; changes.push([key, data]); root.render(view()); }}
         onPlaceTerminal={(id) => place(id)}
         onTabsChange={() => {}}
+        onTabIdsChange={props.onTabIdsChange}
+        onAdopted={props.onAdopted}
+        heldTerminalIds={props.heldTerminalIds}
+        heldPlanTitles={props.heldPlanTitles}
         collapsed={props.collapsed ?? false}
         onNeedsYouChange={props.onNeedsYouChange}
         onStatesChange={props.onStatesChange}
@@ -110,6 +115,8 @@ beforeEach(() => {
   __resetTerminalSwapForTest();
   resetMeasuresForTest();
   mocks.inventory = [];
+  mocks.closeHandler = null;
+  mocks.quitSettings = { helperActive: true, keepOnQuit: true, askOnQuit: true };
   mocks.cwd = null;
   mocks.listeners.clear();
   mocks.notify.mockReset();
@@ -119,6 +126,7 @@ beforeEach(() => {
   mocks.procs = [];
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
     if (command === "pty_list") return mocks.inventory;
+    if (command === "terminal_settings") return mocks.quitSettings;
     if (command === "term_attention_snapshot") return mocks.attention;
     if (command === "pty_procs") return mocks.procs;
     if (command === "pty_cwds") return mocks.cwd ? Object.fromEntries(args.ids.map((id: string) => [id, mocks.cwd])) : {};
@@ -854,5 +862,85 @@ describe("two walls on screen, one layer (W5, D7)", () => {
     await mount({ frame: { left: 0, top: 0, width: 0.5, height: 1 }, peers: [{ key: "w2", tiles: [c, d], zoomed: d, frame: right }] });
     expect([wrap(d).style.left, wrap(d).style.width]).toEqual(["50%", "50%"]);
     expect(wrap(c).style.display).toBe("none");
+  });
+});
+
+describe("terminals that outlive the app (PTY helper)", () => {
+  const kept = (id: string, extra: Record<string, unknown> = {}) => ({ id, cwd: "/repo", pid: 10, alive: true, kept: true, persist: true, ...extra });
+
+  it("a launch with nothing to restore adopts what the helper kept, and the host hears no tab list until it has", async () => {
+    let answer: (list: unknown[]) => void = () => {};
+    const listed = new Promise<unknown[]>((done) => { answer = done; });
+    mocks.invoke.mockImplementation(async (command) => (command === "pty_list" ? listed : null));
+    const reported: string[][] = [];
+    const adopted: unknown[] = [];
+    await mount({ onTabIdsChange: (ids) => reported.push(ids), onAdopted: (list) => adopted.push(list) });
+    expect(reported, "no tab list while the helper is asked: prune must not run on an empty one").toEqual([]);
+    const inventory = [
+      kept("k1", { startedAt: 2, meta: { title: "api server", owner: "plan:s1", sessionId: "s1" } }),
+      kept("k0", { startedAt: 1 }),
+      { id: "local", cwd: null, pid: 3, alive: true },
+      kept("gone", { alive: false, exit: 0 }),
+    ];
+    await act(async () => answer(inventory));
+    expect(ids(), "oldest first; tombstones and in-process terminals aren't tabs").toEqual(["k0", "k1"]);
+    expect(reported[reported.length - 1]).toEqual(["k0", "k1"]);
+    expect(adopted).toEqual([inventory]);
+    expect(host.querySelector(`[data-label="k1"]`)?.textContent ?? "").toBe("");
+    expect(saved().tabs.find((t: { id: string }) => t.id === "k1").title).toBe("api server");
+    expect(host.textContent).toContain("Reattach 1 detached terminals");
+  });
+
+  it("a reload restores its own tabs and adopts nothing", async () => {
+    sessionStorage.setItem(TERMINAL_WORKSPACE_KEY, JSON.stringify({ tabs: [{ id: "mine", cwd: null }] }));
+    mocks.inventory = [kept("mine"), kept("other")];
+    const reported: string[][] = [];
+    await mount({ onTabIdsChange: (ids) => reported.push(ids) });
+    expect(reported[0]).toEqual(["mine"]);
+    expect(ids()).toEqual(["mine"]);
+  });
+
+  it("a window close is a quit, and kills nothing itself", async () => {
+    await mount();
+    const preventDefault = vi.fn();
+    await act(async () => mocks.closeHandler!({ preventDefault }));
+    expect(preventDefault).toHaveBeenCalled();
+    expect(mocks.invoke).toHaveBeenCalledWith("request_quit", {});
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill_all")).toBe(false);
+  });
+
+  it("a quit is acknowledged at once; with nothing to say it quits, with terminals running it asks", async () => {
+    await mount();
+    await act(async () => mocks.listeners.get("quit-requested")!({ payload: 4 }));
+    expect(mocks.invoke).toHaveBeenCalledWith("quit_ack", { seq: 4 });
+    expect(mocks.invoke).toHaveBeenCalledWith("app_quit", { stopTerminals: false });
+
+    mocks.invoke.mockClear();
+    mocks.inventory = [kept("a"), kept("b"), kept("c", { persist: false })];
+    await act(async () => mocks.listeners.get("quit-requested")!({ payload: 5 }));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(document.body.textContent).toContain("2 terminals keep running after Redline quits");
+    });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "app_quit")).toBe(false);
+    expect(document.body.textContent).toContain("One terminal closed to end with Redline will end.");
+    const button = (label: string) => [...document.body.querySelectorAll("button")].find((b) => b.textContent === label)!;
+    await act(async () => button("Quit and Stop Terminals").click());
+    expect(mocks.invoke).toHaveBeenCalledWith("app_quit", { stopTerminals: true });
+  });
+
+  it("a held plan is always said, even with the question turned off", async () => {
+    mocks.quitSettings = { helperActive: true, keepOnQuit: true, askOnQuit: false };
+    mocks.inventory = [kept("agent")];
+    await mount({ heldTerminalIds: new Set(["agent"]), heldPlanTitles: new Map([["agent", "Add the ports chip"]]) });
+    await act(async () => mocks.listeners.get("quit-requested")!({ payload: 1 }));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(document.body.textContent).toContain("Add the ports chip");
+    });
+    expect(document.body.textContent).toContain("Add the ports chip is waiting for your review. If you quit, its terminal asks in the terminal instead.");
+    const quit = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Quit")!;
+    await act(async () => quit.click());
+    expect(mocks.invoke).toHaveBeenCalledWith("app_quit", { stopTerminals: false });
   });
 });
