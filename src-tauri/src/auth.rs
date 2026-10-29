@@ -717,8 +717,10 @@ fn leased() -> &'static RwLock<Vec<String>> {
     LEASED.get_or_init(|| RwLock::new(Vec::new()))
 }
 
+/// Never reads `daemon_token()`: at boot this runs before the lease is
+/// seeded, and reading it would mint a fresh token in its place.
 pub fn accept_leased_token(token: &str) {
-    if token.is_empty() || ct_eq(token, daemon_token()) {
+    if token.is_empty() {
         return;
     }
     let mut leased = leased().write().unwrap_or_else(|e| e.into_inner());

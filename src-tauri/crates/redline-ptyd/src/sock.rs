@@ -34,14 +34,30 @@ pub fn private_dir(dir: &Path) -> io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
-/// Bind `<dir>/<name>`, 0600, replacing a stale socket nobody answers on.
-/// `AddrInUse` means a live helper already holds it. Long paths bind the
-/// bare name after a process `chdir` into `dir`: callers must be
-/// single-threaded (the helper is).
-pub fn bind(dir: &Path, name: &str) -> io::Result<UnixListener> {
-    use std::os::unix::fs::PermissionsExt;
+/// A bound socket and the lock that makes it this helper's alone.
+#[derive(Debug)]
+pub struct Bound {
+    pub listener: UnixListener,
+    /// `<dir>/<name>.lock`, `flock`ed for as long as this is held: the only
+    /// way a second helper can know the first is alive without connecting.
+    pub lock: std::fs::File,
+    pub lock_path: PathBuf,
+}
+
+/// Bind `<dir>/<name>`, 0600. Only the holder of `<name>.lock` (an
+/// exclusive `flock`) may: a second helper finds the lock taken and gets
+/// `AddrInUse`, so it can never unlink a live helper's socket and bind its
+/// own in its place. With the lock, a socket file still there is a dead
+/// helper's, and is replaced. Long paths bind the bare name after a process
+/// `chdir` into `dir`: callers must be single-threaded (the helper is).
+pub fn bind(dir: &Path, name: &str) -> io::Result<Bound> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let full = dir.join(name);
-    if connect(dir, name).is_ok() {
+    let lock_path = dir.join(format!("{name}.lock"));
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(&lock_path)?;
+    cloexec(lock.as_raw_fd())?;
+    // SAFETY: flock on an fd this process owns.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::new(io::ErrorKind::AddrInUse, format!("a helper is already serving {}", full.display())));
     }
     match std::fs::remove_file(&full) {
@@ -63,7 +79,37 @@ pub fn bind(dir: &Path, name: &str) -> io::Result<UnixListener> {
     let listener = listener?;
     std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o600))?;
     cloexec(listener.as_raw_fd())?;
-    Ok(listener)
+    Ok(Bound { listener, lock, lock_path })
+}
+
+/// The per-user secret the helper proves it can read (`ptyd.secret`, 0600,
+/// in the 0700 directory): created on first use by whichever side gets
+/// there first, never replaced.
+pub fn secret(dir: &Path) -> io::Result<[u8; redline_pty_proto::SECRET_LEN]> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join("ptyd.secret");
+    let mut out = [0u8; redline_pty_proto::SECRET_LEN];
+    match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        Ok(mut f) => {
+            std::fs::File::open("/dev/urandom")?.read_exact(&mut out)?;
+            f.write_all(&out)?;
+            f.sync_all()?;
+            return Ok(out);
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // Another side is writing it this instant: give it a moment.
+    for _ in 0..50 {
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() == out.len() {
+            out.copy_from_slice(&bytes);
+            return Ok(out);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err(io::Error::new(io::ErrorKind::InvalidData, "the terminal helper's secret is malformed"))
 }
 
 extern "C" {
@@ -220,15 +266,29 @@ mod tests {
         let dir = scratch("short");
         let l = bind(&dir, "s.sock").unwrap();
         use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("s.sock.lock")).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::metadata(dir.join("s.sock")).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         let err = bind(&dir, "s.sock").unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "a live listener is not stale");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "a live helper's lock is not stale");
+        assert!(connect(&dir, "s.sock").is_ok(), "and its socket was left alone");
         drop(l);
-        // The file outlives the listener; nobody answers it, so it is stale.
+        // The socket file outlives the listener, and the lock went with it:
+        // the next helper replaces the file.
         assert!(dir.join("s.sock").exists());
         let _l = bind(&dir, "s.sock").unwrap();
         assert!(connect(&dir, "s.sock").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_secret_is_made_once_owner_only_and_then_read_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("secret");
+        let a = secret(&dir).unwrap();
+        assert_eq!(std::fs::metadata(dir.join("ptyd.secret")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(secret(&dir).unwrap(), a, "never replaced");
+        assert_ne!(a, [0u8; redline_pty_proto::SECRET_LEN]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

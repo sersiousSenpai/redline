@@ -90,6 +90,13 @@ impl Drop for Rig {
     }
 }
 
+/// An adoption reads each helper's list off the setup thread: wait for it.
+fn settle(state: &PtyState) {
+    for c in state.helpers.clients() {
+        assert!(c.wait_ready(Duration::from_secs(3)), "the adopted helper's list arrived");
+    }
+}
+
 fn recording_channel() -> (Channel<Response>, Arc<Mutex<Vec<Vec<u8>>>>) {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let recorded = frames.clone();
@@ -216,7 +223,8 @@ fn a_relaunched_app_adopts_the_running_helper_its_terminals_and_its_token() {
     let cfg = rig.state.helpers.cfg.clone().unwrap();
     let relaunched = Rig::with_cfg(cfg, rig.dir.join("unused"));
     let token = relaunched.state.adopt_running("a-fresh-candidate");
-    assert_eq!(token.as_deref(), Some(lease.as_str()), "the running helper's lease, not the candidate");
+    assert_eq!(token.first().map(String::as_str), Some(lease.as_str()), "the running helper's lease, not the candidate");
+    settle(&relaunched.state);
     assert!(relaunched.state.is_live("kept"));
     let rows = relaunched.state.entries();
     assert_eq!(rows[0].meta, Some(serde_json::json!({"owner": "s1", "title": "cat"})), "its place, from meta");
@@ -321,7 +329,8 @@ fn a_quit_keeps_what_persists_and_stop_all_ends_everything() {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let token = next.state.adopt_running("x");
-        assert!(token.is_some());
+        assert!(!token.is_empty());
+        settle(&next.state);
         let live: Vec<String> = next.state.entries().into_iter().filter(|r| r.alive).map(|r| r.id).collect();
         if live == ["keep"] {
             break;
@@ -335,6 +344,7 @@ fn a_quit_keeps_what_persists_and_stop_all_ends_everything() {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         last.state.adopt_running("x");
+        settle(&last.state);
         if last.state.entries().iter().all(|r| !r.alive) {
             break;
         }
@@ -373,7 +383,8 @@ fn an_upgrade_retires_the_old_helper_which_keeps_its_terminals_and_leaves_after_
     let cfg = rig.state.helpers.cfg.clone().unwrap();
     assert_eq!(cfg.retired_socks(), vec![cfg.retired_sock(old.welcome.instance)]);
     let next = Rig::with_cfg(cfg, rig.dir.join("unused"));
-    assert!(next.state.adopt_running("x").is_some());
+    assert_eq!(next.state.adopt_running("x").len(), 2, "both leases");
+    settle(&next.state);
     assert!(next.state.is_live("old") && next.state.is_live("new"));
     assert_eq!(lock(&next.state.helpers.retiring).len(), 1);
     lock(&next.state.helpers.active).take();
@@ -388,4 +399,102 @@ fn an_upgrade_retires_the_old_helper_which_keeps_its_terminals_and_leaves_after_
     assert!(!pid_alive(old_pid), "a retiring helper exits after its last terminal");
     assert!(rig.state.helpers.cfg.as_ref().unwrap().retired_socks().is_empty());
     assert!(rig.state.is_live("new"));
+}
+
+#[test]
+fn an_update_that_moves_the_helpers_bundle_aside_adopts_it_and_retires_it_never_falls_back() {
+    let Some(exe) = helper_exe() else { return };
+    let root = std::env::temp_dir().join(format!("rl-ptyfacade-moved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let bundle = root.join("Redline.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::copy(&exe, bundle.join("redline-ptyd")).unwrap();
+    let cfg = HelperConfig {
+        dir: root.join("data"),
+        sock: "ptyd-test.sock".into(),
+        exe: bundle.join("redline-ptyd"),
+        peer_dir: std::env::current_exe().unwrap().parent().unwrap().to_path_buf(),
+    };
+    let rig = Rig::with_cfg(cfg.clone(), root.clone());
+    let (a, fa) = recording_channel();
+    rig.spawn("kept", CAT, a);
+    wait_for(&fa, |x| x.ends_with(b"ready"));
+    let old_pid = rig.helper_pid();
+    lock(&rig.state.helpers.active).take();
+
+    // The update: the old bundle moves aside, the new one takes its place.
+    std::fs::rename(root.join("Redline.app"), root.join("Redline-old.app")).unwrap();
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::copy(&exe, bundle.join("redline-ptyd")).unwrap();
+    let next = Rig::with_cfg(cfg.clone(), root.join("unused"));
+    assert!(!next.state.adopt_running("x").is_empty(), "adopted, by identity");
+    settle(&next.state);
+    assert!(next.state.is_live("kept"), "its shell is reachable");
+    assert!(lock(&next.state.helpers.active).is_none(), "an older build takes no new terminals");
+    assert_eq!(lock(&next.state.helpers.retiring).len(), 1, "it retires");
+    // The first new terminal starts a fresh helper from the new bundle:
+    // never the in-process fallback.
+    let (b, fb) = recording_channel();
+    next.spawn("new", CAT, b);
+    wait_for(&fb, |x| x.ends_with(b"ready"));
+    assert!(!next.state.helpers.failed.load(Ordering::Acquire));
+    assert_ne!(next.helper_pid(), old_pid);
+    assert!(next.state.is_live("kept") && next.state.is_live("new"));
+    // Then the old bundle is deleted outright: still adopted by identity.
+    std::fs::remove_dir_all(root.join("Redline-old.app")).unwrap();
+    let last = Rig::with_cfg(cfg, root.join("unused2"));
+    assert_eq!(last.state.adopt_running("y").len(), 2);
+    settle(&last.state);
+    assert!(last.state.is_live("kept"));
+    lock(&last.state.helpers.active).take();
+    lock(&last.state.helpers.retiring).clear();
+    drop(next);
+    // SAFETY: the old helper this test started.
+    unsafe { libc::kill(old_pid as i32, libc::SIGKILL) };
+    drop(rig);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn two_terminals_opening_at_once_share_one_helper_and_lose_nothing() {
+    let Some(rig) = Rig::new("race") else { return };
+    let helpers = rig.state.helpers.clone();
+    let threads: Vec<_> = (0..4).map(|_| { let h = helpers.clone(); std::thread::spawn(move || h.ensure().unwrap().welcome.pid) }).collect();
+    let pids: Vec<u32> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(pids.windows(2).all(|w| w[0] == w[1]), "one helper, one client: {pids:?}");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!lock(&rig.events).iter().any(|e| e.starts_with("gone")), "no client was dropped: {:?}", lock(&rig.events));
+}
+
+/// `failed_channel_detaches_without_stopping_the_pump`, over the helper: a
+/// view whose channel fails is detached (the helper stops sending to it),
+/// the shell goes on, and the next view gets everything as its replay.
+#[test]
+fn a_failed_channel_detaches_without_stopping_the_shell() {
+    let Some(rig) = Rig::new("failed") else { return };
+    let failing = Channel::new(|body| match body {
+        InvokeResponseBody::Raw(bytes) if bytes.is_empty() => Ok(()),
+        _ => Err(std::io::Error::other("gone").into()),
+    });
+    rig.spawn("t", CAT, failing);
+    std::thread::sleep(Duration::from_millis(200));
+    pty_write_bytes(&rig.state, "t", b"after").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(rig.state.is_live("t"), "the shell outlives its view");
+    let (channel, replayed) = recording_channel();
+    rig.client().attach("t", Some("reloaded"), channel).unwrap();
+    assert_eq!(wait_for(&replayed, |b| b.ends_with(b"after")), b"readyafter", "all of it, as the replay");
+    assert_eq!(lock(&replayed).len(), 1, "in one replay frame");
+}
+
+/// `the_screen_tail_is_the_newest_output_as_text`, over the helper.
+#[test]
+fn the_screen_tail_comes_from_the_helpers_ring() {
+    let Some(rig) = Rig::new("tail") else { return };
+    let (a, fa) = recording_channel();
+    rig.spawn("live", "stty raw -echo; printf '\\033[1mWould\\033[1Cyou\\033[22m\\r\\nproceed?'; exec cat", a);
+    wait_for(&fa, |b| b.ends_with(b"proceed?"));
+    assert_eq!(pty_local::screen_text(&rig.client().tail("live", pty_local::SCREEN_TAIL_BYTES)), "Wouldyou\n\nproceed?");
+    assert_eq!(rig.client().tail("live", 8), b"proceed?");
+    // A tombstone's tail is the helper's own (tests/e2e.rs, the kill/exit/Reap case).
 }

@@ -38,7 +38,12 @@ use tauri::ipc::{Channel, Response};
 /// it just gets no new terminals (P3: it retires).
 pub const REQUIRED_CAPS: &[&str] = &["tail", "meta"];
 
-const HELLO_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A helper answers `Hello` in microseconds; one that doesn't within this is
+/// stuck, and a boot never waits longer than this per socket for it.
+const HELLO_TIMEOUT: Duration = Duration::from_millis(200);
+/// The biggest `Input` frame's payload: a longer write is several frames,
+/// so a paste is never refused for the 1 MiB frame cap.
+const INPUT_CHUNK: usize = 512 * 1024;
 /// How long a request waits for its reply. Generous: the helper answers in
 /// microseconds unless it is stuck, and a stuck helper is the fallback case.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -130,8 +135,8 @@ pub struct Welcome {
 }
 
 impl Welcome {
-    /// Usable for new terminals by this app.
-    pub fn current(&self) -> bool {
+    /// The frame set and caps are this build's.
+    pub fn speaks_ours(&self) -> bool {
         self.core == proto::CORE && REQUIRED_CAPS.iter().all(|c| self.caps.iter().any(|h| h == c))
     }
 }
@@ -226,12 +231,22 @@ struct Shared {
     pending: Mutex<HashMap<u32, Pending>>,
     seq: AtomicU32,
     connected: AtomicBool,
+    /// The first `List` has filled the cache.
+    ready: Mutex<bool>,
+    ready_cv: std::sync::Condvar,
 }
 
 pub struct Client {
     shared: Arc<Shared>,
     out: Mutex<Option<Sender<Out>>>,
     pub welcome: Welcome,
+    /// Who answered: by identity (`peer::check_helper`), with the path its
+    /// executable has now.
+    pub peer: peer::HelperPeer,
+    /// Runs from this app's own sibling executable. False after an update
+    /// moved or deleted the bundle it was started from: an older build,
+    /// adopted for its terminals and retired for new ones.
+    pub same_binary: bool,
 }
 
 /// The empty attachment id stands for "none" on the wire.
@@ -241,17 +256,33 @@ fn att_wire(attachment: Option<&str>) -> String {
 
 impl Client {
     /// Connect to a helper that is already running. `token` is offered for
-    /// the lease (a fresh helper keeps it; a running one answers with its own).
+    /// the lease (a fresh helper keeps it; a running one answers with its
+    /// own). The helper is known by identity, never by path: this user, an
+    /// executable named `redline-ptyd`, this app's team when signed, and the
+    /// proof that it read the per-user secret beside its socket. The cache is
+    /// not filled yet: call [`Client::refresh`] (the boot does it off the
+    /// setup thread).
     pub fn connect(cfg: &HelperConfig, token: &str, sink: Sink) -> Result<Arc<Self>, String> {
         let stream = sock::connect(&cfg.dir, &cfg.sock).map_err(|e| format!("connect {}: {e}", cfg.sock))?;
-        peer::check_helper(stream.as_raw_fd(), &cfg.exe).map_err(|e| format!("peer check: {e}"))?;
-        Self::handshake(stream, token, sink)
+        let who = peer::check_helper(stream.as_raw_fd()).map_err(|e| format!("peer check: {e}"))?;
+        let secret = sock::secret(&cfg.dir).map_err(|e| format!("peer check: the helper secret: {e}"))?;
+        let same_binary = who.runs_from(&cfg.exe);
+        Self::handshake(stream, token, &secret, who, same_binary, sink)
+    }
+
+    /// Usable for new terminals by this app: our frame set and caps, and our
+    /// own binary.
+    pub fn current(&self) -> bool {
+        self.same_binary && self.welcome.speaks_ours()
     }
 
     /// Connect, starting the helper first when none is listening.
     pub fn connect_or_spawn(cfg: &HelperConfig, token: &str, sink: Sink) -> Result<Arc<Self>, String> {
         match Self::connect(cfg, token, sink.clone()) {
-            Ok(c) => return Ok(c),
+            Ok(c) => {
+                c.refresh()?;
+                return Ok(c);
+            }
             Err(e) if e.starts_with("peer check") => return Err(e),
             Err(_) => {}
         }
@@ -265,16 +296,27 @@ impl Client {
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {}
             Err(e) => return Err(format!("start {}: {e}", cfg.exe.display())),
         }
-        Self::connect(cfg, token, sink)
+        let client = Self::connect(cfg, token, sink)?;
+        client.refresh()?;
+        Ok(client)
     }
 
-    fn handshake(mut stream: UnixStream, token: &str, sink: Sink) -> Result<Arc<Self>, String> {
+    fn handshake(
+        mut stream: UnixStream,
+        token: &str,
+        secret: &[u8; proto::SECRET_LEN],
+        who: peer::HelperPeer,
+        same_binary: bool,
+        sink: Sink,
+    ) -> Result<Arc<Self>, String> {
         sock::cloexec(stream.as_raw_fd()).map_err(|e| e.to_string())?;
+        let nonce = u64::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
         let hello = Frame::bare(Msg::Hello {
             core: proto::CORE,
             caps: Vec::new(),
             build: format!("redline-{}", env!("CARGO_PKG_VERSION")),
             token: Some(token.to_string()),
+            nonce,
         });
         stream.write_all(&proto::to_bytes(&hello).map_err(|e| e.to_string())?).map_err(|e| format!("hello: {e}"))?;
         stream.set_read_timeout(Some(HELLO_TIMEOUT)).map_err(|e| e.to_string())?;
@@ -282,7 +324,10 @@ impl Client {
         let mut buf = [0u8; 4096];
         let welcome = loop {
             match dec.next_frame().map_err(|e| e.to_string())? {
-                Some(Frame { msg: Msg::Welcome { core, caps, build, instance, token, pid }, .. }) => {
+                Some(Frame { msg: Msg::Welcome { core, caps, build, instance, token, pid, proof }, .. }) => {
+                    if proof != proto::proof(secret, nonce) {
+                        return Err("peer check: the helper could not prove it read this user's secret".into());
+                    }
                     break Welcome { core, caps, build, instance, token, pid };
                 }
                 Some(other) => return Err(format!("expected Welcome, got {:?}", proto::type_of(&other.msg))),
@@ -310,9 +355,19 @@ impl Client {
             .name("ptyd-reader".into())
             .spawn(move || read_loop(stream, dec, reader_shared, reader_out, sink))
             .map_err(|e| e.to_string())?;
-        let client = Arc::new(Self { shared, out: Mutex::new(Some(tx)), welcome });
-        client.refresh()?;
-        Ok(client)
+        Ok(Arc::new(Self { shared, out: Mutex::new(Some(tx)), welcome, peer: who, same_binary }))
+    }
+
+    /// Wait (at most `timeout`) for the first `List` to have filled the
+    /// cache: what `pty_list` must not answer before on a boot.
+    pub fn wait_ready(&self, timeout: Duration) -> bool {
+        let guard = lock(&self.shared.ready);
+        let (guard, _) = self
+            .shared
+            .ready_cv
+            .wait_timeout_while(guard, timeout, |ready| !*ready && self.shared.connected.load(Ordering::Acquire))
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
     }
 
     pub fn connected(&self) -> bool {
@@ -373,6 +428,10 @@ impl Client {
             }
         }
         terms.retain(|id, t| rows.iter().any(|r| r.alive && &r.id == id && r.handle == t.info.handle));
+        drop(terms);
+        drop(tombs);
+        *lock(&self.shared.ready) = true;
+        self.shared.ready_cv.notify_all();
         Ok(())
     }
 
@@ -462,19 +521,43 @@ impl Client {
     /// An unpaced, unchecked write: keystrokes.
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
         let handle = self.handle_of(id).ok_or_else(|| format!("terminal {id} is not running"))?;
-        self.enqueue(&Frame::new(handle, Msg::Input { seq: 0, flags: 0, gap_ms: 0, bytes: bytes.to_vec() }))
+        for chunk in bytes.chunks(INPUT_CHUNK).chain(bytes.is_empty().then_some(&[][..])) {
+            self.enqueue(&Frame::new(handle, Msg::Input { seq: 0, flags: 0, gap_ms: 0, bytes: chunk.to_vec() }))?;
+        }
+        Ok(())
+    }
+
+    /// The `Input` frames one write becomes: at most `INPUT_CHUNK` each (a
+    /// multiple of the 512-byte pacing chunk), the `gap` on the first, and on
+    /// every later one of a paced write the 4 ms pause its chunks would have
+    /// had inside one frame, so splitting never changes the pacing.
+    fn inputs(bytes: &[u8], paced: bool, gap: Duration) -> Vec<(u8, u16, Vec<u8>)> {
+        let flags = if paced { proto::INPUT_PACED } else { 0 };
+        let first_gap = u16::try_from(gap.as_millis()).unwrap_or(u16::MAX);
+        let pause = if paced { 4 } else { 0 };
+        let mut out: Vec<(u8, u16, Vec<u8>)> =
+            bytes.chunks(INPUT_CHUNK).enumerate().map(|(i, c)| (flags, if i == 0 { first_gap } else { pause }, c.to_vec())).collect();
+        if out.is_empty() {
+            out.push((flags, first_gap, Vec::new()));
+        }
+        out
     }
 
     /// A paced write after a quiet `gap`, answered once it is all written.
     /// Blocks for the length of the write: callers are off the main thread.
     pub fn write_checked(&self, id: &str, bytes: &[u8], paced: bool, gap: Duration) -> Result<(), String> {
         let handle = self.handle_of(id).ok_or_else(|| format!("terminal {id} is not running"))?;
-        let flags = proto::INPUT_CHECKED | if paced { proto::INPUT_PACED } else { 0 };
-        let gap_ms = u16::try_from(gap.as_millis()).unwrap_or(u16::MAX);
         // 512 B every 4 ms is ~128 KB/s; a long launch must not time out.
         let timeout = REPLY_TIMEOUT + Duration::from_millis((bytes.len() / 64) as u64);
-        let bytes = bytes.to_vec();
-        let reply = self.request(move |seq| Frame::new(handle, Msg::Input { seq, flags, gap_ms, bytes }), None, timeout)?;
+        let mut frames = Self::inputs(bytes, paced, gap);
+        let (flags, gap_ms, last) = frames.pop().expect("at least one frame");
+        for (flags, gap_ms, chunk) in frames {
+            self.enqueue(&Frame::new(handle, Msg::Input { seq: 0, flags, gap_ms, bytes: chunk }))?;
+        }
+        // The helper writes one terminal's input in order, so the last
+        // frame's answer is the whole write's.
+        let flags = flags | proto::INPUT_CHECKED;
+        let reply = self.request(move |seq| Frame::new(handle, Msg::Input { seq, flags, gap_ms, bytes: last }), None, timeout)?;
         match reply.msg {
             Msg::InputDone { ok: true, .. } => Ok(()),
             Msg::InputDone { error, .. } => Err(error),
@@ -485,7 +568,10 @@ impl Client {
     /// A paced write that is not waited for (a paste whose Return follows).
     pub fn write_paced(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
         let handle = self.handle_of(id).ok_or_else(|| format!("terminal {id} is not running"))?;
-        self.enqueue(&Frame::new(handle, Msg::Input { seq: 0, flags: proto::INPUT_PACED, gap_ms: 0, bytes: bytes.to_vec() }))
+        for (flags, gap_ms, chunk) in Self::inputs(bytes, true, Duration::ZERO) {
+            self.enqueue(&Frame::new(handle, Msg::Input { seq: 0, flags, gap_ms, bytes: chunk }))?;
+        }
+        Ok(())
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -748,5 +834,25 @@ fn dispatch(frame: Frame, shared: &Shared, out: &Sender<Out>, sink: &Sink) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_write_over_the_frame_cap_is_split_and_keeps_its_pacing() {
+        let bytes = vec![b'x'; INPUT_CHUNK * 2 + 10];
+        let frames = Client::inputs(&bytes, true, Duration::from_millis(30));
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames.iter().map(|f| f.2.len()).sum::<usize>(), bytes.len());
+        assert_eq!(frames[0].1, 30, "the gap belongs to the first byte");
+        assert!(frames[1..].iter().all(|f| f.1 == 4), "the pause a paced chunk would have had");
+        assert_eq!(INPUT_CHUNK % 512, 0, "frame boundaries fall on pacing boundaries");
+        assert!(frames.iter().all(|f| proto::to_bytes(&Frame::new(1, Msg::Input { seq: 1, flags: f.0, gap_ms: f.1, bytes: f.2.clone() })).is_ok()));
+        let unpaced = Client::inputs(&bytes, false, Duration::ZERO);
+        assert!(unpaced.iter().all(|f| f.1 == 0 && f.0 == 0));
+        assert_eq!(Client::inputs(b"", true, Duration::ZERO).len(), 1, "an empty write is still answered");
     }
 }

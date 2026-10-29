@@ -11,12 +11,18 @@
 //!   **and** `LOCAL_PEERPID` → `proc_pidpath` lies in the directory the
 //!   helper was started from (the sibling rule: `Contents/MacOS/` in the
 //!   bundle, `target/debug/` in development);
-//! * the app accepts a helper only when its executable is exactly the sibling
-//!   `redline-ptyd`.
+//! * the app accepts a helper by **identity, not path** ([`check_helper`]):
+//!   this user, an executable named `redline-ptyd` (when the kernel still has
+//!   a path for it), and, on a Developer ID build, a valid signature by this
+//!   app's own team. The handshake then asks it to prove it read the per-user
+//!   secret in the 0700 socket directory (`sock::secret`,
+//!   `redline_pty_proto::proof`). A path is never the test: an app update
+//!   moves the running helper's bundle aside (and later deletes it), and the
+//!   helper still holding the user's shells is exactly the one to adopt
+//!   (and then retire, when its build is not current).
 //!
-//! On a Developer ID build both also require the peer's signing team to be
-//! their own ([`same_team`]); an ad-hoc or unsigned build has no team, and
-//! the path rule is all there is.
+//! On a Developer ID build both ends also require the peer's signing team to
+//! be their own ([`same_team`]); an ad-hoc or unsigned build has no team.
 
 use std::ffi::CStr;
 use std::io;
@@ -95,8 +101,28 @@ pub fn check_app(fd: RawFd, peer_dir: &Path) -> Result<(), String> {
     same_team(pid)
 }
 
-/// The app's check of the helper it connected to.
-pub fn check_helper(fd: RawFd, helper_exe: &Path) -> Result<i32, String> {
+/// Who the app reached.
+#[derive(Debug, Clone)]
+pub struct HelperPeer {
+    pub pid: i32,
+    /// The kernel's path for its executable; `None` once the file is gone
+    /// (an update deleted the old bundle).
+    pub exe: Option<PathBuf>,
+}
+
+impl HelperPeer {
+    /// Whether it runs from `expected` (the sibling of this app): false after
+    /// an update moved or deleted its bundle, which makes it an older build
+    /// to adopt and retire, never a stranger.
+    pub fn runs_from(&self, expected: &Path) -> bool {
+        self.exe.as_deref().is_some_and(|exe| canonical(exe) == canonical(expected))
+    }
+}
+
+/// The app's check of the helper it connected to: by identity (uid, the
+/// executable's name, the signing team), not by path. The caller still
+/// verifies the handshake's proof of the per-user secret.
+pub fn check_helper(fd: RawFd) -> Result<HelperPeer, String> {
     // SAFETY: no arguments.
     let me = unsafe { libc::geteuid() };
     let uid = peer_uid(fd).map_err(|e| format!("getpeereid: {e}"))?;
@@ -104,12 +130,14 @@ pub fn check_helper(fd: RawFd, helper_exe: &Path) -> Result<i32, String> {
         return Err(format!("helper uid {uid} is not {me}"));
     }
     let pid = peer_pid(fd).map_err(|e| format!("LOCAL_PEERPID: {e}"))?;
-    let exe = pid_path(pid).ok_or_else(|| format!("no executable for pid {pid}"))?;
-    if canonical(&exe) != canonical(helper_exe) {
-        return Err(format!("helper is {}, not {}", exe.display(), helper_exe.display()));
+    let exe = pid_path(pid);
+    if let Some(exe) = &exe {
+        if exe.file_name().and_then(|n| n.to_str()) != Some("redline-ptyd") {
+            return Err(format!("{} is not a terminal helper", exe.display()));
+        }
     }
     same_team(pid)?;
-    Ok(pid)
+    Ok(HelperPeer { pid, exe })
 }
 
 // --- the signature anchor (Developer ID builds) ---------------------------------
@@ -141,6 +169,7 @@ mod team {
         fn SecCodeCopyGuestWithAttributes(host: CFTypeRef, attrs: CFTypeRef, flags: u32, guest: *mut CFTypeRef) -> OSStatus;
         fn SecCodeCopyStaticCode(code: CFTypeRef, flags: u32, static_code: *mut CFTypeRef) -> OSStatus;
         fn SecCodeCopySigningInformation(code: CFTypeRef, flags: u32, info: *mut CFTypeRef) -> OSStatus;
+        fn SecCodeCheckValidity(code: CFTypeRef, flags: u32, requirement: CFTypeRef) -> OSStatus;
         static kSecGuestAttributePid: CFTypeRef;
         static kSecCodeInfoTeamIdentifier: CFTypeRef;
     }
@@ -234,6 +263,10 @@ mod team {
                 return None;
             }
             let guest = Owned(guest);
+            // A signature that no longer verifies names no team.
+            if SecCodeCheckValidity(guest.0, 0, std::ptr::null()) != 0 {
+                return None;
+            }
             team_of(guest.0)
         }
     }
@@ -281,8 +314,9 @@ mod tests {
         assert!(check_app(a.as_raw_fd(), me.parent().unwrap()).is_ok());
         let err = check_app(a.as_raw_fd(), Path::new("/usr/bin")).unwrap_err();
         assert!(err.contains("is not in"), "{err}");
-        assert!(check_helper(a.as_raw_fd(), &me).is_ok());
-        assert!(check_helper(a.as_raw_fd(), Path::new("/bin/ls")).is_err());
+        // The test binary is not named redline-ptyd: not a helper.
+        let err = check_helper(a.as_raw_fd()).unwrap_err();
+        assert!(err.contains("is not a terminal helper"), "{err}");
         // A test binary is ad-hoc signed: no team, so the anchor check passes
         // on the path rule alone.
         assert!(same_team(pid).is_ok());

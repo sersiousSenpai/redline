@@ -39,7 +39,7 @@ impl Conn {
     fn open(dir: &Path) -> Self {
         let s = sock::connect(dir, SOCK).expect("connect");
         let mut c = Self { s, dec: proto::Decoder::new() };
-        c.send(Frame::bare(Msg::Hello { core: proto::CORE, caps: vec![], build: "probe".into(), token: Some("probe-token".into()) }));
+        c.send(Frame::bare(Msg::Hello { core: proto::CORE, caps: vec![], build: "probe".into(), token: Some("probe-token".into()), nonce: 1 }));
         match c.recv().msg {
             Msg::Welcome { .. } => c,
             m => panic!("{m:?}"),

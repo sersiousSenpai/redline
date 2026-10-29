@@ -78,6 +78,8 @@ struct Helpers {
     /// Placement written before the terminal's shell exists (the frontend
     /// names a terminal before its view mounts): used by its spawn.
     pending_meta: Mutex<HashMap<String, (Option<bool>, Option<Vec<u8>>)>>,
+    /// Held while a helper is being connected or started (`ensure`).
+    ensuring: Mutex<()>,
 }
 
 impl Helpers {
@@ -92,6 +94,7 @@ impl Helpers {
             sink: Mutex::new(None),
             typing: Mutex::new(HashMap::new()),
             pending_meta: Mutex::new(HashMap::new()),
+            ensuring: Mutex::new(()),
         }
     }
 
@@ -126,12 +129,19 @@ impl Helpers {
         if let Some(c) = lock(&self.active).as_ref().filter(|c| c.connected()) {
             return Ok(c.clone());
         }
+        // Single flight: two terminals opening at once must not each start
+        // (or connect) a client, or the one replaced would drop and report
+        // the other's live shells gone.
+        let _one = lock(&self.ensuring);
+        if let Some(c) = lock(&self.active).as_ref().filter(|c| c.connected()) {
+            return Ok(c.clone());
+        }
         let cfg = self.cfg.as_ref().ok_or("no terminal helper configured")?;
         let sink = lock(&self.sink).clone().ok_or("terminal helper events are not wired")?;
         let token = crate::auth::daemon_token();
         let client = Client::connect_or_spawn(cfg, token, sink.clone())
             .or_else(|_| Client::connect_or_spawn(cfg, token, sink))?;
-        if !client.welcome.current() {
+        if !client.current() {
             return self.retire_and_replace(client);
         }
         self.adopt(client.clone());
@@ -159,7 +169,7 @@ impl Helpers {
             std::thread::sleep(Duration::from_millis(20));
         }
         let fresh = Client::connect_or_spawn(cfg, crate::auth::daemon_token(), sink)?;
-        if !fresh.welcome.current() {
+        if !fresh.current() {
             return Err(format!("a fresh terminal helper ({}) still can't take new terminals", fresh.welcome.build));
         }
         self.adopt(fresh.clone());
@@ -233,22 +243,28 @@ impl PtyState {
     }
 
     /// At boot, before the server binds: adopt a helper that is already
-    /// running (one that outlived the last launch). Never starts one.
-    /// Returns the token its shells hold, which this boot must keep using.
-    pub fn adopt_running(&self, candidate_token: &str) -> Option<String> {
+    /// running (one that outlived the last launch). Never starts one, and
+    /// waits at most the Hello's 200 ms per socket: the list that fills the
+    /// cache is read off the setup thread (`pty_list` waits for it).
+    /// Returns the tokens the adopted helpers' shells hold, the one to seed
+    /// this boot's master token with first. The caller seeds it before
+    /// anything mints, then accepts the rest (`auth::accept_leased_token`).
+    pub fn adopt_running(&self, candidate_token: &str) -> Vec<String> {
         if !self.helpers.enabled {
-            return None;
+            return Vec::new();
         }
-        let cfg = self.helpers.cfg.as_ref()?;
-        let sink = lock(&self.helpers.sink).clone()?;
-        let mut lease = None;
+        let Some(cfg) = self.helpers.cfg.as_ref() else { return Vec::new() };
+        let Some(sink) = lock(&self.helpers.sink).clone() else { return Vec::new() };
+        let mut primary: Option<String> = None;
+        let mut others: Vec<String> = Vec::new();
+        let mut adopted: Vec<Arc<Client>> = Vec::new();
         // Retiring helpers first (an upgrade left them holding older
         // terminals): listed, attachable, killable, given nothing new.
         for name in cfg.retired_socks() {
             match Client::connect(&cfg.at_sock(&name), candidate_token, sink.clone()) {
                 Ok(client) => {
-                    lease.get_or_insert_with(|| client.welcome.token.clone());
-                    crate::auth::accept_leased_token(&client.welcome.token);
+                    others.push(client.welcome.token.clone());
+                    adopted.push(client.clone());
                     lock(&self.helpers.retiring).push(client);
                 }
                 Err(e) => tracing::warn!(error = %e, sock = %name, "could not reach a retiring terminal helper"),
@@ -257,15 +273,15 @@ impl PtyState {
         if cfg.dir.join(&cfg.sock).exists() {
             match Client::connect(cfg, candidate_token, sink) {
                 Ok(client) => {
-                    let token = client.welcome.token.clone();
-                    if client.welcome.current() {
-                        lease = Some(token);
+                    primary = Some(client.welcome.token.clone());
+                    adopted.push(client.clone());
+                    if client.current() {
                         *lock(&self.helpers.active) = Some(client);
                     } else {
-                        // Not for new terminals: it retires now and a fresh
-                        // helper starts with the first new terminal (never
-                        // here: nothing is spawned at boot).
-                        lease.get_or_insert(token);
+                        // An older build (an update moved its bundle aside,
+                        // or its frames aren't ours): its terminals are
+                        // adopted, it retires now, and a fresh helper starts
+                        // with the first new terminal (never here).
                         if let Err(e) = client.retire(&cfg.retired_sock(client.welcome.instance)) {
                             tracing::warn!(error = %e, "could not retire the running terminal helper");
                         }
@@ -275,12 +291,25 @@ impl PtyState {
                 Err(e) => tracing::warn!(error = %e, "could not adopt the running terminal helper"),
             }
         }
-        lease.filter(|t| !t.is_empty())
+        for client in adopted {
+            let _ = std::thread::Builder::new().name("ptyd-adopt".into()).spawn(move || {
+                if let Err(e) = client.refresh() {
+                    tracing::warn!(error = %e, "could not list an adopted terminal helper's terminals");
+                }
+            });
+        }
+        primary.into_iter().chain(others).filter(|t| !t.is_empty()).collect()
     }
 
-    /// The ids of every live terminal a helper holds: what a launch adopted.
-    pub fn adopted_ids(&self) -> Vec<String> {
-        self.helpers.clients().iter().flat_map(|c| c.terms()).filter(|t| t.alive).map(|t| t.id).collect()
+    /// Every live terminal a helper holds (what a launch adopted), with the
+    /// unix ms of its newest output. Waits for each helper's first list (off
+    /// the setup thread).
+    pub fn adopted_terms(&self) -> Vec<(String, u64)> {
+        let clients = self.helpers.clients();
+        for c in &clients {
+            c.wait_ready(Duration::from_secs(5));
+        }
+        clients.iter().flat_map(|c| c.terms()).filter(|t| t.alive).map(|t| (t.id, t.last_output)).collect()
     }
 
     /// The app is exiting. `stop_all`: every terminal ends (⌥⌘Q, or keeping
@@ -650,6 +679,8 @@ impl PtyState {
             .map(|e| PtyInfo { id: e.id, cwd: e.cwd, pid: e.pid, alive: e.alive, kept: false, persist: false, meta: None, started_at: None, exit: None })
             .collect();
         for client in self.helpers.clients() {
+            // A boot's first list is read off the setup thread: answer after it.
+            client.wait_ready(Duration::from_secs(3));
             rows.extend(client.terms().iter().map(PtyInfo::from_helper));
             rows.extend(client.tombs().iter().map(PtyInfo::from_helper));
         }

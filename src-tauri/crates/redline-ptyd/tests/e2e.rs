@@ -164,7 +164,7 @@ impl Conn {
     }
 
     fn hello(&mut self, token: Option<&str>) -> (String, u32, u64) {
-        self.send(Frame::bare(Msg::Hello { core: proto::CORE, caps: vec![], build: "e2e".into(), token: token.map(String::from) }));
+        self.send(Frame::bare(Msg::Hello { core: proto::CORE, caps: vec![], build: "e2e".into(), token: token.map(String::from), nonce: 1 }));
         match self.recv(Duration::from_secs(5)).expect("welcome").msg {
             Msg::Welcome { token, pid, instance, core, .. } => {
                 assert_eq!(core, proto::CORE);
@@ -615,7 +615,7 @@ fn a_helper_with_a_terminal_does_not_sweep() {
 fn a_peer_outside_the_peer_dir_is_refused_before_any_frame() {
     let h = Helper::start("peer", &["--peer-dir", "/usr/bin"]);
     let mut s = sock::connect(&h.dir, &h.sock).unwrap();
-    let _ = s.write_all(&proto::to_bytes(&Frame::bare(Msg::Hello { core: 1, caps: vec![], build: String::new(), token: None })).unwrap());
+    let _ = s.write_all(&proto::to_bytes(&Frame::bare(Msg::Hello { core: 1, caps: vec![], build: String::new(), token: None, nonce: 1 })).unwrap());
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let mut buf = [0u8; 64];
     let n = s.read(&mut buf).unwrap_or(0);
@@ -734,4 +734,65 @@ fn a_running_helper_survives_its_bundle_being_exchanged_under_it() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_app_knows_its_helper_by_identity_after_its_binary_is_moved_aside_or_deleted() {
+    use redline_ptyd::peer;
+    let root = scratch("identity");
+    let installed = root.join("Redline.app/Contents/MacOS");
+    std::fs::create_dir_all(&installed).unwrap();
+    let exe = installed.join("redline-ptyd");
+    std::fs::copy(HELPER, &exe).unwrap();
+    let dir = root.join("data");
+    let args = ["--dir".to_string(), dir.display().to_string(), "--sock".into(), "x.sock".into(), "--peer-dir".into(), my_dir().display().to_string()];
+    sock::spawn_helper(&exe, &args).unwrap();
+    // What the app does: identity at the socket, then the secret's proof.
+    let check = |label: &str| -> (peer::HelperPeer, u32) {
+        let s = sock::connect(&dir, "x.sock").unwrap();
+        let who = peer::check_helper(s.as_raw_fd()).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let mut c = Conn::new(s);
+        c.send(Frame::bare(Msg::Hello { core: proto::CORE, caps: vec![], build: "e2e".into(), token: None, nonce: 0xabcdef }));
+        let Some(Frame { msg: Msg::Welcome { proof, pid, .. }, .. }) = c.recv(Duration::from_secs(5)) else { panic!("{label}: no Welcome") };
+        let secret = sock::secret(&dir).unwrap();
+        assert_eq!(proof, proto::proof(&secret, 0xabcdef), "{label}: it read this user's secret");
+        assert_ne!(proof, proto::proof(&[7u8; proto::SECRET_LEN], 0xabcdef));
+        (who, pid)
+    };
+    let (who, pid) = check("in place");
+    assert!(who.runs_from(&exe));
+    // `redline-activate install` moves the old bundle aside...
+    std::fs::rename(root.join("Redline.app"), root.join("Redline-old.app")).unwrap();
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::copy(HELPER, &exe).unwrap();
+    let (who, again) = check("moved aside");
+    assert_eq!(again, pid, "the same helper, still holding the shells");
+    assert!(!who.runs_from(&exe), "an older build: adopt it, then retire it");
+    // ...and later deletes it.
+    std::fs::remove_dir_all(root.join("Redline-old.app")).unwrap();
+    let (who, again) = check("deleted");
+    assert_eq!(again, pid);
+    assert!(!who.runs_from(&exe));
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_second_helper_never_takes_a_live_helpers_socket() {
+    let mut first = Helper::start("lock", &[]);
+    let path = first.dir.join(&first.sock);
+    let ino = std::fs::metadata(&path).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).unwrap();
+    let status = Command::new(HELPER)
+        .args(["--foreground", "--dir", first.dir.to_str().unwrap(), "--sock", &first.sock, "--peer-dir", my_dir().to_str().unwrap()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(sock::EXIT_IN_USE));
+    assert_eq!(std::fs::metadata(&path).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).unwrap(), ino, "its socket file was left alone");
+    assert!(first.connect().list().is_empty(), "and it still serves");
+    first.kill9();
 }

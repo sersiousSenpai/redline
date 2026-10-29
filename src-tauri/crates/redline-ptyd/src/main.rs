@@ -118,8 +118,15 @@ fn main() {
         eprintln!("redline-ptyd: {}: {e}", args.dir.display());
         std::process::exit(1);
     }
-    let listener = match sock::bind(&args.dir, &args.sock) {
-        Ok(l) => l,
+    let secret = match sock::secret(&args.dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("redline-ptyd: secret: {e}");
+            std::process::exit(1);
+        }
+    };
+    let bound = match sock::bind(&args.dir, &args.sock) {
+        Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => std::process::exit(sock::EXIT_IN_USE),
         Err(e) => {
             eprintln!("redline-ptyd: bind {}: {e}", args.dir.join(&args.sock).display());
@@ -137,7 +144,7 @@ fn main() {
         }
     }
     let _ = std::env::set_current_dir("/");
-    let mut helper = match Helper::new(args, listener) {
+    let mut helper = match Helper::new(args, bound, secret) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("redline-ptyd: {e}");
@@ -269,6 +276,10 @@ impl Weighed for Tomb {
 struct Helper {
     args: Args,
     listener: UnixListener,
+    /// Held for the helper's life: the bind lock (`sock::bind`).
+    lock: std::fs::File,
+    lock_path: PathBuf,
+    secret: [u8; proto::SECRET_LEN],
     listen_path: PathBuf,
     listen_ino: Option<(u64, u64)>,
     clients: Vec<Client>,
@@ -292,7 +303,8 @@ enum Slot {
 }
 
 impl Helper {
-    fn new(args: Args, listener: UnixListener) -> io::Result<Self> {
+    fn new(args: Args, bound: sock::Bound, secret: [u8; proto::SECRET_LEN]) -> io::Result<Self> {
+        let sock::Bound { listener, lock, lock_path } = bound;
         listener.set_nonblocking(true)?;
         let mut fds = [0; 2];
         // SAFETY: a two-int out array.
@@ -319,6 +331,9 @@ impl Helper {
         Ok(Self {
             args,
             listener,
+            lock,
+            lock_path,
+            secret,
             listen_path,
             listen_ino,
             clients: Vec::new(),
@@ -471,6 +486,12 @@ impl Helper {
         if self.listen_ino.is_some() && inode(&self.listen_path) == self.listen_ino {
             let _ = std::fs::remove_file(&self.listen_path);
         }
+        // A retired name is this helper's alone (its instance is in it), so
+        // its lock file goes too; the primary's stays for the next helper.
+        if self.retiring {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
+        let _ = &self.lock;
         std::process::exit(0);
     }
 
@@ -587,7 +608,7 @@ impl Helper {
     fn handle(&mut self, client: u64, frame: Frame, now: Instant) {
         let handle = frame.pty;
         match frame.msg {
-            Msg::Hello { token, .. } => {
+            Msg::Hello { token, nonce, .. } => {
                 if self.token.is_none() {
                     self.token = token.filter(|t| !t.is_empty());
                 }
@@ -601,6 +622,7 @@ impl Helper {
                     instance: self.instance,
                     token: self.token.clone().unwrap_or_default(),
                     pid: std::process::id(),
+                    proof: proto::proof(&self.secret, nonce),
                 };
                 self.send(client, Frame::bare(welcome));
             }
@@ -763,13 +785,17 @@ impl Helper {
             return;
         }
         match sock::bind(&self.args.dir, name) {
-            Ok(l) => {
-                let _ = l.set_nonblocking(true);
+            Ok(bound) => {
+                let _ = bound.listener.set_nonblocking(true);
                 let _ = std::env::set_current_dir("/");
                 if self.listen_ino.is_some() && inode(&self.listen_path) == self.listen_ino {
                     let _ = std::fs::remove_file(&self.listen_path);
                 }
-                self.listener = l;
+                // Releasing the primary's lock (by replacing it) lets a newer
+                // helper take the primary name.
+                self.listener = bound.listener;
+                self.lock = bound.lock;
+                self.lock_path = bound.lock_path;
                 self.listen_path = self.args.dir.join(name);
                 self.listen_ino = inode(&self.listen_path);
                 self.args.sock = name.to_string();

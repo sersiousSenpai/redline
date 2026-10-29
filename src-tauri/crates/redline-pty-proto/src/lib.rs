@@ -96,7 +96,11 @@ pub enum Msg {
     // App → helper.
     /// `token` only matters on the first `Hello` that carries one: the
     /// helper keeps it for as long as it lives (the token lease).
-    Hello { core: u16, caps: Vec<String>, build: String, token: Option<String> },
+    /// `nonce` is the app's challenge: the helper answers it with `proof`
+    /// ([`proof`] keyed by the per-user secret in the socket's directory),
+    /// which is how an app knows the helper it reached is one it could have
+    /// started, whatever path its executable now has.
+    Hello { core: u16, caps: Vec<String>, build: String, token: Option<String>, nonce: u64 },
     /// The environment is explicit and complete: the helper adds nothing.
     /// A live `id` makes this an attach (the idempotent spawn).
     Spawn {
@@ -138,7 +142,7 @@ pub enum Msg {
     Retire { sock: String },
 
     // Helper → app.
-    Welcome { core: u16, caps: Vec<String>, build: String, instance: u64, token: String, pid: u32 },
+    Welcome { core: u16, caps: Vec<String>, build: String, instance: u64, token: String, pid: u32, proof: u64 },
     Spawned { seq: u32, pid: u32, existed: bool },
     ListReply { seq: u32, rows: Vec<Row> },
     Replay { attachment: String, bytes: Vec<u8> },
@@ -194,6 +198,70 @@ impl fmt::Display for ProtoError {
 }
 
 impl std::error::Error for ProtoError {}
+
+// --- the helper's proof -------------------------------------------------------------
+
+/// The per-user secret's size, in bytes.
+pub const SECRET_LEN: usize = 32;
+
+/// The helper's answer to an app's `nonce`: SipHash-2-4 of the nonce keyed by
+/// the secret (its first 16 bytes; the rest is reserved). Not a MAC against
+/// a same-user attacker, who can read the 0600 secret too (see the threat
+/// model in `redline_ptyd::peer`): it proves the helper read the file only
+/// this user's processes can, in the directory only this user's app owns.
+pub fn proof(secret: &[u8; SECRET_LEN], nonce: u64) -> u64 {
+    let k0 = u64::from_le_bytes(secret[0..8].try_into().unwrap());
+    let k1 = u64::from_le_bytes(secret[8..16].try_into().unwrap());
+    siphash24(k0, k1, &nonce.to_le_bytes())
+}
+
+fn siphash24(k0: u64, k1: u64, msg: &[u8]) -> u64 {
+    let mut v0 = 0x736f_6d65_7073_6575 ^ k0;
+    let mut v1 = 0x646f_7261_6e64_6f6d ^ k1;
+    let mut v2 = 0x6c79_6765_6e65_7261 ^ k0;
+    let mut v3 = 0x7465_6462_7974_6573 ^ k1;
+    macro_rules! round {
+        () => {
+            v0 = v0.wrapping_add(v1);
+            v1 = v1.rotate_left(13);
+            v1 ^= v0;
+            v0 = v0.rotate_left(32);
+            v2 = v2.wrapping_add(v3);
+            v3 = v3.rotate_left(16);
+            v3 ^= v2;
+            v0 = v0.wrapping_add(v3);
+            v3 = v3.rotate_left(21);
+            v3 ^= v0;
+            v2 = v2.wrapping_add(v1);
+            v1 = v1.rotate_left(17);
+            v1 ^= v2;
+            v2 = v2.rotate_left(32);
+        };
+    }
+    let mut chunks = msg.chunks_exact(8);
+    for c in &mut chunks {
+        let m = u64::from_le_bytes(c.try_into().unwrap());
+        v3 ^= m;
+        round!();
+        round!();
+        v0 ^= m;
+    }
+    let rest = chunks.remainder();
+    let mut last = (msg.len() as u64 & 0xff) << 56;
+    for (i, b) in rest.iter().enumerate() {
+        last |= u64::from(*b) << (8 * i);
+    }
+    v3 ^= last;
+    round!();
+    round!();
+    v0 ^= last;
+    v2 ^= 0xff;
+    round!();
+    round!();
+    round!();
+    round!();
+    v0 ^ v1 ^ v2 ^ v3
+}
 
 // --- encoding -------------------------------------------------------------------
 
@@ -320,11 +388,12 @@ pub fn to_bytes(frame: &Frame) -> Result<Vec<u8>, ProtoError> {
 
 fn encode_payload(msg: &Msg, o: &mut Out<'_>) -> Result<(), ProtoError> {
     match msg {
-        Msg::Hello { core, caps, build, token } => {
+        Msg::Hello { core, caps, build, token, nonce } => {
             o.u16(*core);
             o.strs("cap", caps, MAX_NAME)?;
             o.str("build", build, MAX_NAME)?;
             o.opt_str("token", token, MAX_NAME)?;
+            o.u64(*nonce);
         }
         Msg::Spawn { seq, id, cwd, cols, rows, argv, env, persist, meta, attachment } => {
             o.u32(*seq);
@@ -366,13 +435,14 @@ fn encode_payload(msg: &Msg, o: &mut Out<'_>) -> Result<(), ProtoError> {
             o.u32(*max);
         }
         Msg::Retire { sock } => o.str("sock", sock, MAX_NAME)?,
-        Msg::Welcome { core, caps, build, instance, token, pid } => {
+        Msg::Welcome { core, caps, build, instance, token, pid, proof } => {
             o.u16(*core);
             o.strs("cap", caps, MAX_NAME)?;
             o.str("build", build, MAX_NAME)?;
             o.u64(*instance);
             o.str("token", token, MAX_NAME)?;
             o.u32(*pid);
+            o.u64(*proof);
         }
         Msg::Spawned { seq, pid, existed } => {
             o.u32(*seq);
@@ -533,6 +603,7 @@ pub fn decode_body(body: &[u8]) -> Result<Option<Frame>, ProtoError> {
             caps: i.strs("cap", MAX_NAME)?,
             build: i.str("build", MAX_NAME)?,
             token: i.opt_str("token", MAX_NAME)?,
+            nonce: i.u64("nonce")?,
         },
         t::SPAWN => Msg::Spawn {
             seq: i.u32("seq")?,
@@ -571,6 +642,7 @@ pub fn decode_body(body: &[u8]) -> Result<Option<Frame>, ProtoError> {
             instance: i.u64("instance")?,
             token: i.str("token", MAX_NAME)?,
             pid: i.u32("pid")?,
+            proof: i.u64("proof")?,
         },
         t::SPAWNED => Msg::Spawned { seq: i.u32("seq")?, pid: i.u32("pid")?, existed: i.bool("existed")? },
         t::LIST_REPLY => {
@@ -706,8 +778,8 @@ mod tests {
         };
         let tomb = Row { alive: false, exit: Some(256), cwd: None, meta: vec![], ..row.clone() };
         vec![
-            Frame::bare(Msg::Hello { core: CORE, caps: vec!["tail".into(), "meta".into()], build: "rel-1".into(), token: Some("t0k".into()) }),
-            Frame::bare(Msg::Hello { core: 7, caps: vec![], build: String::new(), token: None }),
+            Frame::bare(Msg::Hello { core: CORE, caps: vec!["tail".into(), "meta".into()], build: "rel-1".into(), token: Some("t0k".into()), nonce: 7 }),
+            Frame::bare(Msg::Hello { core: 7, caps: vec![], build: String::new(), token: None, nonce: 0 }),
             Frame::bare(Msg::Spawn {
                 seq: 9,
                 id: "term-1".into(),
@@ -735,7 +807,7 @@ mod tests {
             Frame::new(5, Msg::Reap),
             Frame::new(3, Msg::Tail { seq: 79, max: 12288 }),
             Frame::bare(Msg::Retire { sock: "ptyd-abcd-1.sock".into() }),
-            Frame::bare(Msg::Welcome { core: CORE, caps: vec!["tail".into()], build: "rel-1".into(), instance: u64::MAX, token: "t0k".into(), pid: 99 }),
+            Frame::bare(Msg::Welcome { core: CORE, caps: vec!["tail".into()], build: "rel-1".into(), instance: u64::MAX, token: "t0k".into(), pid: 99, proof: 0xfeed }),
             Frame::new(3, Msg::Spawned { seq: 9, pid: 4242, existed: false }),
             Frame::bare(Msg::ListReply { seq: 77, rows: vec![row, tomb] }),
             Frame::bare(Msg::ListReply { seq: 1, rows: vec![] }),
@@ -750,6 +822,20 @@ mod tests {
             Frame::bare(Msg::Error { seq: 0, message: "no such terminal".into() }),
             Frame::new(3, Msg::TailReply { seq: 79, bytes: b"tail".to_vec() }),
         ]
+    }
+
+    #[test]
+    fn siphash_matches_the_reference_vectors() {
+        // The SipHash paper's key 00..0f; messages 00, 00 01, … (vectors 0, 1, 8).
+        let k0 = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
+        let k1 = u64::from_le_bytes([8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(siphash24(k0, k1, &[]), 0x726f_db47_dd0e_0e31);
+        assert_eq!(siphash24(k0, k1, &[0]), 0x74f8_39c5_93dc_67fd);
+        assert_eq!(siphash24(k0, k1, &[0, 1, 2, 3, 4, 5, 6, 7]), 0x93f5_f579_9a93_2462);
+        let mut secret = [0u8; SECRET_LEN];
+        secret[..16].copy_from_slice(&(0u8..16).collect::<Vec<_>>());
+        assert_eq!(proof(&secret, u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7])), 0x93f5_f579_9a93_2462);
+        assert_ne!(proof(&secret, 1), proof(&secret, 2));
     }
 
     #[test]

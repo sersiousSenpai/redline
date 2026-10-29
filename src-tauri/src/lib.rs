@@ -12117,10 +12117,14 @@ pub fn run() {
                 }
             };
             pty_state.start_events(app.handle().clone());
-            if let Some(lease) = pty_state.adopt_running(&auth::mint_candidate()) {
-                if auth::seed_daemon_token(&lease) {
+            let leases = pty_state.adopt_running(&auth::mint_candidate());
+            if let Some(lease) = leases.first() {
+                if auth::seed_daemon_token(lease) {
                     tracing::info!("adopted the running terminal helper and its token lease");
                 }
+            }
+            for other in leases.iter().skip(1) {
+                auth::accept_leased_token(other);
             }
             // This boot's master token, on disk (0600) for the dev preflight:
             // a later `npm run tauri dev` finds a headless leftover of this
@@ -12150,11 +12154,14 @@ pub fn run() {
             // Hooks that fired while Redline was closed, for the terminals
             // just adopted from the helper (term_attention::replay_spool).
             {
-                let adopted = app.state::<pty::PtyState>().adopted_ids();
-                if !adopted.is_empty() {
-                    let handle = app.handle().clone();
-                    std::thread::spawn(move || term_attention::replay_spool(&handle, &adopted));
-                }
+                let ptys = app.state::<pty::PtyState>().inner().clone();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let adopted = ptys.adopted_terms();
+                    if !adopted.is_empty() {
+                        term_attention::replay_spool(&handle, &adopted);
+                    }
+                });
             }
             app.manage(seatassign::SeatAssignState::new());
 
