@@ -59,9 +59,6 @@ export interface FlowLaunch {
  *  gone when no sample ever saw the agent (killed before the first one). */
 export const LAUNCH_START_GRACE_MS = 10_000;
 
-/** How often a waiting launch's terminal is sampled. */
-export const LAUNCH_SAMPLE_MS = 2_000;
-
 /** One `pty_procs` row, as much as the launch list reads. */
 export interface LaunchProc {
   id: string;

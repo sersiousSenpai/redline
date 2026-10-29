@@ -177,6 +177,15 @@ interface TerminalTabsProps {
    *  by the fleet poll, so the host can follow a `cd` without an `lsof` loop
    *  of its own. */
   onFocusedCwd?: (id: string, cwd: string) => void;
+  /** Terminals whose foreground the host must hear about even while no wall
+   *  is on screen: launches waiting on their plan, whose agent may die
+   *  before it ever speaks (LAST2). The fleet poll keeps sampling while any
+   *  of them is open. */
+  watchIds?: readonly string[];
+  /** Every process sample (`pty_procs`) the fleet poll takes, with when: the
+   *  host reads a waiting launch's agent leaving from it, with no `lsof` of
+   *  its own. */
+  onProcs?: (rows: readonly TermProc[], at: number) => void;
   /** Terminals whose `claude` is currently held awaiting review. Each
    *  such terminal gets its own "plan intercepted by redline" strip inside
    *  its tile, so the grid shows the truth per tile. */
@@ -403,6 +412,8 @@ export const TerminalTabs = memo(
       collapsed,
       onActiveTabChange,
       onFocusedCwd,
+      watchIds,
+      onProcs,
       heldTerminalIds,
       heldPlanTitles,
       projectOptions,
@@ -835,10 +846,13 @@ export const TerminalTabs = memo(
   // have since seen it leave (`agentPresence`): a killed agent's terminal
   // reads exited whatever its last hook was.
   const [presence, setPresence] = useState<ReadonlyMap<string, AgentPresence>>(() => new Map());
+  const onProcsRef = useRef(onProcs);
+  onProcsRef.current = onProcs;
   const sampleProcs = async (): Promise<TermProc[] | null> => {
     const sampledAt = Date.now();
     const rows = await invoke<TermProc[]>("pty_procs");
     if (!Array.isArray(rows)) return null;
+    onProcsRef.current?.(rows, sampledAt);
     setProcs((prev) => mergeProcs(prev, rows));
     setPresence((prev) => agentPresence(prev, rows, attentionRef.current, sampledAt));
     const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
@@ -1082,10 +1096,12 @@ export const TerminalTabs = memo(
   const claimsActivity = useMemo(
     () => tabs.some((t) => {
       if (presence.get(t.id)?.agent) return true;
+      // A launch waiting on its plan: its agent may die before it speaks.
+      if (watchIds?.includes(t.id)) return true;
       const { kind } = effectiveAttention(attention.get(t.id), acks.get(t.id));
       return kind === "working" || kind === "needs-you";
     }),
-    [tabs, attention, acks, presence],
+    [tabs, attention, acks, presence, watchIds],
   );
   usePoll(
     async () => {

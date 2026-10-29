@@ -49,7 +49,7 @@ const click = async (selector: string) => {
 let walls: Record<string, WallData> = {};
 let wallKey: string | null = "w1";
 let changes: [string, WallData][] = [];
-type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null; frame?: WallFrame | null; peers?: PeerWall[]; onPeerFocus?: (key: string) => void };
+type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null; frame?: WallFrame | null; peers?: PeerWall[]; onPeerFocus?: (key: string) => void; watchIds?: string[]; onProcs?: (rows: readonly unknown[], at: number) => void };
 let props: MountProps = {};
 const order = () => (wallKey ? walls[wallKey]?.tiles ?? [] : []);
 function view() {
@@ -72,6 +72,8 @@ function view() {
         frame={props.frame ?? null}
         peers={props.peers}
         onPeerFocus={props.onPeerFocus}
+        watchIds={props.watchIds}
+        onProcs={props.onProcs}
       />
     </StrictMode>
   );
@@ -552,6 +554,22 @@ describe("terminal state", () => {
     // working or needs-you); the one-shot's answer still waits to be read.
     expect(stateOf(agent)).toBe("exited");
     expect(stateOf(oneShot)).toBe("your-turn");
+  });
+
+  // LAST2 walk: a launch whose agent was killed before it spoke stayed
+  // "launching": with no wall on screen nothing sampled its terminal.
+  it("with no wall on screen, a watched terminal (a launch waiting on its plan) keeps the samples coming, each reported to the host", async () => {
+    vi.useFakeTimers();
+    const onProcs = vi.fn();
+    await mount({ collapsed: true, onProcs });
+    const launch = await open(true);
+    mocks.procs = [{ id: launch, fgComm: "zsh", fgIsShell: true, ports: [] }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(onProcs).not.toHaveBeenCalled();
+    await mount({ collapsed: true, onProcs, watchIds: [launch] });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(onProcs).toHaveBeenCalled();
+    expect(onProcs.mock.lastCall![0]).toEqual(mocks.procs);
   });
 
   it("samples one at a time: a slow scan never stacks another behind it", async () => {

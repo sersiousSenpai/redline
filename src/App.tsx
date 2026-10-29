@@ -287,7 +287,7 @@ const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m
 // (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
 // spinners read it. The dock pins itself over an Agent pane's CLI view
 // (lib/stageDock).
-import { LAUNCH_SAMPLE_MS, attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent, type LaunchProc } from "./lib/sessionTerminals";
+import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent, type LaunchProc } from "./lib/sessionTerminals";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path), warmed the moment a
 // selection shows that menu.
@@ -7605,7 +7605,10 @@ function App() {
       return !live.alive;
     };
     const dead: PendingLaunch[] = [];
-    if (died(pendingLaunch, launchConfirmedRef)) {
+    // Its agent gone before the plan (the launch reads stopped) is the same
+    // end as its terminal closing: the flight pill stops counting (LAST2).
+    const stopped = !!pendingLaunch && flowLaunches.some((l) => l.terminalId === pendingLaunch.terminalId && l.stopped);
+    if (died(pendingLaunch, launchConfirmedRef) || stopped) {
       setPendingLaunch(null);
       dead.push(pendingLaunch!);
     }
@@ -7613,9 +7616,9 @@ function App() {
     // pay-back fires. This is the involuntary case: the launch did not survive
     // and nobody chose that, so the composer is refilled ready to re-send. The
     // Drafter's document never left the screen, so its restore is `none`.
-    for (const p of dead) repayPending(p, "Launch cancelled — that terminal was closed");
+    for (const p of dead) repayPending(p, stopped ? "Claude stopped before its plan arrived" : "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveTermIds, pendingLaunch]);
+  }, [liveTermIds, pendingLaunch, flowLaunches]);
   // Flow's launches obey the same law: one whose terminal closed is gone
   // from the stage and the sidebar, since no plan can come from a dead PTY.
   useEffect(() => {
@@ -7624,34 +7627,14 @@ function App() {
   // A launch whose agent dies before its plan (killed, crashed, quit) leaves
   // its shell alive, so the rule above never fires: it read "launching"
   // forever, the flight pill kept counting, and its row could not go
-  // (LAST2). While any launch is waiting, its terminals' foreground is
-  // sampled; the shell back in front is the launch stopped (`procs`).
-  const launchesWaiting = flowLaunches.some((l) => !l.stopped);
-  useEffect(() => {
-    if (!launchesWaiting) return;
-    let alive = true;
-    const sample = () =>
-      void invoke<LaunchProc[]>("pty_procs")
-        .then((rows) => {
-          if (alive && Array.isArray(rows)) noteFlowLaunch({ type: "procs", rows, at: Date.now() });
-        })
-        .catch(() => {});
-    sample();
-    const timer = window.setInterval(sample, LAUNCH_SAMPLE_MS);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [launchesWaiting, noteFlowLaunch]);
-  // The door's flight pill follows it: a launch stopped before its plan is
-  // over, and the sentence comes back as for a closed terminal.
-  useEffect(() => {
-    if (!pendingLaunch) return;
-    if (!flowLaunches.some((l) => l.terminalId === pendingLaunch.terminalId && l.stopped)) return;
-    setPendingLaunch(null);
-    repayPending(pendingLaunch, "Claude stopped before its plan arrived");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowLaunches, pendingLaunch]);
+  // (LAST2). The wall's fleet poll keeps sampling a waiting launch's
+  // terminal (`watchIds`) and reports each sample (`onProcs`); the shell
+  // back in front is the launch stopped (`procs`).
+  const waitingLaunchIds = useStableValue(useMemo(() => flowLaunches.filter((l) => !l.stopped).map((l) => l.terminalId), [flowLaunches]));
+  const noteLaunchProcs = useCallback(
+    (rows: readonly LaunchProc[], at: number) => noteFlowLaunch({ type: "procs", rows, at }),
+    [noteFlowLaunch],
+  );
   // Retry on a launch stopped before its plan: its own command, typed again
   // into the same terminal (the same launch, so the plan still finds its
   // set and its row).
@@ -10231,6 +10214,8 @@ function App() {
             onSessionAction={terminalSessionAction}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
+            watchIds={waitingLaunchIds}
+            onProcs={noteLaunchProcs}
             heldTerminalIds={heldTermIds}
             heldPlanTitles={heldPlanTitles}
             projectOptions={projectOptions}
