@@ -762,7 +762,7 @@ connection. A failed handoff leaves the review pending and reports the error.
 Codex trusts a particular hook definition. A changed command must be reviewed
 again in `/hooks`; installation is not proof of trust. Production code never
 bypasses hook trust. The isolated probe trusts only its own fixture hook.
-Plannotator's command is an executable path; Redline's is the visible curl
+The reference product's command is an executable path; Redline's is the visible curl
 adapter. The different appearance is not a different Codex hook type.
 
 ## Experiment (k) — dynamic workflows through `PreToolUse` hooks (2026-10-03, claude 2.1.289)

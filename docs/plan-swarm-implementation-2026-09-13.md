@@ -1,6 +1,6 @@
 # Four-plan implementation — 2026-09-13
 
-This work implements the browser refresh, removal of the “While you were away” strip, Plannotator conflict detection/removal, and the performance plan. The Joey Home + Tasks product plan was explicitly excluded. Existing unrelated work in both repositories remains intact; no deployment or commit was made.
+This work implements the browser refresh, removal of the “While you were away” strip, conflict detection/removal for another plan-review tool's hooks, and the performance plan. The Joey Home + Tasks product plan was explicitly excluded. Existing unrelated work in both repositories remains intact; no deployment or commit was made.
 
 The subsequent [hook-conflict modal repair](hook-conflict-modal-repair-2026-09-13.md) fixes the warning/confirmation overlapping the window controls. Its 2,008-test run and rebuilt-app measurements supersede the initial frontend verification and artifact hash below.
 

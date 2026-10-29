@@ -16,7 +16,7 @@ import { SettingsMenu } from "../components/SettingsMenu";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const conflict: HookConflict = {
   identity: { id: "a", sourcePath: "/tmp/hooks.json", snapshot: "before" }, backend: "codex", event: "Stop", installationKind: "direct", action: "removeHooks",
-  detail: "Remove only the identified Plannotator plan handlers. Keep the executable and saved reviews.", command: "/bin/plannotator", pluginId: null,
+  detail: "Remove only the identified plan-review handlers. Keep the executable and saved reviews.", command: "/bin/plan-reviewer", pluginId: null,
 };
 const found: HookConflictScan = { ...EMPTY_CONFLICT_SCAN, conflicts: [conflict] };
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -54,7 +54,7 @@ it("scans only after the shell is ready, independently of expensive integration 
   await act(async () => root.render(createElement(Probe, { ready: false }))); await tick();
   expect(invokeMock).not.toHaveBeenCalled();
   await act(async () => root.render(createElement(Probe))); await tick();
-  expect(warning()?.textContent).toContain("Plannotator hooks may interfere with Redline");
+  expect(warning()?.textContent).toContain("Another plan-review hook may interfere with Redline");
   expect(warning()?.textContent).toContain("/tmp/hooks.json");
   expect(modal()).toBeNull();
   expect(invokeMock.mock.calls.every(([name]) => String(name).includes("hook_conflicts"))).toBe(true);
@@ -70,13 +70,13 @@ it("disables repeat removal, displays inline failure, and retains unresolved war
   expect(Array.from(modal()!.querySelectorAll("button")).filter((b) => b.textContent?.includes("Updating"))[0]?.disabled).toBe(true);
   await act(async () => removal.resolve({ results: [{ sourcePath: "/tmp/hooks.json", changed: false, backupPath: null, error: "file changed" }], scan: found }));
   expect(current.pending).toBe(false); expect(modal()?.textContent).toContain("file changed");
-  expect(modal()?.textContent).toContain("Plannotator hooks may interfere");
+  expect(modal()?.textContent).toContain("Another plan-review hook may interfere");
 });
 
 it("replaces a verified resolved warning with a restart notice", async () => {
   await act(async () => root.render(createElement(Probe))); await tick();
   await act(async () => { await current.remove([conflict.identity]); });
-  expect(warning()?.textContent).not.toContain("Plannotator hooks may interfere");
+  expect(warning()?.textContent).not.toContain("Another plan-review hook may interfere");
   expect(warning()?.textContent).toContain("Restart the affected Codex session");
   expect(modal()).toBeNull();
 });
@@ -130,10 +130,10 @@ it("keeps the warning below window controls and opens one explicit details modal
   const dialog = modal();
   expect(dialog).not.toBeNull();
   expect(host.contains(dialog)).toBe(false);
-  expect(host.querySelector("header")?.textContent).not.toContain("Plannotator");
+  expect(host.querySelector("header")?.textContent).not.toContain("plan-review hook");
   expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
   expect(registerOverlay).toHaveBeenCalledWith(1);
-  await act(async () => button("Uninstall Plannotator hooks").click());
+  await act(async () => button("Uninstall the conflicting hooks").click());
   expect(modal()).toBe(dialog);
   expect(dialog?.querySelector('[role="status"]')?.textContent).toContain("Restart the affected Codex session");
   expect(warning()?.textContent).toContain("Hook changes saved");
@@ -153,7 +153,7 @@ it("does not reopen dismissed findings on refresh, but Settings can reopen them"
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!.click());
   await act(async () => button("Review…").click());
   expect(host.querySelector('[aria-expanded="true"]')).toBeNull();
-  expect(modal()?.textContent).toContain("Plannotator hooks may interfere");
+  expect(modal()?.textContent).toContain("Another plan-review hook may interfere");
   await act(async () => { modal()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
   expect(modal()).toBeNull();
   expect(document.activeElement).toBe(host.querySelector('[aria-haspopup="menu"]'));
@@ -183,7 +183,7 @@ it("contains keyboard focus and prevents dismissal while removal is pending", as
     last.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
   });
   expect(document.activeElement).toBe(modal()!.querySelector("button"));
-  await act(async () => button("Uninstall Plannotator hooks").click());
+  await act(async () => button("Uninstall the conflicting hooks").click());
   await act(async () => {
     modal()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     modal()!.parentElement!.click();

@@ -57,12 +57,12 @@ export function HookConflictModal({ health }: { health: HookConflictHealth }) {
         style={{ width: "min(620px, 100%)", maxHeight: "calc(100dvh - 96px)", overflow: "hidden", borderColor: "var(--color-rule)", background: "var(--color-bg-elevated)", color: "var(--color-ink)", outline: "none" }}>
         <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-3">
           <h2 id={titleId} className="font-serif font-semibold" style={{ fontSize: 20 }}>
-            {restart && !hasIssue ? "Hook changes saved" : scan.conflicts.length ? "Plannotator hook conflict" : "Integration hooks"}
+            {restart && !hasIssue ? "Hook changes saved" : scan.conflicts.length ? "Plan-review hook conflict" : "Integration hooks"}
           </h2>
           <Button variant="ghost" ariaLabel="Close integration hooks" disabled={pending} onClick={closeDialog} style={{ color: "var(--color-ink-muted)", padding: 4 }}>✕</Button>
         </div>
         <div className="px-6 pb-4" style={{ overflowY: "auto", minHeight: 0, fontSize: 13, lineHeight: 1.55 }}>
-          {scan.conflicts.length > 0 && <p style={{ margin: "0 0 16px" }}>Plannotator hooks may interfere with Redline. Both integrations can intercept plan review, causing duplicate review windows or unexpected waits.</p>}
+          {scan.conflicts.length > 0 && <p style={{ margin: "0 0 16px" }}>Another plan-review hook may interfere with Redline. Both integrations can intercept plan review, causing duplicate review windows or unexpected waits.</p>}
           {groups.map((conflicts) => {
             const first = conflicts[0]; const path = first.identity.sourcePath;
             return <details key={`${path}-${first.action}`} open className="rounded-md border p-3" style={{ marginTop: 10, borderColor: "var(--color-rule)", background: "var(--color-paper)" }}>
@@ -71,7 +71,7 @@ export function HookConflictModal({ health }: { health: HookConflictHealth }) {
               {first.command && <code style={{ display: "block", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "var(--color-ink-muted)", fontSize: 12, marginBottom: 12 }}>{Array.from(new Set(conflicts.map((c) => c.command))).join("\n")}</code>}
               <div className="flex gap-2 flex-wrap">
                 {first.action !== "view" && <Button size="sm" disabled={pending} onClick={() => void health.remove(conflicts.map((c) => c.identity))}>
-                  {pending ? "Updating hooks…" : first.action === "disablePlugin" ? "Disable Plannotator plugin" : "Uninstall Plannotator hooks"}
+                  {pending ? "Updating hooks…" : first.action === "disablePlugin" ? "Disable the plan-review plugin" : "Uninstall the conflicting hooks"}
                 </Button>}
                 <Button size="sm" disabled={pending} onClick={() => void view(path)}>View configuration</Button>
               </div>
@@ -84,7 +84,7 @@ export function HookConflictModal({ health }: { health: HookConflictHealth }) {
           {(error || viewError) && <p role="alert" style={{ color: "var(--color-warning)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginTop: 12 }}>{error || viewError}</p>}
           {restart && <p role="status" style={{ margin: hasIssue ? "16px 0 0" : 0 }}>Hook changes saved and checked. Restart the affected {affected} session to load them.</p>}
           {!health.checked && <p role="status">Checking integration hooks…</p>}
-          {health.checked && !hasIssue && !restart && <p style={{ margin: 0 }}>No configured Plannotator plan hooks detected for this backend and project.</p>}
+          {health.checked && !hasIssue && !restart && <p style={{ margin: 0 }}>No other plan-review hooks detected for this backend and project.</p>}
           {health.watchError && <p style={{ color: "var(--color-ink-muted)" }}>Live configuration watching is unavailable. Redline checks again when the window regains focus.</p>}
         </div>
         <div className="flex items-center justify-end gap-2 px-6 py-4 border-t" style={{ borderColor: "var(--color-rule)" }}>

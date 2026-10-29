@@ -16,7 +16,7 @@ export function HookConflictWarning({ health }: { health: HookConflictHealth }) 
     style={{ flexShrink: 0, padding: "8px 14px", borderBottom: "1px solid var(--color-rule)", background: "var(--color-paper)", color: "var(--color-ink)", fontSize: 12, lineHeight: 1.4 }}>
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
       <div style={{ minWidth: 0 }}>
-        <strong>{health.scan.conflicts.length ? "Plannotator hooks may interfere with Redline" : health.hasIssue ? "Could not inspect integration hooks" : "Hook changes saved"}</strong>
+        <strong>{health.scan.conflicts.length ? "Another plan-review hook may interfere with Redline" : health.hasIssue ? "Could not inspect integration hooks" : "Hook changes saved"}</strong>
         {health.scan.conflicts.length > 0 && <div>Both integrations can intercept plan review, causing duplicate review windows or unexpected waits.</div>}
         {health.restart && <div>Restart the affected {affected} session to load the verified hook changes.</div>}
         {paths.length > 0 && <details><summary style={{ cursor: "pointer" }}>Affected configurations ({paths.length})</summary>
