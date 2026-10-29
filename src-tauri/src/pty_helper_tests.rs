@@ -78,7 +78,9 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        if let Some(c) = lock(&self.state.helpers.active).clone() {
+        let mut all: Vec<Arc<Client>> = lock(&self.state.helpers.active).iter().cloned().collect();
+        all.extend(lock(&self.state.helpers.retiring).iter().cloned());
+        for c in all {
             c.kill_where(true);
             c.flush(Duration::from_millis(200));
             // SAFETY: signalling the helper this rig started.
@@ -341,4 +343,49 @@ fn a_quit_keeps_what_persists_and_stop_all_ends_everything() {
     }
     lock(&next.state.helpers.active).take();
     lock(&last.state.helpers.active).take();
+}
+
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[test]
+fn an_upgrade_retires_the_old_helper_which_keeps_its_terminals_and_leaves_after_the_last() {
+    let Some(rig) = Rig::new("retire") else { return };
+    let (a, fa) = recording_channel();
+    rig.spawn("old", CAT, a);
+    wait_for(&fa, |x| x.ends_with(b"ready"));
+    let old = rig.client();
+    let old_pid = old.welcome.pid;
+    // What `ensure` does with a helper whose core or caps this build can't use.
+    let fresh = rig.state.helpers.retire_and_replace(old.clone()).unwrap();
+    assert_ne!(fresh.welcome.pid, old_pid, "a fresh helper at the primary socket");
+    assert!(rig.state.is_live("old"), "the old terminal stays reachable");
+    pty_write_bytes(&rig.state, "old", b"still").unwrap();
+    assert!(wait_for(&fa, |x| x.ends_with(b"still")).ends_with(b"still"), "and typed into");
+    let (b, fb) = recording_channel();
+    rig.spawn("new", CAT, b);
+    wait_for(&fb, |x| x.ends_with(b"ready"));
+    assert!(fresh.is_live("new") && !old.is_live("new"), "new terminals go to the fresh helper");
+
+    // A relaunch finds both: the primary and the retiring socket.
+    let cfg = rig.state.helpers.cfg.clone().unwrap();
+    assert_eq!(cfg.retired_socks(), vec![cfg.retired_sock(old.welcome.instance)]);
+    let next = Rig::with_cfg(cfg, rig.dir.join("unused"));
+    assert!(next.state.adopt_running("x").is_some());
+    assert!(next.state.is_live("old") && next.state.is_live("new"));
+    assert_eq!(lock(&next.state.helpers.retiring).len(), 1);
+    lock(&next.state.helpers.active).take();
+    lock(&next.state.helpers.retiring).clear();
+
+    // Its last terminal ends: the retiring helper goes, and its socket.
+    old.kill("old");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_alive(old_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!pid_alive(old_pid), "a retiring helper exits after its last terminal");
+    assert!(rig.state.helpers.cfg.as_ref().unwrap().retired_socks().is_empty());
+    assert!(rig.state.is_live("new"));
 }

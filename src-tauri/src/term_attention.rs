@@ -410,6 +410,48 @@ pub(crate) async fn handle_event(
     Json(json!({}))
 }
 
+/// A hook that fired while Redline was closed left its payload in the
+/// attention spool (`hook::SPOOL_DIR`, one file per terminal, the newest
+/// event only). A relaunch that adopted those terminals replays each as if
+/// it had just been POSTed: a CLI that blocked on a permission while
+/// Redline was away reads "needs you" again. Spooled files of terminals no
+/// one adopted are dropped once a day old; what is replayed is removed.
+pub fn replay_spool(app: &AppHandle, live: &[String]) {
+    let Some(dir) = spool_dir() else { return };
+    for (terminal_id, payload) in take_spool(&dir, live, std::time::SystemTime::now()) {
+        observe_claude(app, &terminal_id, &payload);
+        crate::convo::observe_hook(app, &terminal_id, None, &payload);
+    }
+}
+
+fn spool_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".redline/attention-spool"))
+}
+
+/// The spool's replayable entries for `live` terminals, removed as they are
+/// read; stale entries of other terminals are removed too.
+pub(crate) fn take_spool(dir: &Path, live: &[String], now: std::time::SystemTime) -> Vec<(String, Value)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")).map(str::to_string) else { continue };
+        if live.contains(&id) {
+            if let Some(payload) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+                out.push((id, payload));
+            }
+            let _ = std::fs::remove_file(&path);
+        } else {
+            let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age > Duration::from_secs(24 * 3600));
+            if old {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// A `working` or `needs-you` at least this old whose shell is back in the
 /// foreground is over: its agent exited, or was interrupted and then quit.
 /// Younger ones are left alone — the scan can land between a prompt's hook
@@ -492,6 +534,27 @@ pub fn set_attention_badge(window: tauri::Window, count: u32) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spool_gives_back_each_adopted_terminals_newest_event_once() {
+        let dir = std::env::temp_dir().join(format!("rl-spool-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kept.json"), br#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission"}"#).unwrap();
+        std::fs::write(dir.join("other.json"), b"{}").unwrap();
+        std::fs::write(dir.join("broken.json"), b"{not json").unwrap();
+        let live = vec!["kept".to_string(), "broken".to_string()];
+        let got = take_spool(&dir, &live, std::time::SystemTime::now());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "kept");
+        assert!(matches!(from_claude_hook(&got[0].1, None), Some(Attention::NeedsYou { .. })), "it lights needs-you");
+        assert!(!dir.join("kept.json").exists() && !dir.join("broken.json").exists(), "read once");
+        assert!(dir.join("other.json").exists(), "another app's terminal keeps its entry for a day");
+        let later = std::time::SystemTime::now() + Duration::from_secs(25 * 3600);
+        assert!(take_spool(&dir, &live, later).is_empty());
+        assert!(!dir.join("other.json").exists(), "a day-old entry nobody adopted goes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn note(kind: &str, message: &str) -> Value {
         json!({"hook_event_name": "Notification", "notification_type": kind, "message": message, "session_id": "s"})

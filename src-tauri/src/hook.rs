@@ -611,13 +611,49 @@ pub const ATTENTION_EVENTS: [&str; 5] = ["Notification", "Stop", "UserPromptSubm
 /// question tool before it runs.
 const ASK_HOOKS: [(&str, &str); 2] = [("PermissionRequest", "*"), ("PreToolUse", "^AskUserQuestion$")];
 
-/// Redirects the response away and keeps any failure silent.
+/// Redirects the response away and keeps any failure silent (the command's
+/// tail before the attention spool).
 const ATTENTION_TAIL: &str = " >/dev/null 2>&1 || true";
 
 /// Skips the POST outright for a session outside the dock, which has no
-/// terminal to name.
+/// terminal to name (the guard before the attention spool).
 fn attention_guard() -> String {
     format!("[ -n \"${{{}:-}}\" ] && ", crate::term_attention::ENV_TERMINAL_ID)
+}
+
+/// Where a hook that finds Redline closed leaves its payload: one file per
+/// terminal, the newest event only (`term_attention::replay_spool` reads it
+/// when a relaunched app adopts that terminal). Same-user, under the
+/// directory Redline's extensions already use.
+pub const SPOOL_DIR: &str = "$HOME/.redline/attention-spool";
+
+/// The spooling command's head: the guard, then the payload read once, so
+/// it can be both POSTed and, should that fail, kept.
+fn spool_guard() -> String {
+    format!("{}p=$(cat) && {{ printf '%s' \"$p\" | ", attention_guard())
+}
+
+/// The spooling command's tail. A POST that can't connect (Redline is
+/// closed, its terminals kept by the helper) writes the payload to the
+/// spool, unless a nested `claude -p` sent it (`sdk-cli`, never this
+/// terminal's agent) or the terminal id is anything but a plain name.
+fn spool_tail() -> String {
+    format!(
+        " >/dev/null 2>&1 || {{ [ \"${{CLAUDE_CODE_ENTRYPOINT:-}}\" = sdk-cli ] || case \"${env}\" in *[!A-Za-z0-9_-]*) ;; \
+         *) d=\"{SPOOL_DIR}\"; mkdir -p \"$d\" && printf '%s' \"$p\" > \"$d/${env}.json\";; esac; }}; }}; true",
+        env = crate::term_attention::ENV_TERMINAL_ID,
+    )
+}
+
+fn attention_invocation() -> String {
+    format!(
+        "curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
+         -H \"{header}: ${{{env}}}\" -H \"{entry}: ${{CLAUDE_CODE_ENTRYPOINT:-}}\" \
+         --data-binary @- {TERM_EVENT_URL}",
+        header = crate::term_attention::HEADER,
+        env = crate::term_attention::ENV_TERMINAL_ID,
+        entry = crate::term_attention::ENTRYPOINT_HEADER,
+    )
 }
 
 /// The command each attention hook runs. The headers come from the
@@ -625,17 +661,11 @@ fn attention_guard() -> String {
 /// so the shell expands them at fire time. Unlike the capture command,
 /// nothing is echoed: an async hook's JSON output reaches the model on its
 /// next turn, and attention has nothing to tell the model. `--max-time 1` and
-/// `|| true` keep a closed or slow daemon silent.
+/// the trailing `true` keep a closed or slow daemon silent; a closed one gets
+/// the payload spooled instead (PTY helper P3: a CLI that blocks on a
+/// permission while Redline is closed lights "needs you" on the relaunch).
 fn attention_command() -> String {
-    format!(
-        "{guard}curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
-         -H \"{header}: ${{{env}}}\" -H \"{entry}: ${{CLAUDE_CODE_ENTRYPOINT:-}}\" \
-         --data-binary @- {TERM_EVENT_URL}{ATTENTION_TAIL}",
-        guard = attention_guard(),
-        header = crate::term_attention::HEADER,
-        env = crate::term_attention::ENV_TERMINAL_ID,
-        entry = crate::term_attention::ENTRYPOINT_HEADER,
-    )
+    format!("{}{}{}", spool_guard(), attention_invocation(), spool_tail())
 }
 
 /// One attention handler, as written under each of `ATTENTION_EVENTS`.
@@ -685,6 +715,11 @@ fn terminal_hooks() -> Vec<(&'static str, Option<&'static str>, Value)> {
 fn is_attention_handler(handler: &Value) -> bool {
     handler.get("type").and_then(Value::as_str) == Some("command")
         && handler.get("command").and_then(Value::as_str).is_some_and(|command| {
+            // The spooling vintage first, then the plain one before it.
+            let (spool_head, spool_end) = (spool_guard(), spool_tail());
+            if let Some(invocation) = command.strip_prefix(spool_head.as_str()).and_then(|c| c.strip_suffix(spool_end.as_str())) {
+                return crate::hook_conflicts::targets_url(invocation, TERM_EVENT_URL);
+            }
             let guard = attention_guard();
             let invocation = command.strip_prefix(guard.as_str()).unwrap_or(command);
             let invocation = invocation.strip_suffix(ATTENTION_TAIL).unwrap_or(invocation);
@@ -1107,18 +1142,78 @@ mod tests {
     /// so a change here must be deliberate.
     #[test]
     fn attention_command_is_pinned() {
+        // Changed deliberately for the PTY helper (P3): a POST that finds
+        // Redline closed spools its payload. Every install is rewritten at
+        // the next boot.
         assert_eq!(
             attention_command(),
-            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && curl -s --max-time 1 -X POST \
+            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && p=$(cat) && { printf '%s' \"$p\" | curl -s --max-time 1 -X POST \
              -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
              -H \"X-Redline-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}\" \
-             --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1 || true"
+             --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1 || { [ \"${CLAUDE_CODE_ENTRYPOINT:-}\" = sdk-cli ] || \
+             case \"$REDLINE_TERMINAL_ID\" in *[!A-Za-z0-9_-]*) ;; *) d=\"$HOME/.redline/attention-spool\"; mkdir -p \"$d\" && \
+             printf '%s' \"$p\" > \"$d/$REDLINE_TERMINAL_ID.json\";; esac; }; }; true"
         );
+        // The plain vintage before it is still ours, so an upgrade replaces
+        // it rather than adding a second handler.
+        let plain = json!({ "type": "command", "async": true, "timeout": 5, "command": format!(
+            "{}curl -s --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${{REDLINE_TERMINAL_ID}}\" -H \"X-Redline-Entrypoint: ${{CLAUDE_CODE_ENTRYPOINT:-}}\" --data-binary @- {TERM_EVENT_URL}{ATTENTION_TAIL}",
+            attention_guard()
+        ) });
+        assert!(is_attention_handler(&plain));
         let handler = attention_handler();
         assert_eq!(handler["async"], true, "an attention hook must never hold a turn");
         assert_eq!(handler["type"], "command");
         assert!(is_attention_handler(&handler));
         assert!(!is_ask_handler(&handler));
+    }
+
+    /// The attention command run by a real shell: a POST that reaches the
+    /// daemon spools nothing; one that can't connect (Redline closed) leaves
+    /// the payload for the relaunch; a nested run or an odd terminal id
+    /// leaves nothing.
+    #[test]
+    fn a_hook_that_finds_redline_closed_spools_its_payload() {
+        use std::io::{Read, Write};
+        let home = std::env::temp_dir().join(format!("rl-spool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let run = |url: &str, terminal: &str, entrypoint: &str| {
+            let command = attention_command().replace(TERM_EVENT_URL, url);
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env("HOME", &home)
+                .env("REDLINE_TERMINAL_ID", terminal)
+                .env("CLAUDE_CODE_ENTRYPOINT", entrypoint)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(br#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#).unwrap();
+            assert!(child.wait().unwrap().success(), "the hook never fails");
+        };
+        let spooled = |terminal: &str| std::fs::read_to_string(home.join(".redline/attention-spool").join(format!("{terminal}.json"))).ok();
+        // Port 9 on loopback: nothing listens.
+        run("http://127.0.0.1:9/v1/term/event", "t-closed", "cli");
+        assert_eq!(spooled("t-closed").as_deref(), Some(r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#));
+        run("http://127.0.0.1:9/v1/term/event", "t-nested", "sdk-cli");
+        assert_eq!(spooled("t-nested"), None, "a nested claude -p is never this terminal's agent");
+        run("http://127.0.0.1:9/v1/term/event", "../escape", "cli");
+        assert!(!home.join(".redline/escape.json").exists() && spooled("../escape").is_none());
+        // A daemon that answers: the POST lands, nothing is spooled.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/term/event", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = s.read(&mut buf).unwrap();
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        run(&url, "t-open", "cli");
+        let request = server.join().unwrap();
+        assert!(request.contains("X-Redline-Terminal: t-open"), "{request}");
+        assert_eq!(spooled("t-open"), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The ask commands, byte for byte, for the same reason: a changed byte

@@ -12147,6 +12147,15 @@ pub fn run() {
                 });
             }
             app.manage(convo::ConvoState::default());
+            // Hooks that fired while Redline was closed, for the terminals
+            // just adopted from the helper (term_attention::replay_spool).
+            {
+                let adopted = app.state::<pty::PtyState>().adopted_ids();
+                if !adopted.is_empty() {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || term_attention::replay_spool(&handle, &adopted));
+                }
+            }
             app.manage(seatassign::SeatAssignState::new());
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));

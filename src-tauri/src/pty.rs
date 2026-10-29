@@ -132,10 +132,38 @@ impl Helpers {
         let client = Client::connect_or_spawn(cfg, token, sink.clone())
             .or_else(|_| Client::connect_or_spawn(cfg, token, sink))?;
         if !client.welcome.current() {
-            return Err(format!("the running terminal helper ({}, core {}) can't take new terminals", client.welcome.build, client.welcome.core));
+            return self.retire_and_replace(client);
         }
         self.adopt(client.clone());
         Ok(client)
+    }
+
+    /// The upgrade handshake (plan P10). A helper with another frame core, or
+    /// without a cap this build needs, keeps the terminals it has: it moves
+    /// to a socket of its own (`Retire`, frozen in the core), stays listed,
+    /// attachable and killable, and exits after its last terminal. New
+    /// terminals go to a fresh helper at the primary socket.
+    fn retire_and_replace(&self, old: Arc<Client>) -> Result<Arc<Client>, String> {
+        let cfg = self.cfg.as_ref().ok_or("no terminal helper configured")?;
+        let sink = lock(&self.sink).clone().ok_or("terminal helper events are not wired")?;
+        tracing::info!(build = %old.welcome.build, core = old.welcome.core, "retiring the running terminal helper");
+        old.retire(&cfg.retired_sock(old.welcome.instance))?;
+        old.flush(Duration::from_millis(500));
+        crate::auth::accept_leased_token(&old.welcome.token);
+        lock(&self.retiring).push(old);
+        // The old helper unlinks the primary as it moves; wait for that, so
+        // the fresh one never connects back to it.
+        let primary = cfg.dir.join(&cfg.sock);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while primary.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let fresh = Client::connect_or_spawn(cfg, crate::auth::daemon_token(), sink)?;
+        if !fresh.welcome.current() {
+            return Err(format!("a fresh terminal helper ({}) still can't take new terminals", fresh.welcome.build));
+        }
+        self.adopt(fresh.clone());
+        Ok(fresh)
     }
 
     fn adopt(&self, client: Arc<Client>) {
@@ -212,21 +240,47 @@ impl PtyState {
             return None;
         }
         let cfg = self.helpers.cfg.as_ref()?;
-        if !cfg.dir.join(&cfg.sock).exists() {
-            return None;
-        }
         let sink = lock(&self.helpers.sink).clone()?;
-        match Client::connect(cfg, candidate_token, sink) {
-            Ok(client) => {
-                let token = client.welcome.token.clone();
-                *lock(&self.helpers.active) = Some(client);
-                (!token.is_empty()).then_some(token)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "could not adopt the running terminal helper");
-                None
+        let mut lease = None;
+        // Retiring helpers first (an upgrade left them holding older
+        // terminals): listed, attachable, killable, given nothing new.
+        for name in cfg.retired_socks() {
+            match Client::connect(&cfg.at_sock(&name), candidate_token, sink.clone()) {
+                Ok(client) => {
+                    lease.get_or_insert_with(|| client.welcome.token.clone());
+                    crate::auth::accept_leased_token(&client.welcome.token);
+                    lock(&self.helpers.retiring).push(client);
+                }
+                Err(e) => tracing::warn!(error = %e, sock = %name, "could not reach a retiring terminal helper"),
             }
         }
+        if cfg.dir.join(&cfg.sock).exists() {
+            match Client::connect(cfg, candidate_token, sink) {
+                Ok(client) => {
+                    let token = client.welcome.token.clone();
+                    if client.welcome.current() {
+                        lease = Some(token);
+                        *lock(&self.helpers.active) = Some(client);
+                    } else {
+                        // Not for new terminals: it retires now and a fresh
+                        // helper starts with the first new terminal (never
+                        // here: nothing is spawned at boot).
+                        lease.get_or_insert(token);
+                        if let Err(e) = client.retire(&cfg.retired_sock(client.welcome.instance)) {
+                            tracing::warn!(error = %e, "could not retire the running terminal helper");
+                        }
+                        lock(&self.helpers.retiring).push(client);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "could not adopt the running terminal helper"),
+            }
+        }
+        lease.filter(|t| !t.is_empty())
+    }
+
+    /// The ids of every live terminal a helper holds: what a launch adopted.
+    pub fn adopted_ids(&self) -> Vec<String> {
+        self.helpers.clients().iter().flat_map(|c| c.terms()).filter(|t| t.alive).map(|t| t.id).collect()
     }
 
     /// The app is exiting. `stop_all`: every terminal ends (⌥⌘Q, or keeping

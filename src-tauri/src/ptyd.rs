@@ -88,6 +88,24 @@ impl HelperConfig {
         format!("{stem}-{instance:016x}.sock")
     }
 
+    /// The sockets retiring helpers of this app serve (`ptyd-<h>-*.sock`),
+    /// by name: each still holds terminals an older build started.
+    pub fn retired_socks(&self) -> Vec<String> {
+        let stem = format!("{}-", self.sock.trim_end_matches(".sock"));
+        let Ok(dir) = std::fs::read_dir(&self.dir) else { return Vec::new() };
+        let mut names: Vec<String> = dir
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.starts_with(&stem) && n.ends_with(".sock"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// This config pointed at another socket in the same directory.
+    pub fn at_sock(&self, sock: &str) -> Self {
+        Self { sock: sock.to_string(), ..self.clone() }
+    }
+
     fn spawn_args(&self) -> Vec<String> {
         vec![
             "--dir".into(),
