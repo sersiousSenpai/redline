@@ -85,11 +85,11 @@
    step down so the row still fits whole at DOOR_MIN_W. */
 .rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { gap: 5px; }
 /* Every chip at its natural width, never "Cla…" (LAST2): only the
-   project's name gives way, and only past what a repo name needs. Beside
+   project's name gives way, and only when the row has no room left. Beside
    another pane (`is-chips-tight`, under 640 px) the chips draw tighter and
    History is its icon, so the row fits whole from DOOR_MIN_W up. */
 .rl-monochat .rl-fd-tools > * { min-width: 0; flex-shrink: 0; }
-.rl-monochat .rl-fd-tools > .rl-composer-chip[data-chip="project"] { flex-shrink: 1; min-width: 96px; }
+.rl-monochat .rl-fd-tools > .rl-composer-chip[data-chip="project"] { flex-shrink: 1; min-width: 0; }
 .rl-monochat .rl-frontdoor.is-chips-tight .rl-composer-chip { gap: 5px; padding-left: 8px; padding-right: 8px; }
 .rl-monochat .rl-frontdoor.is-chips-tight .rl-composer-chip[data-chip="history"] > span { display: none; }
 .rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }

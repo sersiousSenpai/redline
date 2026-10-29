@@ -134,7 +134,7 @@ describe("the door at its minimum (D40)", () => {
   it("draws every chip at its natural width: only the project's name gives way, History is its icon beside another pane", () => {
     const island = css("src/components/MonochatIsland.css");
     expect(island).toMatch(/\.rl-monochat \.rl-fd-tools > \* \{ min-width: 0; flex-shrink: 0; \}/);
-    expect(island).toMatch(/\.rl-fd-tools > \.rl-composer-chip\[data-chip="project"\] \{ flex-shrink: 1; min-width: 96px; \}/);
+    expect(island).toMatch(/\.rl-fd-tools > \.rl-composer-chip\[data-chip="project"\] \{ flex-shrink: 1; min-width: 0; \}/);
     expect(island).toMatch(/\.is-chips-tight \.rl-composer-chip\[data-chip="history"\] > span \{ display: none; \}/);
   });
 });
