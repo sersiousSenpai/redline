@@ -79,11 +79,11 @@ const press = (el: Element, key: string) =>
 // A row's ⋯ is out only while the row is hovered or focused (D37).
 const focus = (el: Element | null) => act(async () => { (el as HTMLElement).focus(); });
 const dots = async (row: HTMLElement) => {
-  await focus(row.querySelector("button.rl-sb-plan, .rl-sb-row"));
+  await focus(row.querySelector("button.hover-elevated, .rl-sb-row"));
   return row.querySelector<HTMLButtonElement>(".rl-sb-dots")!;
 };
 const planRow = (title: string) =>
-  [...host.querySelectorAll<HTMLElement>("li.rl-session-row")].find((li) => li.querySelector(".rl-sb-plan-title")?.textContent === title)!;
+  [...host.querySelectorAll<HTMLElement>("li.rl-session-row")].find((li) => li.querySelector(".truncate")?.textContent === title)!;
 const lightRow = (title: string) =>
   [...host.querySelectorAll<HTMLElement>(".rl-sb-item")].find((li) => li.querySelector(".rl-sb-title")?.textContent === title)!;
 
@@ -127,7 +127,7 @@ describe("the sessions list renders only the rows that changed", () => {
   it("row clicks still reach the right session", async () => {
     const list = [summary("a", 30), summary("b", 20)];
     await render(list);
-    const rows = host.querySelectorAll<HTMLButtonElement>("li.rl-session-row > button.rl-sb-plan");
+    const rows = host.querySelectorAll<HTMLButtonElement>("li.rl-session-row > button.hover-elevated");
     await act(async () => rows[1].click());
     expect(handlers.onSelect).toHaveBeenLastCalledWith("b");
   });
@@ -191,17 +191,17 @@ describe("the classic row's ⋯ menu", () => {
     await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(withRename.onRename).toHaveBeenCalledWith("a", "Mine");
     expect(host.querySelector(".rl-row-rename")).toBeNull();
-    expect(document.activeElement).toBe(host.querySelector("li.rl-session-row > button.rl-sb-plan"));
+    expect(document.activeElement).toBe(host.querySelector("li.rl-session-row > button.hover-elevated"));
   });
 
   it("⌫ on a focused row asks in place; Cancel backs out, Delete deletes, and a held plan says it releases Claude", async () => {
     await renderWith([summary("a", 2), summary("h", 1, 0, { held: true })]);
-    await press(planRow("Plan a").querySelector("button.rl-sb-plan")!, "Backspace");
+    await press(planRow("Plan a").querySelector("button.hover-elevated")!, "Backspace");
     expect(planRow("Plan a").querySelector(".rl-session-confirm-yes")!.textContent).toBe("Delete");
     await click(planRow("Plan a").querySelector(".rl-session-confirm-no"));
     expect(planRow("Plan a").querySelector(".rl-session-confirm")).toBeNull();
     expect(handlers.onDelete).not.toHaveBeenCalled();
-    await press(planRow("Plan h").querySelector("button.rl-sb-plan")!, "Delete");
+    await press(planRow("Plan h").querySelector("button.hover-elevated")!, "Delete");
     expect(planRow("Plan h").querySelector(".rl-session-confirm-yes")!.textContent).toBe("Delete (release Claude)");
     await click(planRow("Plan h").querySelector(".rl-session-confirm-yes"));
     expect(handlers.onDelete).toHaveBeenCalledWith("h");
@@ -461,7 +461,7 @@ describe("the grouped sidebar", () => {
     expect(terms[3].querySelector(".rl-sb-term-state")!.textContent).toBe("exited");
     // The row itself wears the needs dot for its blocked terminal, outside
     // any Needs you section.
-    expect(planRow("Plan a").querySelector("button.rl-sb-plan .rl-sb-need")).not.toBeNull();
+    expect(planRow("Plan a").querySelector("button.hover-elevated .rl-sb-need")).not.toBeNull();
     expect(planRow("Plan b").querySelector(".rl-sb-term, .rl-sb-need")).toBeNull();
     expect(host.querySelector(".rl-sb-section[data-kind='needs']")).toBeNull();
     await click(terms[2].querySelector(".rl-sb-term-row"));
@@ -472,13 +472,10 @@ describe("the grouped sidebar", () => {
     await renderWith({ sessions: [summary("a", 2), summary("b", 1)], needs: { "plan:b": "Question" }, working: new Set(["plan:a"]) });
     const labels = [...host.querySelectorAll(".rl-sb-label span[id]")].map((l) => l.textContent);
     expect(labels).toEqual(["Needs you", "redline"]);
-    expect(host.querySelector(".rl-sb-section[data-kind='needs'] .rl-session-row .rl-sb-plan-title")!.textContent).toBe("Plan b");
-    expect(planRow("Plan b").querySelector(".rl-sb-mark .rl-sb-need")).not.toBeNull();
-    // Outside its project's group, the phrase names the project.
-    expect(planRow("Plan b").querySelector(".rl-sb-phrase")!.textContent).toBe("redline · Waiting on you");
-    expect(planRow("Plan b").querySelector(".rl-sb-phrase")!.getAttribute("title")).toBe("Claude asked you something and is waiting");
-    expect(planRow("Plan a").querySelector(".rl-sb-mark .rl-spinner")).not.toBeNull();
-    expect(planRow("Plan a").querySelector(".rl-sb-phrase")!.textContent).toBe("Revising");
+    expect(host.querySelector(".rl-sb-section[data-kind='needs'] .rl-session-row .truncate")!.textContent).toBe("Plan b");
+    expect(planRow("Plan b").querySelector(".rl-sb-need")).not.toBeNull();
+    expect(planRow("Plan b").querySelector(".rl-sb-needword")!.textContent).toBe("Needs you");
+    expect(planRow("Plan a").querySelector(".rl-spinner")).not.toBeNull();
   });
 
   it("a chat row: opens the chat, and its menu archives and deletes the chat", async () => {
@@ -540,7 +537,7 @@ describe("the grouped sidebar", () => {
     });
     const section = host.querySelector(".rl-sb-section[data-kind='project']")!;
     expect(section.querySelector(".rl-sb-label span[id]")!.textContent).toBe("redline");
-    expect(section.querySelector(".rl-session-row .rl-sb-plan-title")!.textContent).toBe("Plan a");
+    expect(section.querySelector(".rl-session-row .truncate")!.textContent).toBe("Plan a");
     const launch = lightRow("Plan the roadmap");
     expect(section.contains(launch)).toBe(true);
     expect(launch.dataset.kind).toBe("launch");
@@ -578,7 +575,7 @@ describe("the grouped sidebar", () => {
       activeLaunchId: "t",
     });
     expect(host.querySelectorAll(".rl-sb-item")).toHaveLength(0);
-    expect(planRow("The plan").querySelector("button.rl-sb-plan")!.getAttribute("aria-current")).toBe("page");
+    expect(planRow("The plan").querySelector("button.hover-elevated")!.getAttribute("aria-current")).toBe("page");
   });
 
   it("the open plan's versions nest under it and show the revision clicked", async () => {
@@ -626,8 +623,8 @@ describe("the grouped sidebar", () => {
     const onCombine = vi.fn();
     await renderWith({ sessions: [summary("a", 3), summary("b", 2), summary("c", 1)], onCombine });
     await click(host.querySelector(".rl-cmb-enter"));
-    await click(planRow("Plan c").querySelector("button.rl-sb-plan"));
-    await click(planRow("Plan a").querySelector("button.rl-sb-plan"));
+    await click(planRow("Plan c").querySelector("button.hover-elevated"));
+    await click(planRow("Plan a").querySelector("button.hover-elevated"));
     expect(handlers.onSelect).not.toHaveBeenCalled();
     expect(planRow("Plan c").querySelector(".rl-cmb-node")!.textContent).toBe("1");
     await click(host.querySelector(".rl-cmb-go"));
@@ -659,7 +656,7 @@ describe("a row's ⋯ (D37)", () => {
   const key = (el: Element, init: KeyboardEventInit) =>
     act(async () => { el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init })); });
   const labels = () => [...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent);
-  const rowButton = () => planRow("Plan a").querySelector<HTMLElement>("button.rl-sb-plan")!;
+  const rowButton = () => planRow("Plan a").querySelector<HTMLElement>("button.hover-elevated")!;
 
   it("a row at rest has none: not a plan, a chat, a launch or a terminal row", async () => {
     await renderAll();
@@ -672,7 +669,7 @@ describe("a row's ⋯ (D37)", () => {
 
   it("hovering the row brings it at the far edge; a nested terminal row or leaving takes it away", async () => {
     await renderAll();
-    await fire(rowButton().querySelector(".rl-sb-plan-title")!, "pointerover");
+    await fire(rowButton().querySelector(".truncate")!, "pointerover");
     expect(planRow("Plan a").querySelectorAll(".rl-sb-dots")).toHaveLength(1);
     expect(host.querySelectorAll(".rl-sb-dots")).toHaveLength(1);
     await fire(planRow("Plan a").querySelector(".rl-sb-term-row")!, "pointerover");
@@ -771,99 +768,95 @@ describe("a row's ⋯ (D37)", () => {
   });
 });
 
-// D44: "more succinctly and aesthetically display the necessary information
-// without everything being so cramped."
-describe("a plan row (D44)", () => {
+// "DET…", "BUILDI…", "C…" and "in revi": at the sidebar's 200 px minimum the
+// status line gave way with an ellipsis. It wraps a piece to a second status
+// line instead, and every piece keeps its whole width.
+describe("a plan row's status line", () => {
   const renderOne = (over: Partial<SessionSummary>, props: Partial<SessionSidebarProps> = {}) =>
     act(async () =>
       root.render(
         <SessionSidebar {...handlers} sessions={[summary("a", 1, over.pendingCount ?? 0, over)]} activeId={null}
-          pendingCounts={{ a: over.pendingCount ?? 0 }} viewedVersionNumber={null} {...props} />,
+          pendingCounts={{ a: over.pendingCount ?? 0 }} viewedVersionNumber={null} onSetPlanState={vi.fn()} {...props} />,
       ),
     );
-  const phrase = () => planRow("Plan a").querySelector(".rl-sb-phrase")!.textContent;
-  const mark = () => {
-    const m = planRow("Plan a").querySelector(".rl-sb-mark")!;
-    return m.querySelector(".rl-sb-need") ? "needs" : m.querySelector(".rl-spinner") ? "working" : m.querySelector(".rl-sb-muted") ? "muted" : null;
-  };
+  const line = () => planRow("Plan a").querySelector<HTMLElement>(".rl-sb-status-line")!;
+  const word = () => line().querySelector<HTMLElement>(".rl-sb-statusword")!;
+  const pills = () => [...line().querySelectorAll<HTMLElement>(".rl-sb-pill")];
 
-  it.each<[string, Partial<SessionSummary>, Partial<SessionSidebarProps>, string, string | null]>([
-    ["in review", {}, {}, "In review", null],
-    ["in review with comments", { pendingCount: 2 }, {}, "In review · 2 comments", null],
-    ["one comment", { pendingCount: 1 }, {}, "In review · 1 comment", null],
-    ["detached", { attachState: "detached" }, {}, "Detached", "muted"],
-    ["detached with comments", { attachState: "detached", pendingCount: 3 }, {}, "Detached · 3 comments", "muted"],
-    ["approved, not built", { status: "approved" }, {}, "Approved", null],
-    ["handed to a builder", { status: "approved", runState: "building" }, {}, "Building", null],
-    ["building right now", { status: "approved" }, { working: new Set(["plan:a"]) }, "Building", "working"],
-    ["marked completed", { status: "approved", runState: "landed" }, {}, "Built", null],
-    ["aborted", { status: "aborted" }, {}, "Aborted", "muted"],
-    ["planned by Codex", { backend: "codex", model: "gpt-5" }, {}, "In review · Codex", null],
-    ["detached Codex with a comment", { backend: "codex", attachState: "detached", pendingCount: 1 }, {}, "Detached · Codex · 1 comment", "muted"],
-    ["a terminal waiting on you", {}, { terminals: { a: [{ id: "t", title: "claude", status: "needs" }] } }, "Waiting on you", "needs"],
-    ["an unseen arrival", {}, { unseenIds: new Set(["a"]) }, "In review", "needs"],
-  ])("%s: the phrase and the mark", async (_, over, props, text, want) => {
-    await renderOne(over, props);
-    expect(phrase()).toBe(text);
-    expect(mark()).toBe(want);
-    // No pills, no badge, no truncated status word: the phrase is the line.
-    const row = planRow("Plan a");
-    expect(row.querySelector(".rl-sb-pill, .rl-sb-statusword, .rl-sb-status-line, .rounded-full")).toBeNull();
-    expect(row.querySelector(".rl-sb-plan-meta")!.textContent).toBe(text);
+  // Each state's word in its state's colour, its pills in theirs, and the
+  // count a filled amber badge — the look before D44, kept.
+  it.each<[string, Partial<SessionSummary>, string, string, [string, string][]]>([
+    ["in review", { pendingCount: 2 }, "in review", "var(--color-warning)", []],
+    ["approved, not built", { status: "approved" }, "approved · not built", "var(--color-success)", []],
+    ["building", { status: "approved", runState: "building" }, "approved", "var(--color-success)", [["building", "var(--color-info)"]]],
+    ["landed", { status: "approved", runState: "landed" }, "approved", "var(--color-success)", [["landed", "var(--color-success)"]]],
+    ["aborted", { status: "aborted" }, "aborted", "var(--color-ink-muted)", []],
+    ["detached Codex", { attachState: "detached", backend: "codex", pendingCount: 12 }, "in review", "var(--color-warning)",
+      [["detached", "var(--color-warning, #b45309)"], ["codex", "var(--color-ink-muted)"]]],
+  ])("%s: the word, its colour, the pills", async (_, over, text, colour, want) => {
+    await renderOne(over);
+    expect(word().textContent).toBe(text);
+    expect(word().style.color).toBe(colour);
+    expect(pills().map((p) => [p.textContent, p.style.color])).toEqual(want);
+    for (const p of pills()) expect(p.style.border).toContain("1px solid");
+    const badge = line().querySelector<HTMLElement>(".rounded-full:not(.rl-pulse)");
+    if (over.pendingCount) {
+      expect(badge!.textContent).toBe(String(over.pendingCount));
+      expect(badge!.style.background).toBe("var(--color-warning)");
+    } else expect(badge).toBeNull();
   });
 
-  it("inside its project's group no project name; the title is the first line's, then the version chip", async () => {
-    await renderOne({ projectName: "qwallah", projectPath: "/Users/me/qwallah" });
-    const line = planRow("Plan a").querySelector(".rl-sb-plan-line")!;
-    expect([...line.children].map((c) => c.className)).toEqual(["rl-sb-mark", "rl-sb-plan-title", "rl-sb-ver"]);
-    expect(line.querySelector(".rl-sb-ver")!.textContent).toBe("v1");
-    expect(planRow("Plan a").textContent).not.toContain("qwallah");
-    // Two lines at most: nothing else in the row button.
-    expect([...planRow("Plan a").querySelector("button.rl-sb-plan")!.children].map((c) => c.className)).toEqual(["rl-sb-plan-line", "rl-sb-plan-meta"]);
+  it("needs you: the amber pulse and the need word in amber, ahead of the state word", async () => {
+    await renderOne({}, { needs: { "plan:a": "Question" } });
+    expect(line().querySelector(".rl-sb-need")).not.toBeNull();
+    expect(line().querySelector(".rl-sb-needword")!.textContent).toBe("Needs you");
+    expect(word().textContent).toBe("in review");
   });
 
-  it("with revisions the chip reads v3 ▾ and toggles the tree, without opening the row; no left caret", async () => {
-    const revisions = [1, 2, 3].map((n) => ({ versionNumber: n, receivedAt: n, threadStart: n === 1, restored: false }));
-    await renderOne({ revisions, latestVersion: 3 });
-    const chip = planRow("Plan a").querySelector<HTMLElement>(".rl-sb-ver")!;
-    expect(chip.textContent).toBe("v3");
-    expect(chip.querySelector("svg")).not.toBeNull();
-    expect(chip.getAttribute("role")).toBe("button");
-    expect(chip.getAttribute("aria-expanded")).toBe("false");
-    expect(planRow("Plan a").querySelector("[aria-label='Expand revisions'], [aria-label='Collapse revisions']")).toBeNull();
-    expect(planRow("Plan a").querySelectorAll("li.rl-revision-row")).toHaveLength(0);
-    await click(chip);
-    expect(planRow("Plan a").querySelectorAll("li.rl-revision-row")).toHaveLength(3);
-    expect(planRow("Plan a").querySelector(".rl-sb-ver")!.getAttribute("aria-expanded")).toBe("true");
-    expect(handlers.onSelect).not.toHaveBeenCalled();
-    // The keyboard reaches it too.
-    await press(planRow("Plan a").querySelector(".rl-sb-ver")!, "Enter");
-    expect(planRow("Plan a").querySelectorAll("li.rl-revision-row")).toHaveLength(0);
-    // A single revision: a plain chip, no toggle.
-    await renderOne({});
-    expect(planRow("Plan a").querySelector(".rl-sb-ver")!.getAttribute("role")).toBeNull();
+  // jsdom lays nothing out, so the widths are a budget: every piece, at a
+  // generous 0.75em a character (its letter-spacing on top), must fit the
+  // status line whole at 200 and at 260 px — and the stylesheet must keep
+  // it whole (no shrink, no ellipsis) and wrap it instead. The real
+  // measurement is scripts/sidebar-visual-qa.mjs at both widths.
+  const sheet = async () => (await import("node:fs")).readFileSync("src/components/SessionSidebar.css", "utf8");
+  const rule = (css: string, sel: string) => css.slice(css.indexOf(`${sel} {`), css.indexOf("}", css.indexOf(`${sel} {`)));
+
+  it("the stylesheet wraps a piece rather than cut it", async () => {
+    const css = await sheet();
+    expect(rule(css, ".rl-sb-status-line")).toContain("flex-wrap: wrap");
+    expect(rule(css, ".rl-sb-status-line > *")).toContain("flex: none");
+    expect(rule(css, ".rl-sb-status-line")).not.toContain("overflow: hidden");
+    // Nothing on the line ellipsizes or shrinks.
+    for (const m of css.matchAll(/([^{}]*\.rl-sb-(?:status-line|statusword|pill|needword)[^{}]*)\{([^}]*)\}/g)) {
+      expect(m[2], m[1]).not.toMatch(/text-overflow|flex-shrink: 1|min-width: 0/);
+    }
+    const tsx = (await import("node:fs")).readFileSync("src/components/SessionSidebar.tsx", "utf8");
+    expect(tsx).toContain('className="rl-sb-status-line"');
+    expect(tsx).toContain("pl-7 pr-9");
   });
 
-  it("the phrase stays the plan-state menu's trigger", async () => {
-    await renderOne({}, { onSetPlanState: vi.fn() });
-    const trigger = planRow("Plan a").querySelector<HTMLElement>("[aria-label='Change plan state']")!;
-    expect(trigger.querySelector(".rl-sb-phrase")!.textContent).toBe("In review");
-    await click(trigger);
-    expect(document.querySelector("[role='menuitemradio']")).not.toBeNull();
-    expect(handlers.onSelect).not.toHaveBeenCalled();
-  });
-
-  it("the stylesheet: a 28px first line, a 12px phrase, the ⋯ column kept clear", async () => {
-    const { readFileSync } = await import("node:fs");
-    const sheet = readFileSync("src/components/SessionSidebar.css", "utf8");
-    const rule = (sel: string) => sheet.slice(sheet.indexOf(`${sel} {`), sheet.indexOf("}", sheet.indexOf(`${sel} {`)));
-    expect(rule(".rl-sb-plan-line")).toContain("height: var(--rl-sb-row)");
-    expect(sheet).toContain("--rl-sb-row: 28px");
-    expect(rule(".rl-sb-plan-meta")).toContain("font-size: 12px");
-    expect(rule(".rl-sb-plan-title")).toMatch(/flex: 1 1 auto;[\s\S]*text-overflow: ellipsis;/);
-    // The ⋯ (24px at right: 4px) sits in the row's 32px right padding.
-    expect(rule(".rl-sb-plan")).toContain("padding: 0 32px 6px 8px");
-    expect(sheet).not.toMatch(/\.rl-sb-(pill|status-line|statusword)\b/);
+  it.each([200, 260])("at a %ipx sidebar no pill or state word is truncated", async (sidebar) => {
+    const css = await sheet();
+    // The row's 28px left and 36px right padding, less the 28px the line
+    // runs on under the ⋯'s column.
+    const under = Number(/margin-right: -(\d+)px/.exec(rule(css, ".rl-sb-status-line"))?.[1]);
+    expect(under).toBe(28);
+    const budget = sidebar - 28 - 36 + under;
+    const width = (e: HTMLElement) => {
+      const px = parseFloat(e.style.fontSize) || 10;
+      const pad = e.classList.contains("rl-sb-pill") ? 2 * 6 + 2 : 0;
+      return e.textContent!.length * px * (0.75 + 0.06) + pad;
+    };
+    const worst: [string, number][] = [];
+    for (const over of [
+      {}, { status: "approved" as const }, { status: "approved" as const, runState: "building" },
+      { status: "approved" as const, runState: "landed" }, { status: "aborted" as const },
+      { status: "approved" as const, attachState: "detached" as const, backend: "codex" as const, pendingCount: 12 },
+    ]) {
+      await renderOne(over, { needs: { "plan:a": "Permission" } });
+      for (const e of [word(), ...pills(), line().querySelector<HTMLElement>(".rl-sb-needword")!]) worst.push([e.textContent!, width(e)]);
+    }
+    for (const [text, w] of worst) expect(w, `"${text}" at ${sidebar}px`).toBeLessThanOrEqual(budget);
   });
 });
 
@@ -883,15 +876,13 @@ describe("the sidebar's class names", () => {
 });
 
 describe("the ports chip", () => {
-  it("fits inside the phrase's line, so a server starting or stopping never grows the row", async () => {
+  it("fits inside its status line, so a server starting or stopping never grows the row", async () => {
     const { readFileSync } = await import("node:fs");
     const css = readFileSync("src/components/SessionSidebar.css", "utf8");
     const rule = css.slice(css.indexOf(".rl-sb-port {"), css.indexOf("}", css.indexOf(".rl-sb-port {")));
     const px = (prop: string) => Number(new RegExp(`[\\s;{]${prop}:\\s*(\\d+)px`).exec(rule)?.[1]);
-    // The phrase's line: 16px.
-    const meta = css.slice(css.indexOf(".rl-sb-plan-meta {"), css.indexOf("}", css.indexOf(".rl-sb-plan-meta {")));
-    const line = Number(/line-height: (\d+)px/.exec(meta)?.[1]);
-    expect(line).toBe(16);
+    // The status line: 10px type at the inherited line-height of 1.5.
+    const line = 10 * 1.5;
     expect(rule).toContain("box-sizing: border-box");
     expect(px("height")).toBeLessThanOrEqual(line);
     // Its text line plus the 1px borders fit the box, and so does the globe.

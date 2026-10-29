@@ -4,15 +4,16 @@
 //! Browser, Localhost — D30) as one row of icons (D39), a "Sessions" label
 //! with Combine, the
 //! joined-session shadow, then project sections from lib/sessionGroups —
-//! Needs you first while something does — each split into Plans (the plan
-//! rows and the launches whose plan has not arrived) and Chats, each group
-//! collapsible with its own count and spinner (D31). A project's dev servers
-//! are one chip on its header (D44). A row click opens its session as a tab
-//! of the set on screen (D29).
-//! A plan row is two lines at most (D44): the status mark, the title and a
-//! "v3" chip ("v3 ▾" toggles the revision tree), then one muted phrase —
-//! "In review · 2 comments", "Detached · Codex" — and, only when a server
-//! runs under one of its own terminals, that server's chip.
+//! Needs you first while something does — each split into Plans (the rich
+//! plan rows: status colour, v{n}, pending count, unseen pulse, build-state
+//! chips, detached/codex chips, the revision tree and the row menu, and the
+//! launches whose plan has not arrived) and Chats, each group collapsible
+//! with its own count and spinner (D31). A row click opens its session as a
+//! tab of the set on screen (D29). A project's dev servers are one chip on
+//! its header, and on a plan row only when the server runs under one of that
+//! plan's own terminals (D44).
+//! A plan row's status line wraps a pill to a line of its own rather than
+//! cut it ("DET…"): no pill and no status word is ever truncated.
 //! Under each plan row sit its terminals in the shared status vocabulary
 //! (workbench/status.ts): needs you is an amber opacity pulse, working is the
 //! shared Spinner, idle is nothing, exited is muted. A "New tab" row closes it.
@@ -27,7 +28,7 @@ import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
 import { ResumePill } from "./ResumePill";
-import { nestedControl } from "./ui/nestedControl";
+import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 import { usePersistedState } from "../theme/usePersistedState";
 
 import type { RevisionSummary, SessionSummary } from "../types";
@@ -38,8 +39,6 @@ import { keepEqual } from "../lib/keepEqual";
 import {
   buildSidebar,
   itemKey,
-  planMark,
-  planPhrase,
   rowAge,
   rowStatus,
   type FlowChat,
@@ -179,6 +178,26 @@ export interface SessionSidebarProps {
   /** The footer's "＋ New tab ⌘T"; the row renders only when given. */
   onNewTab?: () => void;
 }
+
+/** Chip palette for an approved plan's build state: its agent building it in
+ *  a terminal reads as info; a plan marked Completed (`landed`) closes green.
+ *  Any other stored value is from a cut feature and draws no chip. */
+const BUILD_STATE_CHIPS: Record<string, { color: string; title: string }> = {
+  building: { color: "var(--color-info)", title: "An agent is building this approved plan in its terminal" },
+  landed: { color: "var(--color-success)", title: "Marked completed" },
+};
+
+const STATUS_COLORS: Record<SessionSummary["status"], string> = {
+  in_review: "var(--color-warning)",
+  approved: "var(--color-success)",
+  aborted: "var(--color-ink-muted)",
+};
+
+const STATUS_LABELS: Record<SessionSummary["status"], string> = {
+  in_review: "in review",
+  approved: "approved",
+  aborted: "aborted",
+};
 
 /** A chat or launch status's colour: the top bar's mode inks. */
 const TONE: Record<StatusTone, string> = {
@@ -381,9 +400,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
 
   const archivedShown = archivedOpen || model.archived.some((item) => item.key === activeKey);
 
-  // A row outside its project's group (Needs you, Archived) names its
-  // project in its phrase; inside the group the header already does.
-  const row = (item: SidebarItem, showProject = false) => {
+  const row = (item: SidebarItem) => {
     if (item.kind === "plan" && item.session) {
       const s = item.session;
       const active = item.key === activeKey;
@@ -403,7 +420,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           working={item.working}
           terminals={terminals?.[s.sessionId]}
           port={sessionPorts[s.sessionId]}
-          showProject={showProject}
           onOpenPort={onOpenPort}
           onOpenWorkspace={onOpenWorkspace}
           onClick={clickRow}
@@ -504,10 +520,10 @@ function SessionSidebarBase(props: SessionSidebarProps) {
             onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}
             port={section.projectPath ? projectPorts[section.projectPath] : undefined} onOpenPort={onOpenPort}>
             {section.groups.length === 0
-              ? section.rows.map((item) => row(item, true))
+              ? section.rows.map(row)
               : section.groups.map((group) => (
                   <Group key={group.id} group={group} open={openSections.has(group.id)} onToggle={toggleSection} onCollapse={toggleGroup}>
-                    {group.rows.map((item) => row(item))}
+                    {group.rows.map(row)}
                   </Group>
                 ))}
           </Section>
@@ -523,7 +539,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
               Archived · {model.archived.length}
               <ChevronDown size={12} aria-hidden data-open={archivedShown || undefined} />
             </button>
-            {archivedShown && <ul className="rl-sb-rows" data-archived="">{model.archived.map((item) => row(item, true))}</ul>}
+            {archivedShown && <ul className="rl-sb-rows" data-archived="">{model.archived.map(row)}</ul>}
           </section>
         )}
       </div>
@@ -848,7 +864,6 @@ function SessionRowBase({
   working = false,
   terminals,
   port,
-  showProject = false,
   onOpenPort,
   onClick,
   onOpenWorkspace,
@@ -883,11 +898,9 @@ function SessionRowBase({
   working?: boolean;
   /** The plan's terminals, always listed under the row. */
   terminals?: readonly SidebarTerminal[];
-  /** Its own dev servers' chip (a server under one of its terminals); a
-   *  click opens the first in the browser. */
+  /** Its own dev servers' chip (a server under one of its terminals,
+   *  D44); a click opens the first in the browser. */
   port?: PortChip;
-  /** Outside its project's group: the phrase names the project. */
-  showProject?: boolean;
   onOpenPort?: (url: string) => void;
   onClick: (sessionId: string) => void;
   /** "Open as workspace": the session's own set (D29). */
@@ -922,10 +935,7 @@ function SessionRowBase({
   // The row wears the needs dot for its own ask and for any terminal of its
   // that is blocked on you — even outside the Needs you section.
   const termNeeds = terminals?.some((t) => t.status === "needs") ?? false;
-  const rowState = { session, need, working, termNeeds, unseen, pending, showProject };
-  const mark = combining ? null : planMark(rowState);
-  const phrase = planPhrase({ ...rowState, detachedNote: session.attachState === "detached" ? detachedPillTitle(session.backend) : undefined });
-  const needTitle = need ? rowStatus({ kind: "plan", need, working: false, session }).detail ?? "Needs you" : "A terminal of this plan needs you";
+  const needWord = need ? rowStatus({ kind: "plan", need, working: false, session }).word : null;
 
   return (
     <li className="rl-session-row relative" data-need={need || termNeeds ? "" : undefined} {...hotBind} onContextMenu={e => { if (!combining && !renaming && !confirming) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
@@ -941,6 +951,44 @@ function SessionRowBase({
           above the row's own background. Keyed on the nonce: a new arrival is
           a new element, so the animation genuinely restarts. */}
       {glowNonce !== undefined && <span key={glowNonce} className="rl-row-arrival" aria-hidden />}
+      {/* Disclosure chevron — toggles the revision tree without selecting. */}
+      {expandable && (
+        <button
+          type="button"
+          aria-label={expanded ? "Collapse revisions" : "Expand revisions"}
+          title={expanded ? "Hide revisions" : "Show revisions"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand(session.sessionId);
+          }}
+          className="absolute left-1 top-2 z-10 px-1"
+          style={{
+            color: "var(--color-ink-muted)",
+            fontSize: "10px",
+            lineHeight: 1.6,
+            cursor: "pointer",
+          }}
+        >
+          {expanded ? "▾" : "▸"}
+        </button>
+      )}
+      {/* How many plan versions live under the caret — the same number as the
+          v{n} pill (restores don't advance it), so the two can never disagree.
+          Single-revision rows show nothing: no tree to reveal, and a
+          universal "1" is noise. */}
+      {expandable && (
+        <span
+          aria-hidden="true"
+          className="absolute left-1 top-6 z-10 px-1 font-mono"
+          style={{
+            color: "var(--color-ink-muted)",
+            fontSize: "8px",
+            pointerEvents: "none",
+          }}
+        >
+          {badgeVersion}
+        </span>
+      )}
       {confirming && !combining ? (
         <div
           className="rl-session-confirm absolute right-3 top-2 z-10 flex items-center gap-1"
@@ -995,10 +1043,6 @@ function SessionRowBase({
           </button>
         </div>
       ) : null}
-      {/* Two lines at most (D44). The first, 28px: the one status mark, the
-          title over all the width left, the version chip — "v3 ▾" toggles
-          the revision tree when there is one. The second: one muted phrase
-          (lib/sessionGroups `planPhrase`), and the session's own server. */}
       <button
         ref={rowButton}
         type="button"
@@ -1012,56 +1056,202 @@ function SessionRowBase({
               : `${rowName}, not in the combination`
             : undefined
         }
-        className={`rl-sb-plan${combining ? " rl-cmb-row" : ""}${combining && picked ? " is-on" : ""}`}
-        data-active={!combining && active ? "" : undefined}
-        data-muted={session.status === "aborted" ? "" : undefined}
+        className={`hover-elevated w-full text-left pl-7 pr-9 py-2 border-b${
+          combining ? " rl-cmb-row" : ""
+        }${combining && picked ? " is-on" : ""}`}
+        style={{
+          borderColor: "var(--color-rule)",
+          // While combining, the picked look is the stylesheet's (`.is-on`);
+          // outside it, the active row keeps its own inset accent stripe.
+          background: !combining && active ? "var(--color-bg-elevated)" : undefined,
+          boxShadow:
+            !combining && active ? "inset 2px 0 0 var(--color-accent)" : undefined,
+        }}
       >
-        <span className="rl-sb-plan-line">
-          <span className="rl-sb-mark">
-            {mark === "needs" && <i className="rl-sb-dot rl-sb-need" title={unseen && !need && !termNeeds ? "A new plan arrived for this session" : needTitle} aria-label={unseen && !need && !termNeeds ? "New plan intercepted" : "Needs you"} />}
-            {mark === "working" && <Spinner size={12} className="rl-sb-spin" />}
-            {mark === "muted" && <i className="rl-sb-dot rl-sb-muted" aria-hidden />}
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <span
+            className="truncate"
+            style={{
+              fontSize: "13px",
+              fontWeight: active ? 600 : 500,
+              color: "var(--color-ink)",
+            }}
+            title={session.projectPath}
+          >
+            {session.titleOverride || session.planTitle ||
+              session.projectName ||
+              session.projectPath ||
+              session.sessionId}
           </span>
-          <span className="rl-sb-plan-title" title={session.projectPath}>{rowName}</span>
-          {/* One slot, two occupants that never coexist: the version chip
+          {/* One slot, two occupants that never coexist: the version badge
               normally, the pick marker while combining (the version is
-              carried by the Front Door pill then). `aria-hidden` on the
-              marker because the row button carries the state. */}
+              carried by the Front Door pill then). Being a flex sibling of
+              the truncating title is what keeps a long plan name's ellipsis
+              from running underneath the marker.
+
+              `aria-hidden` on the marker because the row button around it
+              already carries the state for assistive tech — this is the
+              visual half of one control, not a second one. */}
           {combining ? (
             <span aria-hidden="true" className={`rl-cmb-node${picked ? " is-on" : ""}`}>
               {picked ? pickedAt + 1 : ""}
             </span>
-          ) : expandable ? (
-            <span className="rl-sb-ver" data-open={expanded ? "" : undefined} aria-expanded={expanded}
-              aria-label={`${expanded ? "Hide" : "Show"} revisions (${session.revisions.length})`}
-              title={expanded ? "Hide revisions" : `Show the ${session.revisions.length} revisions`}
-              {...nestedControl(() => onToggleExpand(session.sessionId))}>
+          ) : (
+            <span
+              className="font-mono shrink-0 rounded-sm px-1.5 py-0.5"
+              style={{
+                background: "var(--color-anchor-bg)",
+                color: "var(--color-anchor-text)",
+                fontSize: "10px",
+              }}
+            >
               v{badgeVersion}
-              <ChevronDown size={12} aria-hidden />
             </span>
-          ) : (
-            <span className="rl-sb-ver">v{badgeVersion}</span>
           )}
-        </span>
-        <span className="rl-sb-plan-meta">
+        </div>
+        {/* When the plan title leads, keep the project visible underneath —
+            two sessions in one project stay tellable apart by title, and one
+            title across two projects by this line. */}
+        {session.planTitle && session.projectName && (
+          <span className="truncate mb-1" title={session.projectPath} aria-label="Move to repo…"
+            {...nestedControl(() => onMoveProject?.(session.sessionId))}
+            // `clip`, not the class's `hidden`: an inline-block that scrolls
+            // sits on its bottom edge, where the button this was sat on its
+            // text. Clipping still ellipsizes.
+            style={{ ...NESTED_CONTROL_STYLE, overflow: "clip", fontSize: "10px", color: "var(--color-ink-muted)" }}>
+            {session.projectName}
+          </span>
+        )}
+        <div
+          className="rl-sb-status-line"
+          style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+        >
+          {/* A plan landed here while the reviewer was mid-discussion
+              elsewhere, so nothing pulled them over. Reuses the app's existing
+              pulse keyframes (reduced-motion aware). */}
+          {unseen && (
+            <span
+              className="rl-pulse rounded-full shrink-0"
+              title="A new plan was intercepted for this session"
+              aria-label="New plan intercepted"
+              style={{
+                width: "6px",
+                height: "6px",
+                background: "var(--color-info)",
+              }}
+            />
+          )}
+          {/* Needs you: the amber pulse, and the reason when the engine named
+              one. Working: the shared ring. The one status vocabulary. */}
+          {(need || termNeeds) && !combining && (
+            <i className="rl-sb-dot rl-sb-need" title={needWord ?? "A terminal of this plan needs you"} aria-label="Needs you" />
+          )}
+          {needWord && !combining && <span className="rl-sb-needword">{needWord}</span>}
+          {working && !combining && <Spinner size={10} className="rl-sb-spin" />}
           {!combining && <ResumePill sessionId={session.sessionId} className="rl-sb-resume" />}
-          {/* The phrase is the plan-state menu's trigger, as the status word
-              was: Mark as… and Move to repo… stay one click away. */}
-          {onSetPlanState && !combining ? (
-            <PlanStateMenu nested session={session} onState={(state) => onSetPlanState(session.sessionId, state)}
+          <span
+            className="rl-sb-statusword"
+            style={{
+              color: STATUS_COLORS[session.status],
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+            }}
+          >
+            {/* Approved with nothing building is its own state — it waits on
+                you (Build or Reopen), so it says so rather than reading as
+                done. NULL run_state is exactly that state. */}
+            {onSetPlanState ? <PlanStateMenu nested session={session} onState={state => onSetPlanState(session.sessionId, state)}
               onMove={onMoveProject ? () => onMoveProject(session.sessionId) : undefined}>
-              <span className="rl-sb-phrase" title={phrase.title || undefined}>{phrase.text}</span>
-            </PlanStateMenu>
-          ) : (
-            <span className="rl-sb-phrase" title={phrase.title || undefined}>{phrase.text}</span>
+              {session.status === "approved" && !session.runState ? "approved · not built" : STATUS_LABELS[session.status]}
+            </PlanStateMenu> : STATUS_LABELS[session.status]}
+          </span>
+          {/* The harness is no longer holding this review — comments and
+              discussions still save, but sending needs a restore first.
+              Surfaced here so the reviewer sees it BEFORE interacting, and
+              named for the harness that actually left (a legacy row with no
+              stored provenance claims neither). */}
+          {session.attachState === "detached" && (
+            <span
+              className="rl-sb-pill"
+              title={detachedPillTitle(session.backend)}
+              style={{
+                color: "var(--color-warning, #b45309)",
+                border: "1px solid var(--color-warning, #b45309)",
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              detached
+            </span>
+          )}
+          {/* Which harness authored this plan. Shown ONLY for a non-Claude
+              session: a Claude-only user's list must look exactly as it does
+              today, and the badge exists to answer "why does this one restore
+              differently", not to label every row with the obvious. */}
+          {session.backend === "codex" && (
+            <span
+              className="rl-sb-pill"
+              title={
+                session.model
+                  ? `Planned by Codex · ${session.model}`
+                  : "Planned by Codex"
+              }
+              style={{
+                color: "var(--color-ink-muted)",
+                border: "1px solid var(--color-rule)",
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              codex
+            </span>
+          )}
+          {session.runState && BUILD_STATE_CHIPS[session.runState] && !combining && (
+            <span
+              className="rl-sb-pill"
+              title={BUILD_STATE_CHIPS[session.runState].title}
+              style={{
+                color: BUILD_STATE_CHIPS[session.runState].color,
+                border: `1px solid ${BUILD_STATE_CHIPS[session.runState].color}`,
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              {session.runState}
+            </span>
+          )}
+          {pending > 0 && (
+            <span
+              className="rounded-full px-1.5"
+              style={{
+                background: "var(--color-warning)",
+                color: "var(--color-on-accent)",
+                fontSize: "9px",
+                fontWeight: 600,
+              }}
+            >
+              {pending}
+            </span>
           )}
           {port && onOpenPort && !combining && (
             <span className="rl-sb-port" title={port.title} aria-label={`Open ${port.label} in the browser`}
               {...nestedControl(() => onOpenPort(port.url))}>
-              <Globe size={12} aria-hidden /><span className="rl-sb-port-n">{port.label}</span>
+              <Globe size={12} aria-hidden />{port.label}
             </span>
           )}
-        </span>
+        </div>
       </button>
       {/* After the row in the tab order: Tab from a focused row reaches it. */}
       {!confirming && !combining && !renaming && (
@@ -1085,7 +1275,7 @@ function SessionRowBase({
         </ul>
       )}
       {expandable && expanded && (
-        <ul className="rl-sb-revs">
+        <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
           {session.revisions.map((r, idx) => {
             const info = display.get(r.versionNumber);
             const isLatest = info?.isLatest ?? false;

@@ -6,9 +6,11 @@ import type { SessionSummary } from "../../src/types";
 import { applyTheme } from "../../src/theme/applyTheme";
 import "../../src/styles.css";
 
-// The D44 scene: the screenshot's qwallah project (one dev server, :3000,
-// run from ONE plan's terminal), a plan in every state the phrase names, a
-// revision tree open on the active plan, and a row that needs you.
+// The sidebar scene: the qwallah project (one dev server, :3000, run from ONE
+// plan's terminal — D44), a plan in every state the status line colours, the
+// longest status line there is (approved · not built, detached, codex and a
+// count), a revision tree open on the active plan, and a row that needs you.
+// `__qa.setWidth(px)` pins the sidebar to a width (200 is its minimum).
 const noop = () => {};
 const now = Date.now();
 const rev = (n: number) => Array.from({ length: n }, (_, i) => ({ versionNumber: i + 1, receivedAt: now - (n - i) * 3_600_000, threadStart: i === 0, restored: false }));
@@ -36,6 +38,8 @@ const sessions: SessionSummary[] = [
   plan("q4", "Notification preferences", "qwallah", { status: "approved" }),
   plan("q5", "Design tokens migration", "qwallah", { revisions: rev(2), latestVersion: 2, backend: "codex", model: "gpt-5", attachState: "detached" }),
   plan("q6", "Marketing site hero", "qwallah", { status: "approved", runState: "landed" }),
+  plan("q7", "Payments retry queue", "qwallah", { status: "approved", attachState: "detached", backend: "codex", model: "gpt-5", pendingCount: 12 }),
+  plan("q8", "Webhook delivery log", "qwallah", { status: "approved", runState: "building", attachState: "detached", backend: "codex", pendingCount: 4 }),
   plan("r1", "Sidebar row anatomy (D44)", "redline", { held: true }),
   plan("r2", "PTY helper daemon", "redline", { status: "aborted" }),
 ];
@@ -52,7 +56,13 @@ const terminals: Record<string, SidebarTerminal[]> = {
 
 function Fixture() {
   useEffect(() => {
-    (window as unknown as { __qa: unknown }).__qa = { setTheme: applyTheme };
+    (window as unknown as { __qa: unknown }).__qa = {
+      setTheme: applyTheme,
+      setWidth: (px: number | null) => {
+        const aside = document.querySelector<HTMLElement>("[data-qa-sidebar]")!;
+        aside.style.width = px === null ? "clamp(200px, 24vw, 264px)" : `${px}px`;
+      },
+    };
     document.documentElement.dataset.qaReady = "true";
   }, []);
   return (

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The sessions sidebar (D44): the real component, fixture sessions, an isolated
+// The sessions sidebar: the real component, fixture sessions, an isolated
 // Chrome profile. `node scripts/sidebar-visual-qa.mjs <out dir>`; screenshots
 // belong outside the repo.
 import { createServer } from "vite";
@@ -38,7 +38,7 @@ function check(name, passed, details) { report.checks.push({ name, passed: !!pas
 async function settle() { await cdp.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"); await delay(80); }
 async function click(selector) { const rect = await cdp.evaluate(`(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)throw new Error('Missing selector: '+${JSON.stringify(selector)});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`); await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...rect }); await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...rect }); await settle(); }
 async function key(key, code = key, virtual = 0, modifiers = 0) { await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode: virtual, modifiers }); await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: virtual, modifiers }); await settle(); }
-async function screenshot(name) { const shot = await cdp.call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }); const file = `${name}.png`; await writeFile(path.join(output, file), Buffer.from(shot.data, "base64")); report.screenshots.push(file); }
+async function screenshot(name, selector) { const clip = selector ? await cdp.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,scale:1}})()`) : undefined; const shot = await cdp.call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, ...(clip ? { clip } : {}) }); const file = `${name}.png`; await writeFile(path.join(output, file), Buffer.from(shot.data, "base64")); report.screenshots.push(file); }
 async function bounds(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right,scrollHeight:e.scrollHeight,clientHeight:e.clientHeight,visible:r.width>0&&r.height>0,within:r.x>=-1&&r.y>=-1&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1};})()`); }
 try {
   await mkdir(output, { recursive: true });
@@ -62,25 +62,41 @@ try {
   report.browserVersion = await cdp.call("Browser.getVersion");
   await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   const sizes = (process.env.QA_SIZES ?? "1440x900,900x640").split(",").map((s) => s.split("x").map(Number));
-  const rows = "[...document.querySelectorAll('li.rl-session-row > button.rl-sb-plan')]";
+  const rows = "[...document.querySelectorAll('li.rl-session-row > button.hover-elevated')]";
+  // Every piece of a plan row's status line — the state word, the need word,
+  // the pills, the count badge, the port chip — shown whole: not cut by its
+  // own box, and not run past the row's edge.
+  const cut = `(() => { const out = []; for (const line of document.querySelectorAll('.rl-sb-status-line')) { const row = line.closest('li.rl-session-row').getBoundingClientRect(); for (const e of line.querySelectorAll(':scope > *, .rl-sb-statusword, .rl-sb-pill, .rl-sb-needword')) { const r = e.getBoundingClientRect(); if (!r.width) continue; if (e.scrollWidth > e.clientWidth + 1 || r.right > row.right + 0.5 || r.left < row.left - 0.5) out.push(e.textContent + ' @' + Math.round(r.width) + 'px'); } } return out; })()`;
+  const pieces = "[...document.querySelectorAll('.rl-sb-status-line')].map(l=>[...l.children].filter(e=>e.getBoundingClientRect().width).map(e=>e.textContent).join(' | '))";
+  const narrow = async (tag, sidebar) => {
+    await cdp.evaluate(`window.__qa.setWidth(${sidebar})`); await settle();
+    const bad = await cdp.evaluate(cut);
+    check(`${tag}, sidebar ${sidebar}px: no state word, pill, badge or chip is truncated`, bad.length === 0, bad.length ? bad : await cdp.evaluate(pieces));
+    check(`${tag}, sidebar ${sidebar}px: every state word and pill is on screen`, await cdp.evaluate("[...document.querySelectorAll('.rl-sb-statusword,.rl-sb-pill')].every(e=>e.getBoundingClientRect().width>0)"));
+    check(`${tag}, sidebar ${sidebar}px: titles end in an ellipsis inside the row, the version chip in view`, await cdp.evaluate(`${rows}.every(b=>{const r=b.getBoundingClientRect();const v=b.querySelector('.font-mono,.rl-cmb-node').getBoundingClientRect();return v.right<=r.right-28})`));
+    check(`${tag}, sidebar ${sidebar}px: no horizontal overflow in the sidebar`, await cdp.evaluate("(()=>{const a=document.querySelector('[data-qa-sidebar]');return [...a.querySelectorAll('.rl-session-row')].every(li=>li.getBoundingClientRect().right<=a.getBoundingClientRect().right+0.5)})()"));
+  };
   for (const [width, height] of sizes) {
     await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 2, mobile: false });
     await cdp.call("Page.navigate", { url: report.fixtureUrl });
     for (let i = 0; i < 200 && !(await cdp.evaluate("document.documentElement.dataset.qaReady==='true' && !!document.querySelector('.rl-session-row')")); i++) await delay(100);
+    // Every plan on screen: open each group's "Show N more".
+    await cdp.evaluate("[...document.querySelectorAll('.rl-sb-fold[aria-expanded=false]')].filter(b=>/^Show \\d+ more$/.test(b.textContent)).forEach(b=>b.click())"); await settle();
     for (const theme of ["basic", "studio"]) {
       const tone = theme === "studio" ? "dark" : "light";
       await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`); await settle(); await delay(120);
       const tag = `${tone} ${width}`;
-      check(`${tag}: every plan row is two lines at most (≤ 46px) over a 28px first line`, await cdp.evaluate(`${rows}.every(b=>b.getBoundingClientRect().height<=46&&Math.round(b.querySelector('.rl-sb-plan-line').getBoundingClientRect().height)===28)`), await cdp.evaluate(`${rows}.map(b=>Math.round(b.getBoundingClientRect().height))`));
-      check(`${tag}: no phrase is cut`, await cdp.evaluate(`[...document.querySelectorAll('.rl-sb-phrase')].every(p=>p.scrollWidth<=p.clientWidth+1)`), await cdp.evaluate(`[...document.querySelectorAll('.rl-sb-phrase')].filter(p=>p.scrollWidth>p.clientWidth+1).map(p=>p.textContent)`));
-      check(`${tag}: no pills, badges or left carets`, await cdp.evaluate("!document.querySelector('.rl-sb-pill,.rl-sb-statusword,.rl-sb-status-line,[aria-label=\"Expand revisions\"]')"));
-      check(`${tag}: ports: qwallah's and redline's headers, and the one plan whose terminal runs :3000`, await cdp.evaluate("(()=>{const h=[...document.querySelectorAll('.rl-sb-label > .rl-sb-port')].map(p=>p.textContent);const r=[...document.querySelectorAll('.rl-session-row .rl-sb-port')].map(p=>p.closest('li.rl-session-row').querySelector('.rl-sb-plan-title').textContent);return JSON.stringify(h)==='[\":3000\",\":1420\"]'&&r.length===1&&r[0].startsWith('Qwallah onboarding')})()"));
-      check(`${tag}: the version chip toggles the open tree`, await cdp.evaluate("(()=>{const c=document.querySelector('.rl-sb-ver[role=button]');return !!c&&c.getAttribute('aria-expanded')==='true'&&document.querySelectorAll('li.rl-revision-row').length===3})()"));
-      check(`${tag}: titles end in an ellipsis inside the row, the chip in view`, await cdp.evaluate(`${rows}.every(b=>{const r=b.getBoundingClientRect();const v=b.querySelector('.rl-sb-ver,.rl-cmb-node').getBoundingClientRect();return v.right<=r.right-28})`));
+      await cdp.evaluate("window.__qa.setWidth(null)"); await settle();
+      const bad = await cdp.evaluate(cut);
+      check(`${tag}: no state word, pill, badge or chip is truncated`, bad.length === 0, bad);
+      check(`${tag}: the state word wears its state's colour`, await cdp.evaluate("(()=>{const c=t=>[...document.querySelectorAll('li.rl-session-row')].find(li=>li.querySelector('.truncate').textContent.startsWith(t)).querySelector('.rl-sb-statusword').style.color;return c('Qwallah onboarding')==='var(--color-warning)'&&c('Notification preferences')==='var(--color-success)'&&c('PTY helper daemon')==='var(--color-ink-muted)'})()"));
+      check(`${tag}: the bordered pills and the filled count badge are back`, await cdp.evaluate("(()=>{const t=[...document.querySelectorAll('.rl-sb-pill')].map(p=>p.textContent);return t.includes('detached')&&t.includes('codex')&&t.includes('building')&&t.includes('landed')&&[...document.querySelectorAll('.rl-sb-status-line > .rounded-full')].some(b=>b.textContent==='12')})()"));
+      check(`${tag}: ports: qwallah's and redline's headers, and the one plan whose terminal runs :3000`, await cdp.evaluate("(()=>{const h=[...document.querySelectorAll('.rl-sb-label > .rl-sb-port')].map(p=>p.textContent);const r=[...document.querySelectorAll('.rl-session-row .rl-sb-port')].map(p=>p.closest('li.rl-session-row').querySelector('.truncate').textContent);return JSON.stringify(h)==='[\":3000\",\":1420\"]'&&r.length===1&&r[0].startsWith('Qwallah onboarding')})()"));
+      check(`${tag}: the caret toggles the open tree`, await cdp.evaluate("(()=>{const c=document.querySelector('[aria-label=\"Collapse revisions\"]');return !!c&&document.querySelectorAll('li.rl-revision-row').length===3})()"));
       check(`${tag}: no horizontal page overflow`, await cdp.evaluate("document.documentElement.scrollWidth<=innerWidth"));
       await screenshot(`sidebar-${tone}-${width}x${height}`);
       // Hover a row: its ⋯ comes out at the far edge, and nothing moves.
-      const target = "li.rl-session-row:nth-of-type(2) > button.rl-sb-plan";
+      const target = "li.rl-session-row:nth-of-type(2) > button.hover-elevated";
       const before = await cdp.evaluate(`(()=>{const b=document.querySelector(${JSON.stringify(target)});return [...b.querySelectorAll('*')].map(e=>{const r=e.getBoundingClientRect();return [r.x,r.y,r.width].map(Math.round).join(',')}).join(';')})()`);
       const at = await cdp.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(target)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+10}})()`);
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: at.x, y: at.y }); await settle();
@@ -88,6 +104,15 @@ try {
       check(`${tag}: hovering shows the ⋯ and moves nothing`, before === after && await cdp.evaluate(`!!document.querySelector(${JSON.stringify(target)}).parentElement.querySelector(':scope > .rl-sb-dots')`));
       await screenshot(`sidebar-${tone}-${width}x${height}-hover`);
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: width - 5, y: height - 5 }); await settle();
+      for (const sidebar of [200, 260]) {
+        await narrow(tag, sidebar);
+        await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}`, "[data-qa-sidebar]");
+        // The longest status lines, scrolled into view.
+        await cdp.evaluate("[...document.querySelectorAll('li.rl-session-row')].find(li=>li.querySelector('.truncate').textContent.startsWith('Webhook'))?.scrollIntoView({block:'end'})"); await settle();
+        await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}-longest`, "[data-qa-sidebar]");
+        await cdp.evaluate("document.querySelector('[data-qa-sidebar] .rl-session-row').scrollIntoView({block:'end'})"); await settle();
+      }
+      await cdp.evaluate("window.__qa.setWidth(null)"); await settle();
     }
   }
   await writeFile(path.join(output, "chrome.stderr.log"), chromeLog);
