@@ -1418,15 +1418,26 @@ impl ActiveSurface {
     }
 }
 
-/// Mirror the frontend's "where is the user" into the backend. Appends a
+/// Mirror the frontend's "where is the user" into the backend. Queues a
 /// `surface_switch` journal row when the surface identity actually changed
 /// (kind or id), so pure metadata refreshes (title updates) stay quiet.
+///
+/// Stays on the main thread on purpose (calls keep their order for free) and
+/// so must never wait on the database: it fires on every tab swap, and while
+/// it took the writer for its journal row, a swap during a `memory_status` or
+/// a dev-server scan beach-balled the window (2026-10-29). The row goes
+/// through `enqueue_journal`, which only takes the queue's lock.
 #[tauri::command]
 fn surface_set_active(
     active: tauri::State<'_, ActiveSurface>,
     store: tauri::State<'_, SessionStore>,
-    mut info: SurfaceInfo,
+    info: SurfaceInfo,
 ) {
+    set_active_surface(&active, &store.database(), info);
+}
+
+/// `surface_set_active`'s body: an in-memory cell and a queued row.
+fn set_active_surface(active: &ActiveSurface, db: &Database, mut info: SurfaceInfo) {
     if info.kind.trim().is_empty() {
         return;
     }
@@ -1435,7 +1446,7 @@ fn surface_set_active(
     let changed = prev.kind != info.kind || prev.id != info.id;
     active.set(info.clone());
     if changed {
-        let _ = store.database().append_journal(
+        db.enqueue_journal(
             "surface_switch",
             Some(&info.kind),
             info.id.as_deref(),
@@ -5890,6 +5901,10 @@ fn browser_set_active(active: tauri::State<'_, ActiveBrowser>, label: Option<Str
 /// mirror for a tick and mission-blind browse/linked agents spawned in that
 /// window. The pins are loaded from the DB on demand, so only the mission's
 /// identity needs mirroring.
+///
+/// In arrival order off the main thread (`IN_ORDER_COMMANDS`): it reads the
+/// mission row, and BrowserPane fires it on every mount, so it is on the
+/// path of every switch to the browser.
 #[tauri::command]
 fn mission_set_active(
     active: tauri::State<'_, ActiveMission>,
@@ -5906,7 +5921,7 @@ fn mission_set_active(
             // Companion journal: a mission became active (identity change only
             // — re-pushes of the same id stay quiet).
             if prev.as_deref() != Some(id.as_str()) {
-                let _ = store.database().append_journal(
+                store.database().enqueue_journal(
                     "mission_active",
                     Some("browser"),
                     Some(&id),
@@ -11412,6 +11427,11 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "memchat_clear",
     "memchat_thread",
     "mission_add_finding",
+    // Read on every switch to the browser (useMission, BrowseHarnessChip).
+    "get_agent_seats",
+    "mission_get_tabs",
+    "mission_list",
+    "mission_list_findings",
     "remove_hook_conflicts",
     "scan_hook_conflicts",
     "unwatch_hook_conflicts",
@@ -11429,7 +11449,17 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
 /// them racing on the pool could leave the older layout on disk for the next
 /// launch to load. The comment writes wait on the database writer, and an
 /// edit sent right after its add must not overtake it.
-const IN_ORDER_COMMANDS: &[&str] = &["save_workspace", "add_comment", "update_comment", "delete_comment"];
+const IN_ORDER_COMMANDS: &[&str] = &[
+    "save_workspace",
+    "add_comment",
+    "update_comment",
+    "delete_comment",
+    // On every switch to the browser (BrowserPane's mount), and the mirror it
+    // sets must end on the LAST id sent. The tab save after it must not be
+    // overtaken either.
+    "mission_set_active",
+    "mission_set_tabs",
+];
 
 /// The `IN_ORDER_COMMANDS` turn: the next ticket to hand out, and the ticket
 /// whose call may run now.
@@ -12697,6 +12727,11 @@ pub fn run() {
         })
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // From here on this thread is the UI thread, and the database
+            // must never be waited on from it (`db::mark_ui_thread`).
+            if let tauri::RunEvent::Ready = event {
+                db::mark_ui_thread();
+            }
             // Kill any headless `claude` discussion forks on teardown so no
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {

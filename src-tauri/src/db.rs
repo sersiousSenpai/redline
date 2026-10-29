@@ -406,6 +406,9 @@ pub struct Database {
     /// memory methods move there (A3). `polis_store_guard.rs` pins that the
     /// two never share a method name — Deref precedence would hide it.
     polis: Arc<PolisStore>,
+    /// The context journal's queue and writer (`db_journal.rs`): appends that
+    /// don't need their row id never take `conn`.
+    journal: Arc<journal::JournalQueue>,
 }
 
 impl std::ops::Deref for Database {
@@ -514,6 +517,67 @@ impl Drop for ReadConn<'_> {
 /// poisoned lock would recurse forever.
 static POISON_REPORTED: AtomicBool = AtomicBool::new(false);
 
+/// The thread the app's event loop runs on: the WebView main thread, where a
+/// sync `#[tauri::command]` not routed off it (`off_main` in lib.rs) runs.
+/// Recorded once the loop is running (`RunEvent::Ready`), so boot's own
+/// database work before the first frame is not counted.
+static UI_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Record the calling thread as the UI thread. Called once, from the event
+/// loop.
+pub fn mark_ui_thread() {
+    let _ = UI_THREAD.set(std::thread::current().id());
+}
+
+// A test plays the UI thread by setting this on its own thread: libtest runs
+// every test on a thread of its own, so the process's real main thread is
+// never one a test can stand on.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_UI_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the caller is on the UI thread.
+pub(crate) fn on_ui_thread() -> bool {
+    #[cfg(test)]
+    if TEST_UI_THREAD.with(std::cell::Cell::get) {
+        return true;
+    }
+    UI_THREAD.get().is_some_and(|ui| *ui == std::thread::current().id())
+}
+
+/// The database is never waited on from the UI thread. The writer can be held
+/// for seconds (a backup, a canary, an embedding pass), and a UI-thread wait
+/// on it is a beach ball: 2026-09-29's `get_work_graph`, and 2026-10-29's
+/// `surface_set_active` -> `append_journal` while `memory_status` held it.
+/// A test that reaches here on its UI thread fails outright; the app logs each
+/// offending call site once, with the stack in a debug build, rather than
+/// crash a window over it.
+#[track_caller]
+fn assert_off_ui_thread(what: &str) {
+    if !on_ui_thread() {
+        return;
+    }
+    let at = std::panic::Location::caller();
+    #[cfg(test)]
+    panic!("Database::{what} on the UI thread ({at}) — route the command off it (lib.rs `off_main`)");
+    #[cfg(not(test))]
+    {
+        static REPORTED: Mutex<Vec<(&'static str, u32)>> = Mutex::new(Vec::new());
+        let mut seen = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.contains(&(at.file(), at.line())) {
+            return;
+        }
+        seen.push((at.file(), at.line()));
+        drop(seen);
+        #[cfg(debug_assertions)]
+        let stack = std::backtrace::Backtrace::force_capture().to_string();
+        #[cfg(not(debug_assertions))]
+        let stack = String::new();
+        tracing::error!(%at, %stack, "Database::{what} on the UI thread: this command can beach-ball the window");
+    }
+}
+
 // How many migration steps have executed **on this thread**. The fast path's
 // contract — an already-current database runs no schema SQL — is otherwise
 // unobservable from outside, and "it felt fast" is not a test.
@@ -544,7 +608,9 @@ impl Database {
     /// `Transaction` is dropped during the unwind, so the `Connection` a
     /// poisoned lock hands back is a connection with no half-applied write on
     /// it — the panicking statement is simply undone.
+    #[track_caller]
     pub(crate) fn lock_conn(&self) -> MutexGuard<'_, Connection> {
+        assert_off_ui_thread("lock_conn");
         match self.conn.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -581,7 +647,9 @@ impl Database {
     /// statements of one write. A write of more than one statement therefore
     /// runs in one transaction (`unchecked_transaction` on the writer, then
     /// `commit`): a reader sees all of it or none of it.
+    #[track_caller]
     pub(crate) fn read_conn(&self) -> ReadConn<'_> {
+        assert_off_ui_thread("read_conn");
         if let Some(slot) = self.readers.as_ref().and_then(Readers::take) {
             let read = ReadConn::Reader(slot);
             let _ = read.execute_batch("BEGIN");
@@ -634,7 +702,7 @@ impl Database {
             slots: Default::default(),
             next: AtomicUsize::new(0),
         });
-        let db = Self { conn, readers, polis: Arc::new(polis) };
+        let db = Self { conn, readers, polis: Arc::new(polis), journal: Default::default() };
         // The send queues are in-memory: any row still `queued` now belongs
         // to a previous run and will never fire.
         db.sweep_queued_to_unsent()?;
@@ -654,7 +722,7 @@ impl Database {
             AttachOptions::redline().with_author(crate::ledger::local_author()),
         )
             .map_err(store_err)?;
-        Ok(Self { conn, readers: None, polis: Arc::new(polis) })
+        Ok(Self { conn, readers: None, polis: Arc::new(polis), journal: Default::default() })
     }
 
     /// The planner's chosen strategy for a statement, joined into one line —
@@ -2701,24 +2769,53 @@ impl Database {
         label: Option<&str>,
         detail: Option<&str>,
     ) -> rusqlite::Result<i64> {
-        const JOURNAL_KEEP_ROWS: i64 = 2000;
-        const JOURNAL_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
-        let now = crate::ledger::now_millis();
-        let conn = self.lock_conn();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO context_journal (ts, kind, surface_kind, surface_id, label, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![now, kind, surface_kind, surface_id, label, detail],
-        )?;
-        let id = tx.last_insert_rowid();
-        let _ = tx.execute(
-            "DELETE FROM context_journal
-             WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
-            params![id, JOURNAL_KEEP_ROWS, now, JOURNAL_KEEP_MS],
-        );
-        tx.commit()?;
-        Ok(id)
+        let entry = Self::journal_entry(kind, surface_kind, surface_id, label, detail);
+        journal::write_journal_rows(&self.lock_conn(), &[entry])
+    }
+
+    /// `append_journal` without waiting for the database: the row is queued
+    /// and committed by the journal's own writer thread, in a batch, moments
+    /// later. The ONLY journal append allowed on the UI thread — it takes a
+    /// short queue lock, never `conn`, so a write held for seconds elsewhere
+    /// can't stall the caller. Use it whenever the row id isn't needed.
+    pub fn enqueue_journal(
+        &self,
+        kind: &str,
+        surface_kind: Option<&str>,
+        surface_id: Option<&str>,
+        label: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        let entry = Self::journal_entry(kind, surface_kind, surface_id, label, detail);
+        self.journal.push(&self.conn, entry);
+    }
+
+    /// Wait until every `enqueue_journal` row so far is committed (bounded).
+    /// Never on the UI thread.
+    pub fn flush_journal(&self) -> bool {
+        self.journal.flush(std::time::Duration::from_secs(5))
+    }
+
+    /// Queued journal rows dropped because the queue was full.
+    pub fn journal_dropped(&self) -> u64 {
+        self.journal.dropped()
+    }
+
+    fn journal_entry(
+        kind: &str,
+        surface_kind: Option<&str>,
+        surface_id: Option<&str>,
+        label: Option<&str>,
+        detail: Option<&str>,
+    ) -> journal::JournalEntry {
+        journal::JournalEntry {
+            ts: crate::ledger::now_millis(),
+            kind: kind.to_string(),
+            surface_kind: surface_kind.map(str::to_string),
+            surface_id: surface_id.map(str::to_string),
+            label: label.map(str::to_string),
+            detail: detail.map(str::to_string),
+        }
     }
 
     /// Journal rows strictly after `since_id`, oldest-first, capped at `limit` —
@@ -7654,6 +7751,13 @@ fn session_status_from(s: &str) -> SessionStatus {
         _ => SessionStatus::InReview,
     }
 }
+
+#[path = "db_journal.rs"]
+mod journal;
+
+#[cfg(test)]
+#[path = "db_ui_thread_tests.rs"]
+mod ui_thread_tests;
 
 /// The batched-read rewrites from the retrieval latency work. Each of these
 /// replaced an N+1 (one query per page row, or per link) with one query per

@@ -1937,3 +1937,46 @@ fn a_build_approval_carries_the_plan_exits_input_and_nothing_else_does() {
     assert_eq!(codex_stop_response(answer_for_build(approval_response("ok"), &payload)), json!({}));
 }
 
+
+/// A tab swap's `surface_set_active` runs on the UI thread. With the writer
+/// held (2026-10-29: by `memory_status`), it still returns at once — it
+/// queues its journal row, never waiting on the database — and the row lands
+/// once the writer is free.
+#[test]
+fn a_surface_switch_never_waits_for_the_writer() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let active = ActiveSurface::new();
+    let (held, is_held) = std::sync::mpsc::channel();
+    let holder = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let _conn = db.lock_conn();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        })
+    };
+    is_held.recv().unwrap();
+    crate::db::TEST_UI_THREAD.with(|c| c.set(true));
+    let t = std::time::Instant::now();
+    for kind in ["memory", "browser", "servers", "memory"] {
+        set_active_surface(
+            &active,
+            &db,
+            SurfaceInfo { kind: kind.into(), label: Some(kind.into()), ..Default::default() },
+        );
+    }
+    let took = t.elapsed();
+    crate::db::TEST_UI_THREAD.with(|c| c.set(false));
+    assert!(took < std::time::Duration::from_millis(10), "four swaps took {took:?} behind a held writer");
+    assert_eq!(active.get().kind, "memory", "the cell follows the last swap");
+    holder.join().unwrap();
+    assert!(db.flush_journal());
+    let kinds: Vec<_> = db
+        .list_journal_since(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == "surface_switch")
+        .filter_map(|r| r.surface_kind)
+        .collect();
+    assert_eq!(kinds, ["memory", "browser", "servers", "memory"]);
+}

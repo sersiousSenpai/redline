@@ -271,6 +271,29 @@ mod tests {
         assert!(!src.contains("#[tauri::command(async)]"), "bookshelf.rs: the pool route costs a string, `(async)` ~11 KB");
     }
 
+    /// Switching surfaces (Memory, Browser, Localhost) must paint without the
+    /// main thread touching the database (2026-10-29: `surface_set_active`
+    /// parked in `append_journal` behind `memory_status`). The surface mirror
+    /// stays on the main thread for its ordering but only queues its row; the
+    /// browser's mount reads and its mission mirror ride the pool.
+    #[test]
+    fn surface_switches_never_wait_on_the_database() {
+        let lib = include_str!("lib.rs");
+        let body = &lib[lib.find("fn set_active_surface(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("enqueue_journal("), "lib.rs: the surface mirror queues its journal row");
+        for heavy in ["append_journal(", "lock_conn", "read_conn", "polis_handle()"] {
+            assert!(!body.contains(heavy), "lib.rs: `set_active_surface` must not call {heavy}");
+        }
+        for func in ["mission_set_active", "get_agent_seats"] {
+            assert_off_main_command(lib, "lib.rs", func);
+        }
+        let mission = include_str!("mission.rs");
+        for func in ["mission_list", "mission_list_findings", "mission_get_tabs", "mission_set_tabs"] {
+            assert_off_main_command(mission, "mission.rs", func);
+        }
+    }
+
     /// `memory_status` backs the memory pill: a 60s poll, plus a re-read on
     /// every browse capture. It walks the ledger to verify the hash chain and
     /// aggregates compaction stats — on the main thread it froze the UI for the
