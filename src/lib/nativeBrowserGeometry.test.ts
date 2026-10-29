@@ -175,3 +175,34 @@ it("clips a normal stage only in an ancestor's clipped axis", () => {
   pane.style.overflowY = "visible";
   expect(measureNativeBrowserRect(slot, stage)).toEqual({ x: 100, y: 0, w: 500, h: window.innerHeight });
 });
+
+// W5 walk: a pane zoomed over its tab (`position: absolute; inset: 0`)
+// escapes the split cell it sits in, whose overflow is hidden. The webview
+// followed the cell's old, narrow box: the measure clipped by an ancestor
+// that does not clip the pane.
+it("lets an absolute box escape the overflow between it and its containing block, and no further", () => {
+  const tab = document.createElement("div");
+  const cell = document.createElement("div");
+  const pane = document.createElement("div");
+  const stage = document.createElement("div");
+  const slot = document.createElement("div");
+  tab.style.position = "absolute";
+  tab.style.overflow = "hidden";
+  cell.style.overflow = "hidden";
+  pane.style.position = "absolute";
+  stage.style.position = "relative";
+  stage.style.overflow = "hidden";
+  tab.append(cell); cell.append(pane); pane.append(stage); stage.append(slot); document.body.append(tab);
+  vi.spyOn(tab, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 900, 600));
+  vi.spyOn(cell, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 180, 600));
+  for (const el of [pane, stage, slot]) vi.spyOn(el, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 900, 600));
+  expect(measureNativeBrowserRect(slot, stage)).toEqual({ x: 0, y: 40, w: 900, h: 600 });
+  // Unzoomed, the pane is in the cell's flow again: the cell clips it.
+  pane.style.position = "";
+  expect(measureNativeBrowserRect(slot, stage)).toEqual({ x: 0, y: 40, w: 180, h: 600 });
+  // Zoomed, the tab is the containing block, and its overflow still clips.
+  pane.style.position = "absolute";
+  vi.spyOn(tab, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 800, 600));
+  expect(measureNativeBrowserRect(slot, stage)).toEqual({ x: 0, y: 40, w: 800, h: 600 });
+  tab.remove();
+});

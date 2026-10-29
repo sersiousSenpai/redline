@@ -78,6 +78,7 @@ import type {
   Mission,
 } from "../types";
 import { onResizeSession } from "../lib/resizeSession";
+import { PORTAL_MOVED_EVENT } from "./PersistentPortalSlot";
 import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
 import { MissionStartDialog } from "./MissionStartDialog";
@@ -1646,6 +1647,12 @@ function BrowserPaneBase({
   // Each frame goes through the diffed syncBounds, so once the size stops
   // changing it stops issuing setSize — no redundant same-rect calls (which
   // flicker WKWebView black) and no hide()/show() (same reason).
+  // The key is not the only way the slot moves: the browser's host is
+  // carried between panes (a merge, Bring here) and a pane's box changes
+  // without a new key landing on the same frame (a deferred show, a zoom
+  // whose layout lands after the key). `trackRef` restarts this tracking
+  // from the host's own signals (below), with no render.
+  const trackRef = useRef<() => void>(() => {});
   useEffect(() => {
     let raf = 0;
     let stableFrames = 0;
@@ -1670,9 +1677,37 @@ function BrowserPaneBase({
         raf = requestAnimationFrame(tick);
       }
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    const start = () => {
+      cancelAnimationFrame(raf);
+      stableFrames = 0;
+      previousMeasurement = "";
+      frames = 0;
+      raf = requestAnimationFrame(tick);
+    };
+    trackRef.current = start;
+    start();
+    return () => {
+      cancelAnimationFrame(raf);
+      trackRef.current = () => {};
+    };
   }, [layoutKey, effectiveVisible, syncBounds]);
+
+  // The host the workbench moves between panes (`PersistentPortalSlot`): a
+  // ResizeObserver on it (its box is the pane's), and its move event, which
+  // no observer reports when the new box is the old one's size. Either
+  // restarts the tracking above.
+  useEffect(() => {
+    const host = slotRef.current?.closest<HTMLElement>("[data-portal-host]");
+    if (!host) return;
+    const follow = () => trackRef.current();
+    const ro = new ResizeObserver(follow);
+    ro.observe(host);
+    host.addEventListener(PORTAL_MOVED_EVENT, follow);
+    return () => {
+      ro.disconnect();
+      host.removeEventListener(PORTAL_MOVED_EVENT, follow);
+    };
+  }, [chatOpen, dockSlot, browserFullscreen]);
 
   // Listeners + deferred teardown. A pending teardown from a StrictMode
   // pseudo-unmount (or a fast toggle off/on) is cancelled here so the webviews

@@ -146,6 +146,11 @@ export function measureNativeBrowserRect(slot: HTMLElement | undefined | null, s
   if (!slot?.isConnected || !stage?.isConnected || !stage.contains(slot)) return null;
   let clipping = stage.getBoundingClientRect();
   let escapedByFixed = false;
+  // An absolutely positioned box escapes the overflow of every ancestor
+  // between it and its containing block (the nearest positioned one): a
+  // zoomed workbench pane (`position: absolute; inset: 0` over its tab)
+  // is not clipped by the split cell it sits in, so neither is its webview.
+  let escapedByAbsolute = false;
   for (let node: HTMLElement | null = slot; node; node = node.parentElement) {
     const style = getComputedStyle(node);
     if (node.hidden || style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0" || style.contentVisibility === "hidden") return null;
@@ -153,9 +158,12 @@ export function measureNativeBrowserRect(slot: HTMLElement | undefined | null, s
     // transform/filter/contain ancestor can establish its fixed containing block.
     // Visibility still applies through every ancestor, including escaped ones.
     if (escapedByFixed && establishesFixedContainingBlock(style)) escapedByFixed = false;
+    // The containing block of an absolute box: the first ancestor that is
+    // positioned or would hold a fixed box. Its own overflow clips again.
+    if (escapedByAbsolute && node !== slot && (style.position !== "static" && style.position !== "" || establishesFixedContainingBlock(style))) escapedByAbsolute = false;
     const clipX = /^(hidden|clip|scroll|auto)$/.test(style.overflowX || style.overflow);
     const clipY = /^(hidden|clip|scroll|auto)$/.test(style.overflowY || style.overflow);
-    if (!escapedByFixed && node !== slot && (clipX || clipY)) {
+    if (!escapedByFixed && !escapedByAbsolute && node !== slot && (clipX || clipY)) {
       const box = node.getBoundingClientRect();
       const left = clipX ? Math.max(clipping.left, box.left) : clipping.left;
       const top = clipY ? Math.max(clipping.top, box.top) : clipping.top;
@@ -164,6 +172,7 @@ export function measureNativeBrowserRect(slot: HTMLElement | undefined | null, s
       clipping = new DOMRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
     }
     if (style.position === "fixed") escapedByFixed = true;
+    else if (style.position === "absolute") escapedByAbsolute = true;
   }
   return clipNativeBrowserRect(slot.getBoundingClientRect(), clipping, { width: window.innerWidth, height: window.innerHeight });
 }

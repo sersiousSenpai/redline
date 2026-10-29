@@ -12,6 +12,11 @@ export function createBoundedPortalHost(name: string): HTMLDivElement {
   return host;
 }
 
+/** Fired on the host each time a slot takes it: a body whose geometry is
+ *  native (the browser's webview) re-reads its rect, since a host moved to
+ *  a box of the same size is a move no ResizeObserver reports. */
+export const PORTAL_MOVED_EVENT = "rl-portal-moved";
+
 /** Own the imperative child separately from React's ordinary surface bodies.
  *  The slot takes the host only while `active` (default true): a slot in a
  *  hidden kept tab stays mounted and must not steal the host from the one
@@ -23,6 +28,7 @@ export function PersistentPortalSlot({ host, name, active = true }: { host: HTML
     const slot = slotRef.current;
     if (!slot || !active) return;
     slot.appendChild(host);
+    host.dispatchEvent(new Event(PORTAL_MOVED_EVENT));
     return () => {
       if (host.parentElement === slot) host.remove();
     };

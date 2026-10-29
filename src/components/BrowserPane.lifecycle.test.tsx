@@ -942,3 +942,47 @@ describe("one workspace, filtered by owner (W5)", () => {
     expect(mocks.load.mock.calls.length).toBeLessThanOrEqual(1);
   });
 });
+
+// W5 walk: a zoomed (or merged) browser pane kept its webview at the old
+// rect. The key moves with the layout; the host's own signals (its size,
+// a move into another pane's slot) re-read the rect too.
+describe("the webview follows its pane", () => {
+  const rect = (width: number) => ({ x: 10, y: 80, left: 10, top: 80, right: 10 + width, bottom: 880, width, height: 800, toJSON: () => ({}) }) as DOMRect;
+  const frames = (n = 3) => act(async () => { for (let i = 0; i < n; i++) await new Promise((done) => requestAnimationFrame(() => done(null))); });
+
+  it("a zoom changes the layout key, and the webview takes the zoomed rect", async () => {
+    const { selectLayoutKey } = await import("../workbench/view");
+    const { emptyWorkbench } = await import("../workbench/model");
+    const { reduce } = await import("../workbench/reducer");
+    let s = emptyWorkbench();
+    s = reduce(s, { type: "openTab", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, tabId: "t1", paneId: "pl" });
+    s = reduce(s, { type: "splitPane", paneId: "pl", direction: "row", pane: { kind: "browser", data: { workspace: "regular" } }, newPaneId: "br" });
+    const split = selectLayoutKey(s);
+    const zoomed = selectLayoutKey(reduce(s, { type: "zoomPane", paneId: "br" }));
+    expect(zoomed).not.toBe(split);
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(rect(500));
+    await mount({ layoutKey: split });
+    const view = mocks.views.get("browser-t-two")!;
+    // The compare layout halves the stage: each page is the slot's rect here.
+    expect(view.size?.width).toBe(500);
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(rect(900));
+    await mount({ layoutKey: zoomed });
+    await frames();
+    expect(view.size?.width).toBe(900);
+  });
+
+  it("a move of its host into another pane's slot re-reads the rect, with no key change", async () => {
+    host.dataset.portalHost = "browser";
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(rect(500));
+    await mount({ layoutKey: "k" });
+    await frames(8);
+    const view = mocks.views.get("browser-t-two")!;
+    expect(view.size?.width).toBe(500);
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(rect(700));
+    const { PORTAL_MOVED_EVENT } = await import("./PersistentPortalSlot");
+    await act(async () => { host.dispatchEvent(new Event(PORTAL_MOVED_EVENT)); });
+    await frames();
+    expect(view.size?.width).toBe(700);
+    delete host.dataset.portalHost;
+  });
+});
