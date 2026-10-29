@@ -3442,7 +3442,7 @@ html[data-rl-tile-drag] * {
 .rl-wb-tab-body[data-zoomed] .rl-wb-pane[data-zoomed] { position: absolute; inset: 0; z-index: 2; background: var(--color-paper); }
 .rl-wb-tab-body[data-zoomed] .rl-wb-pane:not([data-zoomed]),
 .rl-wb-tab-body[data-zoomed] .rl-split-divider { visibility: hidden; pointer-events: none; }
-.rl-wb-door-plate { flex: 1; min-height: 0; background: var(--color-paper); }
+.rl-wb-door-plate { position: relative; flex: 1; min-height: 0; background: var(--color-paper); }
 /* The plate's floating controls, seated for the workbench (W2): the
    contents rail starts under the strip; in the Plan pane the header carries
    Contents, and the rail and the zoom + width pill clear the pane's 28px

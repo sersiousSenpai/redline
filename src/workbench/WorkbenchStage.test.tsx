@@ -364,3 +364,38 @@ describe("the stage's pane keys (W5)", () => {
     expect("split" in root0 && root0.weights).toEqual([0.5, 0.5]);
   });
 });
+
+describe("a door at rest in a split (W5)", () => {
+  it("plan + door, the plan focused: the door shows its box and its recents, never an empty plate; a press wakes it", async () => {
+    const { DoorPane } = await import("./panes/door");
+    const recents = [
+      { kind: "plan" as const, id: "s1", label: "Din roadmap", detail: "Din roadmap · v3" },
+      { kind: "chat" as const, id: "c1", label: "Review status", detail: "Chat" },
+    ];
+    const opened: string[] = [];
+    const render = (pane: AnyPane, ctx: { visible: boolean; focused: boolean; active: boolean }) =>
+      pane.kind === "door"
+        ? <DoorPane ctx={ctx} draftKey={pane.data.draftKey} recents={recents} onWake={() => store.dispatch({ type: "focusPane", paneId: pane.id })} onOpenRecent={(r) => opened.push(r.id)} />
+        : <div data-plan-body="" />;
+    await act(async () => {
+      store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, newPaneId: "pl", before: true });
+    });
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={render} onNewTab={() => {}} />));
+    // The plan has the focus (a click there, as on screen).
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "pl" }));
+    const door = () => host.querySelector<HTMLElement>('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-id="p1"]')!;
+    for (let i = 0; i < 20 && !door().querySelector("[data-door-rest]"); i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    expect(door().querySelector("[data-rl-door-plate]")).toBeNull();
+    expect(door().querySelector(".rl-door-rest-box")?.textContent).toBe("What are we working on?");
+    expect([...door().querySelectorAll(".rl-door-rest-chip")].map((c) => c.textContent)).toEqual(["Din roadmap", "Review status"]);
+    await act(async () => door().querySelector<HTMLButtonElement>(".rl-door-rest-chip")!.click());
+    expect(opened).toEqual(["s1"]);
+    // A press in the box wakes the door: it takes the focus and the plate
+    // the island lands on.
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "pl" }));
+    await act(async () => door().querySelector<HTMLButtonElement>(".rl-door-rest-box")!.click());
+    expect(store.getState().sets.home!.tabs.t1.focusedPaneId).toBe("p1");
+    expect(door().querySelector("[data-rl-door-plate]")).not.toBeNull();
+    expect(door().querySelector("[data-door-rest]")).toBeNull();
+  });
+});

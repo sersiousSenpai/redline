@@ -1,0 +1,46 @@
+/* A door pane at rest (W5, panes/restingDoor): the door's box and its
+   recents, centred on the plate, quiet until a press wakes it. */
+.rl-door-rest {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px 16px;
+  overflow: hidden;
+}
+.rl-door-rest-box {
+  width: min(560px, 100%);
+  min-height: 52px;
+  padding: 14px 18px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--rl-radius-card, 12px);
+  background: var(--color-bg-elevated, var(--color-paper));
+  color: var(--color-ink-muted);
+  font-size: 15px;
+  text-align: left;
+  cursor: text;
+}
+.rl-door-rest-box[data-drafted] { color: var(--color-ink); }
+.rl-door-rest-box:hover { border-color: var(--color-rule-strong, var(--color-rule)); }
+.rl-door-rest-box:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 2px; }
+.rl-door-rest-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rl-door-rest-recents { width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px; }
+.rl-door-rest-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rl-door-rest-head { font-size: 10.5px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--color-ink-muted); }
+.rl-door-rest-items { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.rl-door-rest-chip {
+  max-width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: 999px;
+  color: var(--color-ink);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-door-rest-chip:hover { background: var(--color-fill-2); }
+.rl-door-rest-chip:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 2px; }

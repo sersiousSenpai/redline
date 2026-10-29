@@ -330,6 +330,9 @@ interface BrowserPaneProps {
   ownerKey?: string | null;
 }
 
+/** The page signals that are the workbench's pane chords (W5). */
+const PANE_KEY_SIGNALS: readonly string[] = ["split", "split-down", "split-anywhere", "zoom-pane", "equalize", "focus-left", "focus-right", "focus-up", "focus-down"];
+
 const hostnameOf = (u: string): string => {
   try {
     return new URL(u).hostname || u;
@@ -1573,6 +1576,10 @@ function BrowserPaneBase({
         // The app's globals pressed in the page (⌘K, ⌘⇧J, ⌘⇧N, ⌘⇧0): App
         // answers them as it does its own keys.
         else if (event.value === "palette" || event.value === "needs-you" || event.value === "new-plan" || event.value === "snap-back") window.dispatchEvent(new Event(`redline:${event.value}`));
+        // The workbench's pane chords pressed in the page (W5): ⌘D / ⌘⇧D (the
+        // page's own ⌘D, when it took one, never comes here), ⌘\, ⌘⇧↩,
+        // ⌘⌥= and ⌃⌘ + an arrow. App and the stage answer them as their own.
+        else if (typeof event.value === "string" && PANE_KEY_SIGNALS.includes(event.value)) window.dispatchEvent(new CustomEvent("redline:pane-key", { detail: event.value }));
         else if (event.value === "exit-focus") { if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" }); else { restoreTilesRef.current(); } }
         else if (event.value === "toggle-video-screen") {
           if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();

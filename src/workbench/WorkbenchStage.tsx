@@ -178,8 +178,25 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
       if (dir) dispatch({ type: "focusPane", dir, rects: paneBoxes(tabsRef.current, tab.id) });
       else dispatch({ type: "equalize" });
     };
+    // The same chords pressed in a web page, forwarded (browser_signals.js →
+    // BrowserPane's `redline:pane-key`).
+    const fromPage = (e: Event) => {
+      const value = (e as CustomEvent<string>).detail;
+      const dir = value === "focus-left" ? "left" : value === "focus-right" ? "right" : value === "focus-up" ? "up" : value === "focus-down" ? "down" : null;
+      if (!dir && value !== "equalize") return;
+      const s = store.getState();
+      const current = s.sets[s.activeKey];
+      const tab = current ? activeTabOf(current) : null;
+      if (!tab || !isSplit(tab.root)) return;
+      if (dir) dispatch({ type: "focusPane", dir, rects: paneBoxes(tabsRef.current, tab.id) });
+      else dispatch({ type: "equalize" });
+    };
     window.addEventListener("keydown", onPaneKey, true);
-    return () => window.removeEventListener("keydown", onPaneKey, true);
+    window.addEventListener("redline:pane-key", fromPage);
+    return () => {
+      window.removeEventListener("keydown", onPaneKey, true);
+      window.removeEventListener("redline:pane-key", fromPage);
+    };
   }, [dispatch, store]);
   const targetAt = useCallback(
     (tabId: string, at: { x: number; y: number }): DropTarget | null => {

@@ -2540,26 +2540,30 @@ function App() {
     // double-click; elsewhere in a split, the focused pane fills the tab.
     // Capture phase: in a terminal xterm would take the Return. A lone pane
     // has nothing to zoom, and the key is left alone.
-    const onZoomKey = (e: KeyboardEvent) => {
-      if (!isZoomPaneKey(e)) return;
+    const zoomFocused = (): boolean => {
       const { set, tab } = activePanes(wb.getState());
-      if (!set || !tab) return;
+      if (!set || !tab) return false;
       const focused = set.panes[tab.focusedPaneId];
-      const claim = () => {
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      if (tab.zoomed) {
-        claim();
-        wb.dispatch({ type: "zoomPane" });
-      } else if (focused?.kind === "terminals" && focused.data.tiles.length > 1) {
-        claim();
-        terminalsRef.current?.toggleZoomFocused();
-      } else if (isSplit(tab.root)) {
-        claim();
-        wb.dispatch({ type: "zoomPane" });
-      }
+      if (tab.zoomed) wb.dispatch({ type: "zoomPane" });
+      else if (focused?.kind === "terminals" && focused.data.tiles.length > 1) terminalsRef.current?.toggleZoomFocused();
+      else if (isSplit(tab.root)) wb.dispatch({ type: "zoomPane" });
+      else return false;
+      return true;
     };
+    const onZoomKey = (e: KeyboardEvent) => {
+      if (!isZoomPaneKey(e) || !zoomFocused()) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    // The same chords pressed in a web page, forwarded (browser_signals.js →
+    // BrowserPane): the browser is the focused pane, never a wall.
+    const fromPagePaneKey = (e: Event) => {
+      const value = (e as CustomEvent<string>).detail;
+      if (value === "zoom-pane") zoomFocused();
+      else if (value === "split" || value === "split-anywhere") splitFocusedWithDoor("row");
+      else if (value === "split-down") splitFocusedWithDoor("column");
+    };
+    window.addEventListener("redline:pane-key", fromPagePaneKey);
     // ⌘D / ⌘⇧D: inside a wall ⌘D adds a tile; anywhere else they split the
     // focused pane right / down with a door. ⌘\ splits right with a door
     // everywhere, a wall included. Bubble phase, and only for an event
@@ -2588,9 +2592,10 @@ function App() {
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keydown", onZoomKey, true);
+      window.removeEventListener("redline:pane-key", fromPagePaneKey);
       window.removeEventListener("keydown", onSplitKey);
     };
-  }, [closeFromInside]);
+  }, [closeFromInside, splitFocusedWithDoor]);
 
 
   // A browser download or page save landed (or failed): Safari's notice, with
@@ -9403,7 +9408,9 @@ function App() {
   const renderPane = (pane: AnyPane, ctx: PaneContext): ReactNode => {
     switch (pane.kind) {
       case "door":
-        return <DoorPane ctx={ctx} />;
+        // At rest (a split's other pane) the door shows its box and its
+        // recents; a press there focuses it and the island lands.
+        return <DoorPane ctx={ctx} draftKey={pane.data.draftKey} recents={doorRecentItems} onWake={() => wb.dispatch({ type: "focusPane", paneId: pane.id })} onOpenRecent={openDoorRecent} />;
       case "plan":
         return (
           <PlanPaneView
