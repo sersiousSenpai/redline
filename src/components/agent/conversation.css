@@ -374,10 +374,8 @@
 .rl-convo-composer.rl-glass:focus-within { --rl-glass-ring: var(--color-focus-rim); }
 .rl-convo-composer.rl-glass[data-layout="column"],
 .rl-convo-composer.rl-glass[data-layout="panel"] { padding: 11px 12px 10px 14px; }
-/* On the stage it is the compact composer (D27, CompactComposer.css): the
-   chat pane's box, its 14px in and 14px corners, the field at 15px. */
-.rl-convo-composer.rl-glass.rl-compact-composer { gap: 10px; padding: 14px; border-radius: 14px; }
-.rl-convo-composer.rl-compact-composer .rl-convo-field { min-height: 24px; font-size: 15px; line-height: 1.5; }
+/* On the stage it is the compact composer (D27): the Home door's box, the
+   composer's one look (ComposerLook.css). */
 .rl-convo-field {
   display: block;
   width: 100%;

@@ -1,0 +1,128 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* The composer's one look: the Home door's box, worn by every composer —
+   the door's own (`.rl-monochat`), a chat pane's (`.rl-compact-dock`, D27:
+   the same FrontDoor, centred under its transcript) and the Agent pane's
+   (`.rl-compact-composer`, SessionComposer on the stage). One glass card
+   with 24 px corners on all four sides, the field at 15 px, one row of 32 px
+   pill chips, + and the mic as quiet round 30 px buttons, and the one primary
+   button a 34 px circle — send, queue or Stop, in ink or the accent, never a
+   red: the palette has none. Only each host's geometry lives with the host
+   (MonochatIsland.css, CompactComposer.css). Notices ride above the card
+   (`.rl-composer-notices`), never inside it. */
+
+/* ── The card ───────────────────────────────────────────────────────────── */
+:is(.rl-monochat, .rl-compact-dock) .rl-floating-composer.rl-frontdoor .rl-fd-island,
+.rl-convo-composer.rl-glass.rl-compact-composer {
+  padding: 18px var(--fd-island-pad-x, 20px) 12px;
+  border-radius: 24px;
+  background: var(--color-glass-3);
+  transform: none;
+}
+/* Near its minimum the box's padding steps down so the row still fits. */
+:is(.rl-monochat, .rl-compact-dock) .rl-floating-composer.rl-frontdoor.is-compact { --fd-island-pad-x: 14px; }
+.rl-convo-composer.rl-glass.rl-compact-composer { gap: 10px; }
+.rl-convo-composer.rl-compact-composer:focus-within { --rl-glass-ring: var(--color-focus-rim); }
+
+/* ── The field ──────────────────────────────────────────────────────────── */
+:is(.rl-monochat, .rl-compact-dock) .rl-floating-composer.rl-frontdoor .rl-fd-input { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
+.rl-convo-composer.rl-compact-composer .rl-convo-field { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
+/* Between the muted and the full ink, never see-through: a translucent ink
+   fell under 4.5:1 on the low-contrast themes (theme/doorContrast.test.ts). */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-input::placeholder,
+.rl-convo-composer.rl-compact-composer .rl-convo-field::placeholder { color: color-mix(in srgb, var(--color-ink-muted) 66%, var(--color-ink)); }
+
+/* ── The row ────────────────────────────────────────────────────────────── */
+/* One chip row (D40): the door pane never draws below DOOR_MIN_W
+   (lib/paneLayout.ts), where the row fits whole; a long repo or model name
+   ellipsizes inside its chip instead of wrapping the row. Near its minimum
+   (`is-compact`) the chips' gap steps down. */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-tools { gap: 7px; }
+:is(.rl-monochat, .rl-compact-dock) .rl-frontdoor .rl-fd-tools,
+:is(.rl-monochat, .rl-compact-dock) .rl-frontdoor.is-compact .rl-fd-tools { flex-wrap: nowrap; }
+:is(.rl-monochat, .rl-compact-dock) .rl-frontdoor.is-compact .rl-fd-tools { gap: 5px; }
+.rl-compact-composer .rl-convo-chips { gap: 7px; }
+/* Every chip at its natural width, never "Cla…" (LAST2): only the
+   project's name gives way, and only when the row has no room left. Beside
+   another pane (`is-chips-tight`, under 640 px) the chips draw tighter and
+   History is its icon, so the row fits whole from DOOR_MIN_W up. */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-tools > * { min-width: 0; flex-shrink: 0; }
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-tools > .rl-composer-chip[data-chip="project"] { flex-shrink: 1; min-width: 0; }
+:is(.rl-monochat, .rl-compact-dock) .rl-frontdoor.is-chips-tight .rl-composer-chip { gap: 5px; padding-left: 8px; padding-right: 8px; }
+:is(.rl-monochat, .rl-compact-dock) .rl-frontdoor.is-chips-tight .rl-composer-chip[data-chip="history"] > span { display: none; }
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
+/* A chat's own menus (History, More) sit in the row as chips of it. */
+:is(.rl-monochat, .rl-compact-dock) .rl-composer-accessories { display: contents; }
+:is(.rl-monochat, .rl-compact-dock) .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
+:is(.rl-monochat, .rl-compact-dock) .rl-monochat-trace-toggle svg { width: 14px; height: 14px; }
+
+/* ── The chips: one pill ────────────────────────────────────────────────── */
+/* A fainter wash than the menus' 6%, which pulls their label under 4.5:1 on
+   Red Sand (theme/doorContrast.test.ts). The Agent pane's mode, model,
+   folder and Talk chips take the composer menus' shape. */
+:is(.rl-monochat, .rl-compact-dock) .rl-composer-chip:not(:hover, [aria-expanded=true]) { background: color-mix(in srgb, var(--color-ink) 2%, transparent); }
+.rl-compact-composer .rl-convo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  min-height: 32px;
+  max-width: 260px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-ink) 2%, transparent);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 11px;
+}
+.rl-compact-composer button.rl-convo-chip:hover,
+.rl-compact-composer .rl-convo-chip[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--color-info) 45%, transparent);
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  color: var(--color-ink);
+}
+
+/* ── + and the mic: round, quiet until pointed at ───────────────────────── */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
+.rl-compact-composer .rl-convo-mic { width: 30px; min-width: 30px; height: 30px; color: var(--color-ink-muted); }
+
+/* ── The one primary button: a 34 px circle ─────────────────────────────── */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-go,
+.rl-compact-composer .rl-send { width: 34px; height: 34px; border-radius: 50%; }
+/* Stop is ink on the quiet fill: the same weight in every host, never a
+   coloured alarm. */
+:is(.rl-monochat, .rl-compact-dock) .rl-fd-go[data-state="stop"],
+.rl-compact-composer .rl-send[data-send="stop"] {
+  border-color: transparent;
+  background: var(--color-fill-3);
+  color: var(--color-ink);
+}
+
+/* ── Notices: one strip above the card ──────────────────────────────────── */
+/* The plan's one-line notice (NoticeStrip, D41) riding on the card: its
+   width, its 24 px top corners, and joined to it without a seam. The strip
+   runs 24 px on under the card, and is masked to the two corners the card's
+   rounding leaves open, so it reads as one piece wrapping the card's top and
+   never tints through the glass. The card keeps its four round corners. */
+.rl-composer-notices {
+  position: relative;
+  z-index: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: -24px;
+  padding-bottom: 24px;
+  border-radius: 24px 24px 0 0;
+  overflow: hidden;
+  background: var(--color-mode-redline-bg);
+  -webkit-mask:
+    linear-gradient(#000 0 0) top / 100% calc(100% - 24px) no-repeat,
+    radial-gradient(circle at 100% 100%, transparent 23.5px, #000 24px) bottom left / 24px 24px no-repeat,
+    radial-gradient(circle at 0 100%, transparent 23.5px, #000 24px) bottom right / 24px 24px no-repeat;
+  mask:
+    linear-gradient(#000 0 0) top / 100% calc(100% - 24px) no-repeat,
+    radial-gradient(circle at 100% 100%, transparent 23.5px, #000 24px) bottom left / 24px 24px no-repeat,
+    radial-gradient(circle at 0 100%, transparent 23.5px, #000 24px) bottom right / 24px 24px no-repeat;
+}
+.rl-composer-notices .rl-plan-notice { padding: 0 10px 0 22px; }
+.rl-composer-notices + .rl-fd-island { z-index: 1; }

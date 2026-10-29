@@ -1130,3 +1130,43 @@ describe("FrontDoor — the browser destination", () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 });
+
+// A chat's notices (item 4 of the composer fixes): the plan's one-line strip,
+// riding above the card, never a paragraph inside it.
+describe("a chat composer's notices", () => {
+  const SKILLS: ReadinessItem = {
+    id: "skill-stale", state: "warn", label: "The Redline skills are out of date",
+    detail: "They teach Claude how to present a plan and fold your revisions back in.",
+    fix: { label: "Install integration", kind: "install-integration" },
+  };
+  const workbench = { picker: null, mode: "chat" as const, cycleMode: () => {}, onSubmit: () => {}, project: null, onProjectChange: () => {}, streaming: false, onStop: () => {} };
+  const settleLazy = async () => { for (let i = 0; i < 20 && !host.querySelector(".rl-composer-notices"); i++) await flush(); };
+
+  it("draws one strip above the card: amber mark, short sentence, Install, ×, the explanation its tooltip", async () => {
+    const onFix = vi.fn(() => Promise.resolve(true));
+    await mount({ workbench, readiness: [SKILLS], onFix });
+    await settleLazy();
+    const notices = host.querySelector<HTMLElement>(".rl-composer-notices")!;
+    expect(notices).not.toBeNull();
+    // Joined to the card from above, outside it.
+    expect(notices.nextElementSibling?.classList.contains("rl-fd-island")).toBe(true);
+    expect(host.querySelector(".rl-fd-island .rl-plan-notice, .rl-fd-island .rl-fd-strip, .rl-fd-strip")).toBeNull();
+    const strip = notices.querySelector<HTMLElement>(".rl-plan-notice")!;
+    expect(strip.querySelector(".rl-plan-notice-mark")).not.toBeNull();
+    expect(strip.querySelector(".rl-plan-notice-text")!.textContent).toBe("Redline skills are out of date");
+    expect(strip.title).toBe(SKILLS.detail);
+    const install = strip.querySelector<HTMLButtonElement>(".rl-plan-notice-btn")!;
+    expect(install.textContent).toBe("Install");
+    await act(async () => install.click());
+    expect(onFix).toHaveBeenCalledWith(SKILLS);
+    await act(async () => strip.querySelector<HTMLButtonElement>(".rl-plan-notice-x")!.click());
+    expect(host.querySelector(".rl-plan-notice")).toBeNull();
+  });
+
+  it("leaves the door as it was: its fix-it chip in the row, no strip above the card", async () => {
+    await mount({ readiness: [SKILLS] });
+    await flush();
+    expect(host.querySelector(".rl-fd-setup")).not.toBeNull();
+    expect(host.querySelector(".rl-composer-notices")).toBeNull();
+  });
+});

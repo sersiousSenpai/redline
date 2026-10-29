@@ -104,7 +104,7 @@ interface Pair {
   /** 3 for a glyph that is a control's only label (WCAG 1.4.11). */
   min?: number;
 }
-const ISLAND = "components/MonochatIsland.css", COMPACT = "components/CompactComposer.css", MENU = "components/ComposerMenu.css", APP = "styles.css", STRIP = "components/DictationStrip.css";
+const ISLAND = "components/MonochatIsland.css", LOOK = "components/ComposerLook.css", MENU = "components/ComposerMenu.css", APP = "styles.css", STRIP = "components/DictationStrip.css";
 /** Where a door or compact-composer text takes its colour (and any fade),
  *  what it sits on, and the surface under that. The door's paper backdrop is
  *  `--color-paper`; the compact composer (D27: the chat pane's box, once the
@@ -126,15 +126,14 @@ const TEXTS: Pair[] = [
   { what: "a context chip, in the compact composer", color: [ISLAND, ".rl-context-chips button"], on: "color-bg-elevated" },
   { what: "a context chip that is on", color: [ISLAND, '.rl-context-chips button[aria-pressed="true"]'], background: [ISLAND, '.rl-context-chips button[aria-pressed="true"]'], on: "color-bg-elevated" },
   { what: "the sentence being typed", color: [APP, ".rl-fd-input"], on: "color-bg-elevated" },
-  { what: "the door's placeholder, on its composer box", color: [ISLAND, ".rl-monochat .rl-fd-input::placeholder"], background: [ISLAND, ".rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island"], on: "color-paper" },
+  { what: "the composer's placeholder, on its box (the door's and a chat's)", color: [LOOK, ":is(.rl-monochat, .rl-compact-dock) .rl-fd-input::placeholder"], background: [LOOK, ":is(.rl-monochat, .rl-compact-dock) .rl-floating-composer.rl-frontdoor .rl-fd-island"], on: "color-paper" },
   { what: "the compact composer's placeholder", color: [APP, ".rl-fd-input::placeholder"], on: "color-bg-elevated" },
   { what: "the composer's fix-it chip", color: [APP, ".rl-fd-setup"], background: [APP, ".rl-fd-setup"], on: "color-bg-elevated" },
-  { what: "a composer menu, in the door", color: [MENU, ".rl-composer-chip"], background: [ISLAND, ".rl-monochat .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
-  { what: "a composer menu, in the compact composer", color: [MENU, ".rl-composer-chip"], background: [COMPACT, ".rl-compact-composer .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
+  { what: "a composer menu, in the door or a chat", color: [MENU, ".rl-composer-chip"], background: [LOOK, ":is(.rl-monochat, .rl-compact-dock) .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
   // The session's chips and the chat's mode chip take the same pill there.
-  { what: "a session chip, in the compact composer", color: [COMPACT, ".rl-compact-composer .rl-convo-chip"], background: [COMPACT, ".rl-compact-composer .rl-convo-chip"], on: "color-bg-elevated" },
+  { what: "a session chip, in the compact composer", color: [LOOK, ".rl-compact-composer .rl-convo-chip"], background: [LOOK, ".rl-compact-composer .rl-convo-chip"], on: "color-bg-elevated" },
   // Stop is ink on the quiet fill: never a red, and as legible as Send.
-  { what: "Stop, in the compact composer", color: [COMPACT, '.rl-compact-composer .rl-fd-go[data-state="stop"]'], background: [COMPACT, '.rl-compact-composer .rl-fd-go[data-state="stop"]'], on: "color-bg-elevated", min: 3 },
+  { what: "Stop, in a chat's composer", color: [LOOK, ':is(.rl-monochat, .rl-compact-dock) .rl-fd-go[data-state="stop"]'], background: [LOOK, ':is(.rl-monochat, .rl-compact-dock) .rl-fd-go[data-state="stop"]'], on: "color-bg-elevated", min: 3 },
   { what: "a launch in flight, in the door", color: [APP, ".rl-fd-flight-open"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
   { what: "where that launch is running", color: [APP, ".rl-fd-detail"], opacity: [APP, ".rl-fd-flight-open .rl-fd-detail"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
   // The dictation strip, over the door's box, the card or any composer.
@@ -200,7 +199,7 @@ const CHAT: Pair[] = [
   { what: "a new chat's suggestion under the pointer", color: [PAGE, ".rb-suggestion"], under: [[PAGE, ".rb-suggestion"]], background: [PAGE, ".rb-suggestion:hover"], on: "color-paper" },
   { what: "the header's linked, on", color: [BROWSER, '.rb-icon-button[aria-pressed="true"]'], under: [[BROWSER, ".rb-thread-tools"]], background: [BROWSER, '.rb-icon-button[aria-pressed="true"]'], on: "color-paper", min: 3 },
   { what: "the rail tray's Synthesize", color: [BROWSER, ".rb-button-primary"], background: [BROWSER, ".rb-button-primary"], on: "color-bg-elevated" },
-  { what: "the chat's mode chip, in build", color: [WORK, ".rl-chat-mode-chip.is-build"], background: [WORK, ".rl-chat-mode-picker button"], on: BOTH },
+  { what: "the chat's mode chip, in build", color: [WORK, ".rl-chat-mode-chip.is-build"], background: [LOOK, ":is(.rl-monochat, .rl-compact-dock) .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: BOTH },
   { what: "the build mode's warning", color: [WORK, ".rl-chat-build-warning"], on: BOTH },
   // Inline styles, held to these tokens by the scan below: the mission
   // chat's Synthesize and Save, a comment discussion's Attach and Update,

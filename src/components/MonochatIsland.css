@@ -70,45 +70,15 @@
    classic-scrollbar Mac then grows a horizontal scrollbar under the composer,
    lifting it 11px on the first keystroke. */
 .rl-monochat .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; max-height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; flex-shrink: 0; margin: 0; padding: 0 16px 14px; opacity: 1; animation: none; justify-content: flex-start; }
-.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 8px 2px 0; transform: none; }
-.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-input { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
-/* Between the muted and the full ink, never see-through: a translucent ink
-   fell under 4.5:1 on the low-contrast themes (theme/doorContrast.test.ts). */
-.rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink-muted) 66%, var(--color-ink)); }
-/* One chip row, always (D40): the door pane never draws below DOOR_MIN_W
-   (lib/paneLayout.ts), where the row fits whole; a long repo or model name
-   ellipsizes inside its chip instead of wrapping the row. */
-.rl-monochat .rl-fd-tools { gap: 7px; }
-.rl-monochat .rl-frontdoor .rl-fd-tools,
-.rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { flex-wrap: nowrap; }
-/* Compact (the door near its minimum): the box's padding and the chips' gap
-   step down so the row still fits whole at DOOR_MIN_W. */
-.rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { gap: 5px; }
-/* Every chip at its natural width, never "Cla…" (LAST2): only the
-   project's name gives way, and only when the row has no room left. Beside
-   another pane (`is-chips-tight`, under 640 px) the chips draw tighter and
-   History is its icon, so the row fits whole from DOOR_MIN_W up. */
-.rl-monochat .rl-fd-tools > * { min-width: 0; flex-shrink: 0; }
-.rl-monochat .rl-fd-tools > .rl-composer-chip[data-chip="project"] { flex-shrink: 1; min-width: 0; }
-.rl-monochat .rl-frontdoor.is-chips-tight .rl-composer-chip { gap: 5px; padding-left: 8px; padding-right: 8px; }
-.rl-monochat .rl-frontdoor.is-chips-tight .rl-composer-chip[data-chip="history"] > span { display: none; }
-.rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
-.rl-monochat .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
-/* A fainter wash than the menus' 6%, which pulls their label under 4.5:1 on
-   Red Sand (theme/doorContrast.test.ts). */
-.rl-monochat .rl-composer-chip:not(:hover, [aria-expanded=true]) { background: color-mix(in srgb, var(--color-ink) 2%, transparent); }
-.rl-monochat .rl-fd-go { width: 34px; height: 34px; border-radius: 50%; }
-.rl-monochat .rl-composer-accessories { display: contents; }
-.rl-monochat .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
-.rl-monochat .rl-monochat-trace-toggle svg { width: 14px; height: 14px; }
+/* The box itself — card, field, chips, + and the mic, the send circle — is
+   the composer's one look (ComposerLook.css), the chat pane's too. */
 .rl-monochat .rl-fd-strip { margin-top: 10px; }
 .rl-monochat [data-chat-room] { background: transparent !important; }
 .rl-monochat .rl-floating-composer > * { position: static; }
 .rl-monochat .rl-floating-composer .rl-fd-island { position: static; }
 
 .rl-monochat .rl-floating-composer.rl-frontdoor { padding: 0 8px 8px; }
-.rl-monochat .rl-floating-composer.rl-frontdoor.is-compact { padding: 0 4px 8px; --fd-island-pad-x: 14px; --fd-edge: calc(4px + 1px + var(--fd-island-pad-x)); }
-.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px var(--fd-island-pad-x) 12px; border-radius: 24px; background: var(--color-glass-3); }
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-compact { padding: 0 4px 8px; --fd-edge: calc(4px + 1px + var(--fd-island-pad-x)); }
 .rl-monochat .rl-fd-strip { display: none; }
 
 .rl-monochat-conversation { justify-content: center; }

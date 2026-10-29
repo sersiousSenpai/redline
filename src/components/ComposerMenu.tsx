@@ -9,17 +9,24 @@ export interface ComposerOption {
   disabled?: boolean; group?: string;
 }
 
-/** The composer's menus share placement, keyboard navigation and glass material. */
-export function ComposerMenu({ label, title, value, options, onChange, icon, children, chip }: {
+/** The composer's menus share placement, keyboard navigation and glass
+ *  material: a popover portalled out of the card (`Panel`), above or below the
+ *  chip by the room there is with that room as its `maxHeight`, and over a
+ *  native browser page the page's picture first (`useMenuOverlay`, as the
+ *  plan's ⋯). A pick applies and closes; Esc closes; focus goes back to the
+ *  chip either way. */
+export function ComposerMenu({ label, title, value, options, onChange, icon, children, chip, className }: {
   label: string; title?: string; value?: string; options: ComposerOption[];
   onChange: (value: string) => void; icon?: ReactNode; children?: ReactNode;
   /** Which chip this is (`data-chip`), for the row's sizing rules. */
   chip?: string;
+  /** More classes for the chip. */
+  className?: string;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
-  const pop = useClickPopover(trigger, "left", "above", 304, true);
+  const pop = useClickPopover(trigger, "left", "above", 304);
   return <>
-    <button ref={trigger} type="button" className="rl-composer-chip" aria-label={label} data-chip={chip}
+    <button ref={trigger} type="button" className={`rl-composer-chip${className ? ` ${className}` : ""}`} aria-label={label} data-chip={chip}
       title={title} aria-haspopup="menu" aria-expanded={pop.open} onClick={pop.toggle}>
       {icon}<span>{children ?? label}</span><ChevronDown size={12}/>
     </button>

@@ -77,7 +77,9 @@ describe("Home chat containment", () => {
     const renderPlanning = () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} onClose={() => {}} onPlan={onPlan} />);
     await act(async () => renderPlanning());
     await act(async () => host.querySelector<HTMLButtonElement>(".rl-chat-mode-chip")!.click());
-    await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".rl-chat-mode-menu button")].find(button => button.textContent === "Plan")!.click());
+    // The mode menu is a popover out of the card: a pick applies and closes.
+    await act(async () => [...document.body.querySelectorAll<HTMLButtonElement>(':scope > [role="menu"] [role="menuitemradio"]')].find(button => button.textContent?.startsWith("Plan"))!.click());
+    expect(document.body.querySelector(':scope > [role="menu"]')).toBeNull();
     expect(host.querySelector(".rl-chat-mode-chip")?.textContent).toContain("Plan");
     // With the box empty the one button is Stop; an instruction makes it
     // queue the plan behind the reply.

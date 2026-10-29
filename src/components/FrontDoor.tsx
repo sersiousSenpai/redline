@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -54,6 +56,10 @@ import {
   type ModelCatalogs,
 } from "../lib/backendChoice";
 
+import "./ComposerLook.css";
+
+// A chat composer's notices ride above its card; a well machine never loads them.
+const ComposerNotices = lazy(() => import("./plan/ComposerNotices").then((m) => ({ default: m.ComposerNotices })));
 
 // The front door. The document plate's resting state and where Redline opens:
 // one line of type, one box, and ⏎ starts a real plan-mode session in a real
@@ -887,6 +893,12 @@ function FrontDoorView(props: FrontDoorProps) {
         </div>
       )}
       {chips}
+      {/* A chat's notices: one strip each, above the card (never inside it). */}
+      {workbench && (readiness.length > 0 || (refusedWhy && !blocked && !offer)) && (
+        <Suspense fallback={null}>
+          <ComposerNotices items={readiness} refused={!blocked && !offer ? refusedWhy : null} onFix={handleFix} />
+        </Suspense>
+      )}
       <div ref={islandRef} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
@@ -1049,7 +1061,7 @@ function FrontDoorView(props: FrontDoorProps) {
               title="Attach files as context"
               className="rl-fd-tool"
             >
-              <Plus size={14} />
+              <Plus size={16} />
             </button>
 
             <button
@@ -1058,7 +1070,7 @@ function FrontDoorView(props: FrontDoorProps) {
               title={dictation.listening ? "Stop dictating" : "Dictate"}
               className={`rl-fd-tool${dictation.listening ? " is-hot" : ""}`}
             >
-              <Mic size={14} />
+              <Mic size={16} />
             </button>
             {/* In a chat, the one primary button (design decision 5): while
                 the reply runs, an empty box makes it Stop and text makes it
@@ -1085,7 +1097,7 @@ function FrontDoorView(props: FrontDoorProps) {
               }
               className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
             >
-              {stopping ? <Square size={11} fill="currentColor" /> : floating ? <ArrowUp size={17}/> : <CornerDownLeft size={15} />}
+              {stopping ? <Square size={11} fill="currentColor" /> : floating ? <ArrowUp size={16}/> : <CornerDownLeft size={15} />}
             </button>
             </div>
             </>
@@ -1095,7 +1107,7 @@ function FrontDoorView(props: FrontDoorProps) {
         {/* A refusal with no panel of its own — the only one that would
             otherwise be completely silent. `role="status"` so a screen reader
             hears the same thing the shake says. */}
-        {refusedWhy && !blocked && !offer && (
+        {refusedWhy && !blocked && !offer && !workbench && (
           <div className="rl-fd-refused" role="status">
             {refusedWhy}
           </div>
@@ -1243,7 +1255,7 @@ function FrontDoorView(props: FrontDoorProps) {
       })()}
 
       {/* The chip's one setup installs every piece it names: none is listed twice. */}
-      <ReadinessStrip items={setupItem ? readiness.filter((item) => item.fix?.kind !== "install-integration") : readiness} onFix={handleFix} />
+      {!workbench && <ReadinessStrip items={setupItem ? readiness.filter((item) => item.fix?.kind !== "install-integration") : readiness} onFix={handleFix} />}
     </div>
   );
 }
@@ -1354,7 +1366,8 @@ export function BackendMenu({
   modelStatus?: ModelCatalogStatus;
   onRefresh?: () => void;
   providerInfo?: { path: string | null; version?: string | null; source: string };
-  onLocate: () => void;
+  /** "Change CLI…", where the host can run it. */
+  onLocate?: () => void;
   onOpen: () => void;
   compact: boolean;
   allowedBackends?: readonly BackendChoice["backend"][];
@@ -1375,7 +1388,7 @@ export function BackendMenu({
   // `PlanMenu`: this menu has THREE axes, and choosing a harness usually means
   // choosing its model next. Outside-click and Escape dismiss it (`useDismiss`,
   // inside the hook).
-  const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above", 328, true);
+  const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above", 328);
 
   const models = modelsFor(choice.backend, modelCatalogs);
   const efforts = effortsFor(choice.backend, effortModel, modelCatalogs);
@@ -1489,7 +1502,7 @@ export function BackendMenu({
             {providerInfo && <div className="rl-fd-menu-note" title={providerInfo.path ?? undefined} style={{ overflowWrap: "anywhere" }}>
               {providerInfo.version ? `${backendLabel(choice.backend)} ${providerInfo.version} · ` : ""}{providerInfo.path ?? "CLI not located"}
             </div>}
-            {row("locate-provider", false, "Change CLI…", onLocate)}
+            {onLocate && row("locate-provider", false, "Change CLI…", onLocate)}
             <div ref={modelsRef} role="group" aria-label="Model" onKeyDown={event => {
               if (event.key !== "ArrowRight") return;
               const model = (event.target as HTMLElement).closest<HTMLElement>("[data-effort-model]")?.dataset.effortModel;

@@ -41,6 +41,7 @@ import type { ModelFact } from "./convo/reducer";
 import { effortLabel, modeLabel, modelChipLabel } from "./convo/status";
 import "../ComposerMenu.css";
 import "../CompactComposer.css";
+import "../ComposerLook.css";
 
 export interface SessionComposerProps {
   terminalId: string | null;
@@ -173,7 +174,7 @@ export function SessionComposer(props: SessionComposerProps) {
           title={dictation.listening ? "Stop dictating" : "Dictate"}
           onClick={dictation.toggle}
         >
-          <Mic size={14} aria-hidden />
+          <Mic size={16} aria-hidden />
         </button>
         <button
           type="button"
@@ -207,7 +208,7 @@ function ModeChip({
   onResult: (result: SwitchResult) => void;
 }) {
   const anchor = useRef<HTMLButtonElement>(null);
-  const pop = useClickPopover(anchor, "left", "above", 260, true);
+  const pop = useClickPopover(anchor, "left", "above", 260);
   const pick = (next: ConvoMode) => {
     pop.close();
     anchor.current?.focus();
@@ -312,7 +313,7 @@ function ModelChip({
   onResult: (result: SwitchResult) => void;
 }) {
   const anchor = useRef<HTMLButtonElement>(null);
-  const pop = useClickPopover(anchor, "left", "above", 280, true);
+  const pop = useClickPopover(anchor, "left", "above", 280);
   const { catalogs, errors, request } = useModelCatalogs();
   const backend = BACKEND[harness];
   const [asked, setAsked] = useState(false);

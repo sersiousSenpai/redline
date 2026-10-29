@@ -126,14 +126,16 @@ describe("hard stops (D38, D40)", () => {
 describe("the door at its minimum (D40)", () => {
   it("keeps one chip row and a one-line headline", () => {
     const island = css("src/components/MonochatIsland.css");
-    expect(island).toMatch(/\.rl-monochat \.rl-frontdoor\.is-compact \.rl-fd-tools\s*\{\s*flex-wrap:\s*nowrap;/);
+    // The row is the composer's one look (ComposerLook.css), the door's and a chat's.
+    const look = css("src/components/ComposerLook.css");
+    expect(look).toMatch(/:is\(\.rl-monochat, \.rl-compact-dock\) \.rl-frontdoor\.is-compact \.rl-fd-tools\s*\{\s*flex-wrap:\s*nowrap;/);
     expect(rule(island, ".rl-fd-title")).toMatch(/white-space:\s*nowrap/);
   });
 
   // LAST2 walk: in a split the chips read "Cla…", "C…", "Hist…".
   it("draws every chip at its natural width: only the project's name gives way, History is its icon beside another pane", () => {
-    const island = css("src/components/MonochatIsland.css");
-    expect(island).toMatch(/\.rl-monochat \.rl-fd-tools > \* \{ min-width: 0; flex-shrink: 0; \}/);
+    const island = css("src/components/ComposerLook.css");
+    expect(island).toMatch(/:is\(\.rl-monochat, \.rl-compact-dock\) \.rl-fd-tools > \* \{ min-width: 0; flex-shrink: 0; \}/);
     expect(island).toMatch(/\.rl-fd-tools > \.rl-composer-chip\[data-chip="project"\] \{ flex-shrink: 1; min-width: 0; \}/);
     expect(island).toMatch(/\.is-chips-tight \.rl-composer-chip\[data-chip="history"\] > span \{ display: none; \}/);
   });
