@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Surface } from "../config/workspace";
-import { HOME_KEY, emptyWorkbench, type PaneInit, type SplitDirection, type WorkbenchState } from "./model";
+import { HOME_KEY, emptyWorkbench, singletonHolder, type PaneInit, type SplitDirection, type WorkbenchState } from "./model";
 import { reduce, type WorkbenchAction } from "./reducer";
 import { findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, stageView, surfaceOfPane, tileOf } from "./view";
 
@@ -141,5 +141,42 @@ describe("selectors", () => {
     const split = reduce(s, { type: "splitPane", paneId: focusedId(s), direction: "row", pane: browser, newPaneId: "b" });
     expect(selectLayoutKey(split)).not.toBe(k);
     expect(selectLayoutKey(reduce(split, { type: "resizeSplit", path: [], weights: [0.3, 0.7] }))).not.toBe(selectLayoutKey(split));
+  });
+});
+
+describe("singletons under any split tree (W5)", () => {
+  /** Home: door | (browser b1 / (plan p / browser b2)), plus a second plan in another tab. */
+  const deep = () => {
+    let s = apply([{ type: "ensureDefaults", key: HOME_KEY, tabIds: ["t1"], paneIds: ["d"] }]);
+    s = reduce(s, { type: "splitPane", paneId: "d", direction: "row", pane: browser, newPaneId: "b1" });
+    s = reduce(s, { type: "splitPane", paneId: "b1", direction: "column", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, newPaneId: "p" });
+    s = reduce(s, { type: "splitPane", paneId: "p", direction: "row", pane: browser, newPaneId: "b2" });
+    return s;
+  };
+
+  it("exactly one visible pane holds each singleton, at any depth: Bring here's pane, else the focused one, else the first", () => {
+    let s = deep();
+    expect(focusedId(s)).toBe("b2");
+    expect(singletonHolder(s, "browser", null)).toBe("b2");
+    expect(singletonHolder(s, "browser", "b1")).toBe("b1");
+    expect(singletonHolder(s, "plan", null)).toBe("p");
+    s = reduce(s, { type: "focusPane", paneId: "d" });
+    // Neither browser focused: the first in reading order.
+    expect(singletonHolder(s, "browser", null)).toBe("b1");
+    // Bring here's pane gone from the screen: the rule falls through.
+    s = reduce(s, { type: "closePane", paneId: "b1" });
+    expect(singletonHolder(s, "browser", "b1")).toBe("b2");
+  });
+
+  it("the browser's layout key follows every divider at every depth, and the zoom", () => {
+    const s = deep();
+    const k = selectLayoutKey(s);
+    const inner = reduce(s, { type: "resizeSplit", path: [1, 1], weights: [0.3, 0.7] });
+    expect(selectLayoutKey(inner)).not.toBe(k);
+    const zoomed = reduce(s, { type: "zoomPane" });
+    expect(selectLayoutKey(zoomed)).not.toBe(k);
+    // A zoom shows only its pane: the stage view and the companion read it.
+    expect(stageView(zoomed).visibleKinds).toEqual(["browser"]);
+    expect(stageView(s).visibleKinds).toEqual(["door", "browser", "plan"]);
   });
 });
