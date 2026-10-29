@@ -7,7 +7,7 @@ import { shouldExitFullscreen } from "./useAutoExitFullscreen";
 
 // A fullscreen discussion on a mid-size window with the sidebar open.
 const fullscreenBase: PaneLayoutInput = {
-  winWidth: 800,
+  winWidth: 1100,
   sidebarWidth: 240,
   sidebarCollapsed: false,
   paneWidth: 400,
@@ -17,11 +17,11 @@ const fullscreenBase: PaneLayoutInput = {
 
 describe("shouldExitFullscreen", () => {
   it("exits when collapsing the sidebar frees enough room", () => {
-    // 800 - 20 dividers - 20 edge ring - 400 pane = 360 ≥ DOC_MIN → fits.
+    // 1100 - 2 one-rule seams - 400 pane = 698 ≥ DOC_MIN (600) → fits.
     const next = { ...fullscreenBase, sidebarCollapsed: true };
     expect(
       shouldExitFullscreen(
-        { sidebarCollapsed: false, winWidth: 800 },
+        { sidebarCollapsed: false, winWidth: 1100 },
         next,
         true,
       ),
@@ -34,7 +34,7 @@ describe("shouldExitFullscreen", () => {
       winWidth: 600,
       sidebarCollapsed: true,
     };
-    // 600 - 20 - 20 - 400 = 160 < DOC_MIN → the pane still wouldn't fit beside.
+    // 600 - 2 - 400 = 198 < DOC_MIN → the pane still wouldn't fit beside.
     expect(
       shouldExitFullscreen(
         { sidebarCollapsed: false, winWidth: 600 },

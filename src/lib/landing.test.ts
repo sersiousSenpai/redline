@@ -150,9 +150,11 @@ describe("landing wiring", () => {
     // masked on every non-document surface and collapsible on the document.
     // Same failure, one layer out — so the guard follows it out.
     //
-    // 1. The sidebar's divider is always in flow whatever the panel does, and
-    //    it carries the door's action while collapsed.
-    expect(app).toContain("onClick: openFrontDoor");
+    // 1. The stage's strip is on screen whatever the sidebar does, and its
+    //    ＋ opens a door tab. (The seam's old ＋ pill went with D38: no pill
+    //    floats on a seam.)
+    expect(app).toContain("onNewTab={openDoorTab}");
+    expect(app).not.toContain("onClick: openFrontDoor");
     // 2. A real chord, so the door is reachable with no pointer at all.
     expect(app).toContain("isNewPlanKey(e)");
     expect(app).toContain("openFrontDoorRef.current()");

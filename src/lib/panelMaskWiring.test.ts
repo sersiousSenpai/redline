@@ -76,7 +76,8 @@ describe("panel mask wiring", () => {
     expect(launch).toContain('if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending)');
   });
   it("responsive poses fold the side columns on a narrow window, and every fold gesture goes through them (D18)", () => {
-    expect(app).toContain("const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen });");
+    // D40: the tab on screen's minimum folds what it cannot sit beside.
+    expect(app).toContain("const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen, stageMin });");
     expect(app).toContain("const { sidebarCollapsed, paneCollapsed } = pose;");
     // Gestures edit the narrow opening while narrow, the preference otherwise.
     for (const name of ["revealSidebar", "revealPane", "toggleSidebar", "togglePane"]) {

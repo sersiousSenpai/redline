@@ -352,10 +352,10 @@ import {
   type NudgeState,
 } from "./lib/nudge";
 import {
-  SHELL_EDGE,
-  SHELL_GUTTER,
+  DIVIDER_W,
   canonicalLayout,
   computePaneLayout,
+  docMinFor,
   isLayoutAtRest,
   type PaneLayout,
 } from "./lib/paneLayout";
@@ -370,12 +370,12 @@ import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, re
 import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
 import { needsYouTerminals, terminalStatus, wallStatus } from "./workbench/status";
 import type { NeedReason } from "./lib/sessionGroups";
-import { HOME_KEY, activeSessionOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeSessionOf, activeTabOf, tabMinWidth, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
 import { NO_NARROW_OPEN, narrowLayoutInputs, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
-import { RAIL_EDGE_W, SIDEBAR_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
+import { RAIL_EDGE_W, SIDEBAR_EDGE_W, SIDEBAR_MIN_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, clampSidebarWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
 import type { OpenFileDetail } from "./lib/fileLinks";
 import type { PaneContext } from "./workbench/WorkbenchStage";
@@ -601,6 +601,18 @@ void loadWorkbenchStage().catch(() => {});
 void loadPlanPane().catch(() => {});
 let doorCounter = 0;
 const selectActiveKey = (s: WorkbenchState) => s.activeKey;
+/** What the tab on screen asks of the stage (D40): its split's panes at
+ *  their minimums. */
+const selectStageMin = (s: WorkbenchState) => {
+  const set = s.sets[s.activeKey];
+  return set ? tabMinWidth(activeTabOf(set), set.panes) : 0;
+};
+/** The widest the stage can be at this window, both side columns folded to
+ *  their edges (D40): a split or a merge whose panes cannot all keep their
+ *  minimums in it is refused; one that fits folds what it must. */
+const stageRoom = () => window.innerWidth - SIDEBAR_EDGE_W - RAIL_EDGE_W - 2 * DIVIDER_W;
+/** The quiet hint a refused split or merge leaves. */
+const NO_ROOM_HINT = "No room for another pane here — widen the window";
 const newDoorPaneId = () => `door-${Date.now().toString(36)}-${(doorCounter++).toString(36)}`;
 
 interface ComposingState {
@@ -2446,12 +2458,15 @@ function App() {
   const closeTabRequest = useCallback((tabId: string) => void requestClose({ tabId }), [requestClose]);
   const closePaneRequest = useCallback((paneId: string) => void requestClose({ paneId }), [requestClose]);
   // The pane menu's Split right / down, as ⌘D / ⌘⇧D outside a wall.
+  const noRoomHint = useCallback(() => setToast(NO_ROOM_HINT, 3000), [setToast]);
   const splitFocusedWithDoor = useCallback((direction: "row" | "column") => {
-    const { tab } = activePanes(wb.getState());
+    const before = wb.getState();
+    const { tab } = activePanes(before);
     if (!tab) return;
     const paneId = newDoorPaneId();
-    wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId });
-  }, []);
+    wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId, room: stageRoom() });
+    if (wb.getState() === before) setToast(NO_ROOM_HINT, 3000);
+  }, [setToast]);
   const closeFromInside = useCallback(() => {
     const { set, tab } = activePanes(wb.getState());
     if (!set || !tab) return;
@@ -2581,7 +2596,9 @@ function App() {
         return;
       }
       const paneId = newDoorPaneId();
-      wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction: dir, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId });
+      const before = wb.getState();
+      wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction: dir, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId, room: stageRoom() });
+      if (wb.getState() === before) setToast(NO_ROOM_HINT, 3000);
     };
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keydown", onZoomKey, true);
@@ -2816,7 +2833,11 @@ function App() {
       aria-pressed={stageTile.tiled}
       onClick={() => {
         if (stageTile.tiled) wb.dispatch({ type: "closePane", paneId: stageTile.docId });
-        else if (activeId) wb.dispatch({ type: "splitPane", paneId: stageTile.surfaceId, direction: "row", pane: { kind: "plan", data: { sessionId: activeId, version: null } }, before: true });
+        else if (activeId) {
+          const before = wb.getState();
+          wb.dispatch({ type: "splitPane", paneId: stageTile.surfaceId, direction: "row", pane: { kind: "plan", data: { sessionId: activeId, version: null } }, before: true, room: stageRoom() });
+          if (wb.getState() === before) setToast(NO_ROOM_HINT, 3000);
+        }
       }}
     >
       <Columns2 size={16} aria-hidden />
@@ -2855,8 +2876,12 @@ function App() {
   // narrow is kept for the narrow spell; past the breakpoint the stored
   // preference applies again. A resize never writes the preference.
   const [narrowOpen, setNarrowOpen] = useState<NarrowOpen>(NO_NARROW_OPEN);
-  useEffect(() => setNarrowOpen((open) => settleNarrowOpen(open, winWidth)), [winWidth]);
-  const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen });
+  // What the tab on screen asks of the stage (D40): a split folds the side
+  // columns it cannot sit beside, as a narrow window does, and gives them
+  // back when it closes.
+  const stageMin = useWorkbench(wb, selectStageMin);
+  useEffect(() => setNarrowOpen((open) => settleNarrowOpen(open, winWidth, stageMin)), [winWidth, stageMin]);
+  const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen, stageMin });
   const poseRef = useRef(pose);
   poseRef.current = pose;
   const narrowOpenRef = useRef(narrowOpen);
@@ -3606,10 +3631,6 @@ function App() {
   const printFocusedRef = useRef(printFocused);
   printFocusedRef.current = printFocused;
   const sidebarRef = useRef<HTMLElement | null>(null);
-  // When both side panes are dragged so wide that the document column is
-  // squeezed to a sliver, the two dividers' chevrons collide. We replace them
-  // with a single vertical "latch" (‹ above, › below) centered over the
-  // vanished document; clicking either arrow snaps it back open.
   const docColumnRef = useRef<HTMLDivElement | null>(null);
   // The two elements the contents-rail drag resizes directly.
   const tocRailRef = useRef<HTMLDivElement | null>(null);
@@ -3617,17 +3638,15 @@ function App() {
   // The collapsed rail's "☰ Contents" button, which drops to a bare burger
   // when the text column reaches it.
   const tocBtnRef = useRef<HTMLButtonElement | null>(null);
-  const [latchPos, setLatchPos] = useState({ left: 0, top: 0 });
 
-  // Track the viewport width so each side pane's max can be "up to the other
-  // pane" — letting EITHER pane be dragged until the document clamps fully
-  // shut, symmetrically. (A fixed 320px reserve made this lopsided: one pane
-  // could clamp the doc shut and the other couldn't.)
   // `winWidth` is declared with the responsive poses, above (D18).
-  const sidebarWidth = sidebarWidthPref;
+  // Read through the sidebar's hard stop (D38), so a width stored before it
+  // is never drawn below 200 px.
+  const sidebarWidth = clampSidebarWidth(sidebarWidthPref);
 
-  // The row's space model: the doc column floors at DOC_MIN and any pane
-  // width past that becomes curtain overlay instead of flow. Stateless — it
+  // The row's space model: the stage floors at its hard stop (D38/D40), the
+  // columns give it room back down to their own minimums, and only what is
+  // left — a column opened by hand while narrow — curtains. Stateless — it
   // appears and retracts continuously as widths / window / collapse change.
   // Memoized because it is destructured straight into effect deps below: a
   // fresh object literal per render re-ran those effects (and rebuilt their
@@ -3644,9 +3663,13 @@ function App() {
         // The same inputs the live path (`applyLiveLayout`) measures with.
         paneEdgeW: RAIL_EDGE_W,
         sidebarEdgeW: SIDEBAR_EDGE_W,
+        sidebarMin: SIDEBAR_MIN_W,
+        paneMin: RAIL_MIN_W,
+        stageMin,
         ...narrowInputs,
       }),
     [
+      stageMin,
       winWidth,
       sidebarWidth,
       sidebarCollapsed,
@@ -3666,9 +3689,9 @@ function App() {
   // BETWEEN drags: a layout effect re-writes the same variables from state
   // after every render, so the inline write is simply the freshest value.
   //
-  // Three things genuinely need a render because they add or remove DOM rather
-  // than resize it — the curtain's extra divider copy, the latch, and hiding
-  // the native browser webview. Those are tracked as booleans and committed
+  // Two things genuinely need a render because they add or remove DOM rather
+  // than resize it — the curtain's extra divider copy and hiding the native
+  // browser webview. Those are tracked as booleans and committed
   // only when one actually flips, at most a couple of times per drag.
   // Each live size is written DIRECTLY onto the one element that uses it.
   //
@@ -3686,6 +3709,8 @@ function App() {
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
   const liveSizeRef = useRef({ sidebarWidth, paneWidth, winWidth });
+  const stageMinRef = useRef(stageMin);
+  stageMinRef.current = stageMin;
   const layoutFlagsRef = useRef({
     sidebarCollapsed,
     paneCollapsed,
@@ -3696,15 +3721,14 @@ function App() {
     paneCollapsed,
     paneFullscreen,
   };
-  // The freshest layout, live during a drag. Consumers that must compute real
-  // geometry mid-drag (the latch's position) read this instead of the
-  // render-time `layout`, which is frozen for the duration.
+  // The freshest layout, live during a drag, for anything that must read real
+  // geometry mid-drag instead of the render-time `layout`, which is frozen
+  // for the duration.
   const liveLayoutRef = useRef<PaneLayout>(layout);
   const [liveFlags, setLiveFlags] = useState({
     curtain: layout.curtainActive,
     curtainL: layout.sidebarOverlayPx > 0,
     curtainR: layout.paneOverlayPx > 0,
-    docObscured: layout.docVisibleW < 56,
   });
 
   const applyLiveLayout = useCallback(
@@ -3727,6 +3751,11 @@ function App() {
         paneEdgeW: RAIL_EDGE_W,
         // A collapsed sidebar keeps its icon pose (D18).
         sidebarEdgeW: SIDEBAR_EDGE_W,
+        // Hard stops (D38): a short stage takes room back from the columns,
+        // never below their minimums.
+        sidebarMin: SIDEBAR_MIN_W,
+        paneMin: RAIL_MIN_W,
+        stageMin: stageMinRef.current,
         // Narrow, a column opened by hand curtains over a readable document;
         // the default narrow pose never does (D18).
         ...narrowLayoutInputs(poseRef.current, narrowOpenRef.current),
@@ -3737,15 +3766,17 @@ function App() {
       // the content (inner aside) stays pinned at min so it is revealed rather
       // than reflowed.
       setGeom(sidebarClipRef.current, "width", `${l.sidebarFlowW}px`);
+      // The aside never draws below its hard stop (D38): a reveal narrower
+      // than that clips it rather than reflowing it.
       setGeom(
         sidebarAsideRef.current,
         "width",
-        `${Math.max(sizes.sidebarWidth, 180)}px`,
+        `${Math.max(l.sidebarW, SIDEBAR_MIN_W)}px`,
       );
       setGeom(
         sidebarCurtainDivRef.current,
         "right",
-        `${-(l.sidebarOverlayPx + SHELL_GUTTER)}px`,
+        `${-(l.sidebarOverlayPx + DIVIDER_W)}px`,
       );
       // Fullscreen makes the clip `display: contents` — no box to size, and a
       // stale width left on it would be resurrected on the way out.
@@ -3757,12 +3788,12 @@ function App() {
       setGeom(
         paneAsideRef.current,
         "width",
-        f.paneFullscreen ? "" : `${clampRailWidth(sizes.paneWidth)}px`,
+        f.paneFullscreen ? "" : `${clampRailWidth(l.paneW)}px`,
       );
       setGeom(
         paneCurtainDivRef.current,
         "left",
-        `${-(l.paneOverlayPx + SHELL_GUTTER)}px`,
+        `${-(l.paneOverlayPx + DIVIDER_W)}px`,
       );
       // Discrete curtain styling (overflow / stacking / the drop shadow that
       // reads as "painted over the doc") is a CSS rule keyed on this attribute,
@@ -3771,20 +3802,18 @@ function App() {
       // on a real flip, since an attribute write invalidates either way.
       setCurtain(sidebarClipRef.current, l.sidebarOverlayPx > 0);
       setCurtain(paneClipRef.current, !f.paneFullscreen && l.paneOverlayPx > 0);
-      // The three things a variable cannot express: an extra divider node at
-      // the curtain's visible edge, the latch, and hiding the native browser
-      // webview. Committed only when one actually flips.
+      // The two things a variable cannot express: an extra divider node at
+      // the curtain's visible edge, and hiding the native browser webview.
+      // Committed only when one actually flips.
       const next = {
         curtain: l.curtainActive,
         curtainL: l.sidebarOverlayPx > 0,
         curtainR: l.paneOverlayPx > 0,
-        docObscured: l.docVisibleW < 56,
       };
       setLiveFlags((prev) =>
         prev.curtain === next.curtain &&
         prev.curtainL === next.curtainL &&
-        prev.curtainR === next.curtainR &&
-        prev.docObscured === next.docObscured
+        prev.curtainR === next.curtainR
           ? prev
           : next,
       );
@@ -3927,84 +3956,6 @@ function App() {
     docWide,
     docMeasure,
   ]);
-
-  // Position the latch over the visible remnant of the document. The doc
-  // column's flow box floors at DOC_MIN now, so "squeezed shut" means the
-  // curtains cover it — center the latch on the strip they leave uncovered.
-  // Position is relative to the positioned <main> ancestor (the document
-  // column's offsetParent).
-  // Reads the LIVE layout, not the render-time one, so a recompute triggered
-  // mid-drag (the latch appearing) lands in the right place instead of using
-  // the geometry from before the drag started.
-  const recomputeLatch = useCallback(() => {
-    const el = docColumnRef.current;
-    if (!el) return;
-    const l = liveLayoutRef.current;
-    // Keep the latch on-screen when the visible strip clamps against a
-    // window edge (one pane collapsed).
-    const parent = el.offsetParent as HTMLElement | null;
-    const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
-    // The conversation lives in the rail now (W4), which `computePaneLayout`
-    // already models: the uncovered strip is all document.
-    const docStrip = l.docVisibleW;
-    const rawLeft = el.offsetLeft + l.sidebarOverlayPx + docStrip / 2;
-    const next = {
-      left: Math.min(maxLeft, Math.max(12, rawLeft)),
-      top: el.offsetTop + el.offsetHeight / 2,
-    };
-    // Guarded: an unchanged position must not allocate a fresh object, which
-    // would re-render this component and (via the deps below) rebuild the
-    // observer — the loop that made every drag frame cost two full renders.
-    setLatchPos((prev) =>
-      prev.left === next.left && prev.top === next.top ? prev : next,
-    );
-  }, []);
-
-  useEffect(() => {
-    const el = docColumnRef.current;
-    if (!el) return;
-    recomputeLatch();
-    // `sidebarWidth`/`paneWidth` are deliberately NOT deps: with them, a drag
-    // tore down and rebuilt this ResizeObserver every single frame, and
-    // `recompute` then ran twice per frame (direct call + observer fire), each
-    // doing five forced-layout reads. The observer already fires on every
-    // geometry change; the drag itself is handled by the session hook below.
-    const onGeometry = () => {
-      if (isResizing()) return;
-      recomputeLatch();
-    };
-    const ro = new ResizeObserver(onGeometry);
-    ro.observe(el);
-    const off = onResizeSession((active) => {
-      if (!active) recomputeLatch();
-    });
-    return () => {
-      ro.disconnect();
-      off();
-    };
-  }, [
-    recomputeLatch,
-    sidebarCollapsed,
-    paneCollapsed,
-    paneFullscreen,
-    // The latch mounting/unmounting changes what the position is for; recompute
-    // against the live layout at that moment.
-    liveFlags.docObscured,
-  ]);
-
-  // The latch appears whenever the document's uncovered strip has shrunk to a
-  // sliver — the curtains (or a collapsed pane's edge) have swallowed it. Each
-  // arrow reopens the document by shrinking whichever pane is actually open on
-  // that side (falling back to the other side when one pane is collapsed).
-  const latchActive = liveFlags.docObscured && !paneFullscreen;
-  const reopenDocFromLeft = () => {
-    if (!sidebarCollapsed) setSidebarWidth(180);
-    else setPaneWidth(RAIL_MIN_W);
-  };
-  const reopenDocFromRight = () => {
-    if (!paneCollapsed) setPaneWidth(RAIL_MIN_W);
-    else setSidebarWidth(180);
-  };
 
   // Bidirectional focus between in-doc highlights and sidebar cards. Single
   // source of truth: card click sets it; highlight click sets it; effects
@@ -4149,17 +4100,18 @@ function App() {
     void invoke("set_ui_pref", { key: "lint", value: name }).catch(() => {});
   };
 
-  // Max width = whatever leaves the document at 0 against the *other* pane
-  // (minus the two 6px dividers). Collapsed panes contribute 0. Widths past
-  // the doc's DOC_MIN floor render as curtain overlay (see `layout` above).
+  // Hard stops (D38): a drag stops where the stage would fall below its
+  // floor beside the other column as drawn, and never below its own
+  // minimum (past which it snaps shut). The rail also keeps its 600 px
+  // ceiling.
+  const seams = 2 * DIVIDER_W + Math.max(docMinFor(winWidth), stageMin);
   const sidebarMaxW = Math.max(
-    180,
-    winWidth - (paneCollapsed ? RAIL_EDGE_W : paneWidth) - 12,
+    SIDEBAR_MIN_W,
+    winWidth - (paneCollapsed ? RAIL_EDGE_W : layout.paneW) - seams,
   );
-  // The rail's own ceiling (600 px) under the room the sidebar leaves.
   const paneMaxW = Math.min(
     RAIL_MAX_W,
-    Math.max(RAIL_MIN_W, winWidth - (sidebarCollapsed ? SIDEBAR_EDGE_W : sidebarWidth) - 12),
+    Math.max(RAIL_MIN_W, winWidth - (sidebarCollapsed ? SIDEBAR_EDGE_W : layout.sidebarW) - seams),
   );
 
   const {
@@ -4167,11 +4119,11 @@ function App() {
     startDrag: startSidebarDrag,
     settling: sidebarSettling,
   } = useResizablePane({
-    width: sidebarWidth,
+    width: layout.sidebarW || sidebarWidth,
     onWidthChange: setSidebarWidth,
     onLiveSize: (w) => applyLiveLayout({ sidebarWidth: w }),
     side: "leading",
-    min: 180,
+    min: SIDEBAR_MIN_W,
     max: sidebarMaxW,
     // Drag the document over the sidebar past its hard stop → snap it shut.
     onCollapse: () => setSidebarFolded(true),
@@ -4185,7 +4137,7 @@ function App() {
     startDrag,
     settling: paneSettling,
   } = useResizablePane({
-    width: paneWidth,
+    width: layout.paneW || paneWidth,
     onWidthChange: setPaneWidth,
     onLiveSize: (w) => applyLiveLayout({ paneWidth: w }),
     min: RAIL_MIN_W,
@@ -9615,14 +9567,10 @@ function App() {
         </Suspense>
       )}
       </ErrorBoundary>
-      {/* The window-edge hull ring: constant padding, never part of drag math
-          (`computePaneLayout` subtracts it from the row's available width).
-          Fullscreen takeovers (terminal, discussion) are absolute inset-0
-          against this element, so they cover the ring — plates only. */}
-      <main
-        className="relative min-h-0 min-w-0 flex-1 overflow-hidden flex flex-col"
-        style={{ padding: `${SHELL_EDGE}px` }}
-      >
+      {/* The columns run to the window's edges (D38): no hull ring, no
+          inset cards. Fullscreen takeovers (terminal, discussion) are
+          absolute inset-0 against this element. */}
+      <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden flex flex-col">
         <ErrorBoundary
           region="content area"
           fallback={(err, reset) => (
@@ -9700,14 +9648,11 @@ function App() {
             }}
           >
             <PaneDivider
-              orientation="vertical"
               side="leading"
               label="sidebar"
               collapsed={sidebarCollapsed}
               dragging={sidebarDragging}
-              onToggle={toggleSidebar}
               onPointerDown={startSidebarDrag}
-              hideChevron={latchActive}
             />
           </div>
         )}
@@ -9722,34 +9667,21 @@ function App() {
               sessions={sidebarEdgeSessions}
               onPlace={sidebarHandlers.onSelectPlace}
               onSession={sidebarHandlers.onSelect}
-              onExpand={revealSidebar}
             />
           </Suspense>
         )}
-        {/* Always in flow (its 6px is part of the space model); when the
-            sidebar curtains it is painted over, and the absolute copy above
-            carries the affordance at the curtain's visible edge. */}
-        {<PaneDivider
-          orientation="vertical"
+        {/* The seam (D38): always in flow, one 1px rule that is also the
+            drag handle. When the sidebar curtains it is painted over, and the
+            absolute copy above carries the drag at the curtain's visible
+            edge. No collapse pill: folding is ◧ in the top bar, ⌘B, the
+            palette, or a drag past the sidebar's minimum. */}
+        <PaneDivider
           side="leading"
           label="sidebar"
           collapsed={sidebarCollapsed}
           dragging={sidebarDragging}
-          onToggle={toggleSidebar}
           onPointerDown={startSidebarDrag}
-          // Folded, the icon pose carries the way back open (D18).
-          hideChevron={latchActive || liveFlags.curtainL || sidebarCollapsed}
-          // The front door's affordance, on the one piece of the sidebar that
-          // never goes away. Its only other visible entry is a row INSIDE the
-          // sessions list, and that list is now closed on every non-document
-          // surface (and collapsible on the document) — so without this the
-          // app's resting state would be reachable only through ⌘K.
-          action={{
-            glyph: "＋",
-            label: "Plan a build (⌘⇧N)",
-            onClick: openFrontDoor,
-          }}
-        />}
+        />
         <div
           ref={docColumnRef}
           className={`min-h-0 min-w-0 flex-1 overflow-hidden flex relative rl-doc-column${browserOpen ? "" : " rl-plate"}`}
@@ -9817,6 +9749,8 @@ function App() {
               onCloseTab={closeTabRequest}
               onSplit={splitFocusedWithDoor}
               onClosePane={closePaneRequest}
+              room={stageRoom}
+              onNoRoom={noRoomHint}
               right={stageActions}
             />
           </Suspense>
@@ -9844,76 +9778,16 @@ function App() {
         </div>
 
         {!paneFullscreen && (
-          // Always in flow (its 6px is part of the space model); when the
-          // discussion pane curtains it is painted over, and the absolute
-          // copy inside the pane wrapper carries the affordance at the
-          // curtain's visible edge.
+          // The seam (D38): one 1px rule in flow that is also the drag
+          // handle; when the rail curtains it is painted over and the copy
+          // inside the pane wrapper carries the drag at the curtain's edge.
+          // Folded, the edge strip keeps it as its rule; dragging it pulls
+          // the rail back open.
           <PaneDivider
             collapsed={paneCollapsed}
             dragging={isDragging}
-            onToggle={togglePane}
             onPointerDown={startDrag}
-            // Folded, the edge strip carries the way back open; the divider
-            // keeps only its drag.
-            hideChevron={latchActive || liveFlags.curtainR || paneCollapsed}
           />
-        )}
-
-        {/* The latch: when the document is squeezed shut, the two dividers'
-            chevrons would collide, so replace them with a single stacked pair
-            centered over the vanished document. ‹ reopens from the left
-            (sidebar), › from the right (comment pane). */}
-        {latchActive && (
-          <div
-            className="absolute z-30 flex flex-col rounded-full overflow-hidden shadow-sm"
-            style={{
-              left: `${latchPos.left}px`,
-              top: `${latchPos.top}px`,
-              transform: "translate(-50%, -50%)",
-              background: "var(--color-bg-elevated)",
-              border: "1px solid var(--color-rule)",
-            }}
-          >
-            <button
-              type="button"
-              onClick={reopenDocFromLeft}
-              title="Reopen document (shrink sessions)"
-              aria-label="Reopen document from the left"
-              className="flex items-center justify-center"
-              style={{
-                width: "18px",
-                height: "26px",
-                fontSize: "11px",
-                lineHeight: 1,
-                background: "transparent",
-                color: "var(--color-ink-muted)",
-                border: "none",
-                borderBottom: "1px solid var(--color-rule)",
-                cursor: "pointer",
-              }}
-            >
-              ‹
-            </button>
-            <button
-              type="button"
-              onClick={reopenDocFromRight}
-              title="Reopen document (shrink discussion)"
-              aria-label="Reopen document from the right"
-              className="flex items-center justify-center"
-              style={{
-                width: "18px",
-                height: "26px",
-                fontSize: "11px",
-                lineHeight: 1,
-                background: "transparent",
-                color: "var(--color-ink-muted)",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              ›
-            </button>
-          </div>
         )}
 
         {!paneCollapsed && (
@@ -9952,9 +9826,7 @@ function App() {
             <PaneDivider
               collapsed={paneCollapsed}
               dragging={isDragging}
-              onToggle={togglePane}
               onPointerDown={startDrag}
-              hideChevron={latchActive}
             />
           </div>
         )}
@@ -10002,10 +9874,6 @@ function App() {
             talkKey={dockContext?.key ?? null}
             fullscreen={paneFullscreen}
             onToggleFullscreen={() => setPaneFullscreen(!paneFullscreen)}
-            onCollapse={() => {
-              setPaneFullscreen(false);
-              setRailFolded(true);
-            }}
           >
           {railTab !== "discussion" ? railOtherBody : railKind === "drafter" ? (
             // The draft's threads: PromptDrafter portals its sidecar in.
@@ -10252,7 +10120,7 @@ function App() {
             among them), reserved in flow by `computePaneLayout`'s edge. */}
         {paneCollapsed && (
           <Suspense fallback={<div className="shrink-0" style={{ width: `${RAIL_EDGE_W}px` }} />}>
-            <RailEdge tabs={railTabs} counts={railCounts} attention={railAttention} talkKey={dockContext?.key ?? null} onOpen={openRailTab} onExpand={revealPane} />
+            <RailEdge tabs={railTabs} counts={railCounts} attention={railAttention} talkKey={dockContext?.key ?? null} onOpen={openRailTab} />
           </Suspense>
         )}
         </div>

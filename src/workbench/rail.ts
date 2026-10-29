@@ -75,6 +75,10 @@ export const RAIL_MEMORY_KEY = "redline.rail.tabs";
 /** The rail's width bounds (the frame's `railWidth`, 280–600 px). */
 export const RAIL_MIN_W = 280;
 export const RAIL_MAX_W = 600;
+/** The sidebar's hard stop (D38, the frame's `sidebarWidth`, 200 px up). A
+ *  drag past it snaps the sidebar shut; a window too narrow for it folds
+ *  the sidebar to its icon pose. */
+export const SIDEBAR_MIN_W = 200;
 /** The collapsed rail: an edge strip of the tabs' icons, so every tab — the
  *  mic included — stays one click away. */
 export const RAIL_EDGE_W = 40;
@@ -87,6 +91,13 @@ export const SIDEBAR_EDGE_W = 44;
 export function clampRailWidth(width: number): number {
   if (!Number.isFinite(width)) return RAIL_MIN_W;
   return Math.max(RAIL_MIN_W, Math.min(RAIL_MAX_W, Math.round(width)));
+}
+
+/** A stored sidebar width at or above its hard stop. Garbage reads as the
+ *  stop. */
+export function clampSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) return SIDEBAR_MIN_W;
+  return Math.max(SIDEBAR_MIN_W, Math.round(width));
 }
 
 /** What the tab strip calls each tab. */

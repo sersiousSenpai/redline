@@ -5,52 +5,9 @@ import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { useResizablePane } from "../hooks/useResizablePane";
+import { DIVIDER_W } from "../lib/paneLayout";
 import { __resetResizeSession, isResizing } from "../lib/resizeSession";
-import { collapsedCaretNudge, PaneDivider } from "./PaneDivider";
-
-describe("collapsedCaretNudge", () => {
-  it("leaves an expanded divider's caret centred", () => {
-    expect(collapsedCaretNudge(false, "vertical", "leading")).toBe(0);
-    expect(collapsedCaretNudge(false, "vertical", "trailing")).toBe(0);
-  });
-
-  it("shifts a collapsed leading pane's caret inward (rightward)", () => {
-    // Sidebar collapsed: its divider hugs the row's left edge, so the pill
-    // must move right to clear the clip. (18px pill on the 10px gutter →
-    // 4px overhang per side.)
-    expect(collapsedCaretNudge(true, "vertical", "leading")).toBe(4);
-  });
-
-  it("shifts a collapsed trailing pane's caret inward (leftward)", () => {
-    // Discussion pane collapsed: its divider hugs the row's right edge.
-    expect(collapsedCaretNudge(true, "vertical", "trailing")).toBe(-4);
-  });
-
-  it("mirrors the two sides exactly, so both carets look identical", () => {
-    expect(collapsedCaretNudge(true, "vertical", "leading")).toBe(
-      -collapsedCaretNudge(true, "vertical", "trailing"),
-    );
-  });
-
-  it("leaves horizontal dividers alone in both states", () => {
-    // The bottom dock's divider spans the full width; it never hugs a side
-    // edge, so nudging it would just decentre the caret.
-    expect(collapsedCaretNudge(true, "horizontal", "trailing")).toBe(0);
-    expect(collapsedCaretNudge(false, "horizontal", "leading")).toBe(0);
-  });
-
-  it("tracks the divider's overhang when it is not the default", () => {
-    expect(collapsedCaretNudge(true, "vertical", "leading", 10)).toBe(10);
-    expect(collapsedCaretNudge(true, "vertical", "trailing", 10)).toBe(-10);
-  });
-});
-
-// ── The terminal divider's two extra modes ───────────────────────────────
-//
-// Dock fullscreen used to be reachable only from a `⤢` inside the focused
-// tile's header. These two props move it to the divider — the dock's own edge,
-// and the caret users already reach for — and give collapse a pill of its own,
-// because the drag has a 120px floor and can never close the dock.
+import { PaneDivider, SEAM_GRAB_OVERHANG } from "./PaneDivider";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -64,11 +21,8 @@ function renderDivider(
   act(() => {
     r.render(
       createElement(PaneDivider, {
-        orientation: "horizontal",
-        label: "terminal",
         collapsed: false,
         dragging: false,
-        onToggle: () => {},
         onPointerDown: () => {},
         ...props,
       }),
@@ -77,107 +31,36 @@ function renderDivider(
   return host;
 }
 
-const centrePill = (host: HTMLElement) =>
-  host.querySelector<HTMLButtonElement>(
-    "button[aria-label='Fullscreen terminal'], button[aria-label='Collapse terminal'], button[aria-label='Show terminal'], button[aria-label='Exit fullscreen terminal']",
-  );
-
-describe("PaneDivider — toggleMode / actionVisible", () => {
-  it("toggleMode='fullscreen' turns the expanded centre pill into ⤢", () => {
-    const host = renderDivider({ toggleMode: "fullscreen" });
-    const pill = host.querySelector<HTMLButtonElement>(
-      "button[aria-label='Fullscreen terminal']",
-    );
-    expect(pill).not.toBeNull();
-    expect(pill!.textContent).toContain("⤢");
-    // The diagonal glyph is already directional; rotating it would point it
-    // at the wrong corner.
-    expect(host.querySelector("span[style*='rotate']")).toBeNull();
+// D38: the seam between two columns is one 1px rule that is also the drag
+// handle — no gutter, and no chevron pill in any state.
+describe("PaneDivider — the seam (D38)", () => {
+  it("is one rule wide and draws no button, expanded, folded or fullscreen", () => {
+    for (const props of [{}, { collapsed: true }, { fullscreen: true }, { side: "leading" as const, label: "sidebar" }]) {
+      const host = renderDivider(props);
+      const seam = host.querySelector<HTMLElement>(".rl-divider")!;
+      expect(seam.style.width).toBe(`${DIVIDER_W}px`);
+      expect(DIVIDER_W).toBe(1);
+      expect(host.querySelector("button")).toBeNull();
+      host.remove();
+    }
   });
 
-  it("...and calls onToggle, exactly as the collapse pill did", () => {
-    const onToggle = vi.fn();
-    const host = renderDivider({ toggleMode: "fullscreen", onToggle });
-    act(() => {
-      host
-        .querySelector<HTMLButtonElement>(
-          "button[aria-label='Fullscreen terminal']",
-        )!
-        .click();
-    });
-    expect(onToggle).toHaveBeenCalled();
-  });
-
-  it("a COLLAPSED divider still shows the plain re-open caret", () => {
-    // Collapsed, the pane isn't there to make fullscreen; the gesture still
-    // means "show me the terminal".
-    const host = renderDivider({ toggleMode: "fullscreen", collapsed: true });
-    expect(
-      host.querySelector("button[aria-label='Show terminal']"),
-    ).not.toBeNull();
-    expect(host.textContent).not.toContain("⤢");
-  });
-
-  it("a FULLSCREEN divider mirrors the glyph to ⤡", () => {
-    const host = renderDivider({
-      toggleMode: "fullscreen",
-      fullscreen: true,
-      onExitFullscreen: () => {},
-    });
-    const pill = centrePill(host);
-    expect(pill!.textContent).toContain("⤡");
-    expect(pill!.getAttribute("aria-label")).toBe("Exit fullscreen terminal");
-  });
-
-  it("the default toggleMode is untouched — every other divider keeps its caret", () => {
+  it("grabs past the rule on both sides without taking layout width", () => {
     const host = renderDivider();
-    expect(host.textContent).not.toContain("⤢");
-    expect(
-      host.querySelector("button[aria-label='Collapse terminal']"),
-    ).not.toBeNull();
+    const grab = host.querySelector<HTMLElement>(".rl-divider-grab")!;
+    expect(grab.style.left).toBe(`${-SEAM_GRAB_OVERHANG}px`);
+    expect(grab.style.right).toBe(`${-SEAM_GRAB_OVERHANG}px`);
+    expect(grab.title).toBe("Drag to resize the rail");
+    host.remove();
   });
 
-  it("actionVisible='expanded' shows the action pill while expanded", () => {
-    const onClick = vi.fn();
-    const action = { glyph: "⌄", label: "Collapse terminal", onClick };
-    const expanded = renderDivider({
-      toggleMode: "fullscreen",
-      actionVisible: "expanded",
-      action,
-    });
-    const pill = expanded.querySelector<HTMLButtonElement>(
-      "button[aria-label='Collapse terminal']",
-    );
-    expect(pill).not.toBeNull();
-    act(() => pill!.click());
-    expect(onClick).toHaveBeenCalled();
-
-    // ...and hides it once collapsed, where the centre caret already reopens.
-    const collapsed = renderDivider({
-      toggleMode: "fullscreen",
-      actionVisible: "expanded",
-      action,
-      collapsed: true,
-    });
-    expect(
-      collapsed.querySelector("button[aria-label='Collapse terminal']"),
-    ).toBeNull();
-  });
-
-  it("the default actionVisible still hides the action while expanded", () => {
-    // The sidebar's "Plan a build": collapsed-only, because expanded its own
-    // row is right there.
-    const action = { glyph: "＋", label: "Plan a build", onClick: () => {} };
-    expect(
-      renderDivider({ action }).querySelector(
-        "button[aria-label='Plan a build']",
-      ),
-    ).toBeNull();
-    expect(
-      renderDivider({ action, collapsed: true }).querySelector(
-        "button[aria-label='Plan a build']",
-      ),
-    ).not.toBeNull();
+  it("a folded column's seam says the drag opens it; a fullscreen one is not a handle", () => {
+    const folded = renderDivider({ collapsed: true, label: "sidebar" });
+    expect(folded.querySelector<HTMLElement>(".rl-divider-grab")!.title).toBe("Drag to show the sidebar");
+    folded.remove();
+    const full = renderDivider({ fullscreen: true });
+    expect(full.querySelector<HTMLElement>(".rl-divider-grab")!.style.cursor).toBe("default");
+    full.remove();
   });
 });
 
@@ -187,9 +70,6 @@ describe("PaneDivider — toggleMode / actionVisible", () => {
 // `onLiveSize` fires at most once per animation frame and `onWidthChange` — the
 // one that becomes React state, persists to localStorage and re-renders the
 // world — fires exactly once, on release.
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
-  true;
 
 let frames: FrameRequestCallback[] = [];
 let container: HTMLDivElement;
@@ -246,7 +126,6 @@ function Harness(props: {
   return createElement(PaneDivider, {
     collapsed: false,
     dragging: false,
-    onToggle: () => {},
     onPointerDown: startDrag,
   });
 }
@@ -256,7 +135,7 @@ function mount(onLive: (n: number) => void, onRest: (n: number) => void) {
     root.render(createElement(Harness, { onLive, onRest }));
   });
   const grab = container.querySelector<HTMLElement>(
-    '[title="Drag to resize comments"]',
+    '[title="Drag to resize the rail"]',
   );
   if (!grab) throw new Error("grab zone not found");
   return grab;

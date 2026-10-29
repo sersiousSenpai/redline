@@ -12,6 +12,10 @@ import {
   isSessionKey,
   isSplit,
   launchKey,
+  layoutMinWidth,
+  PANE_MIN_W,
+  SPLIT_SEAM_W,
+  tabMinWidth,
   normalizeWeights,
   paneIdsOf,
   paneTitle,
@@ -25,6 +29,7 @@ import {
   type SessionKey,
   type WorkbenchState,
 } from "./model";
+import { DOOR_MIN_W } from "../lib/paneLayout";
 import { DEFAULT_DOOR_DRAFT_KEY, MIN_SPLIT_SHARE, clampWeights, doorDraftKey, geometricNeighbour, neighbourPane, reduce, type PaneRect } from "./reducer";
 
 const door = (n = 1): PaneInit => ({ kind: "door", data: { draftKey: `d${n}` } });
@@ -931,5 +936,63 @@ describe("followAgent: a restored agent's Agent tabs follow it, in every set (la
     const next = reduce(s, { type: "followAgent", sessionId: "s1", terminalId: "new" });
     expect(agentsIn(next, HOME_KEY)).toEqual(["new:s1"]);
     expect(reduce(s, { type: "followAgent", sessionId: "s9", terminalId: "new" })).toBe(s);
+  });
+});
+
+// D40: every pane kind has a hard stop in a split. A split or a merge whose
+// panes cannot all keep theirs in the room the stage has (its side columns
+// folded) is refused — the same state comes back, and App leaves a hint.
+describe("pane minimums (D40)", () => {
+  const plan: PaneInit = { kind: "plan", data: { sessionId: "s1", version: null } };
+  const page: PaneInit = { kind: "browser", data: { workspace: "regular" } };
+  // A 1440 window and a 900 one, each less the two edge strips and seams.
+  const ROOM_1440 = 1440 - 44 - 40 - 2;
+  const ROOM_900 = 900 - 44 - 40 - 2;
+
+  it("gives every kind a minimum, the door's its one-row composer", () => {
+    expect(PANE_MIN_W.door).toBe(DOOR_MIN_W);
+    expect(PANE_MIN_W.browser).toBe(420);
+    expect(PANE_MIN_W.terminals).toBe(480);
+    expect(PANE_MIN_W.file).toBe(360);
+    for (const kind of Object.keys(PANE_MIN_W) as (keyof typeof PANE_MIN_W)[]) expect(PANE_MIN_W[kind]).toBeGreaterThanOrEqual(360);
+  });
+
+  it("measures a layout: a row adds its panes and seams, a column takes its widest", () => {
+    let s = home(plan);
+    s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: door(), newPaneId: "d" });
+    const panes = set(s).panes;
+    expect(layoutMinWidth(root(s), panes)).toBe(PANE_MIN_W.plan + SPLIT_SEAM_W + DOOR_MIN_W);
+    s = reduce(s, { type: "splitPane", paneId: "d", direction: "column", pane: file("/a"), newPaneId: "f" });
+    expect(layoutMinWidth(root(s), set(s).panes)).toBe(PANE_MIN_W.plan + SPLIT_SEAM_W + DOOR_MIN_W);
+    // A lone pane asks nothing past the stage's own floor; a zoomed tab too.
+    expect(tabMinWidth(activeTabOf(set(home(plan))), set(home(plan)).panes)).toBe(0);
+  });
+
+  it("a split with a door fits a 1440 stage and is refused at 900", () => {
+    const wide = reduce(home(plan), { type: "splitPane", paneId: "p1", direction: "row", pane: door(), newPaneId: "d", room: ROOM_1440 });
+    expect(kinds(wide)).toEqual(["plan", "door"]);
+    const before = home(plan);
+    expect(reduce(before, { type: "splitPane", paneId: "p1", direction: "row", pane: door(), newPaneId: "d", room: ROOM_900 })).toBe(before);
+    // Down, the row is no wider: a column split fits where a row did not.
+    const down = reduce(before, { type: "splitPane", paneId: "p1", direction: "column", pane: door(), newPaneId: "d", room: ROOM_900 });
+    expect(kinds(down)).toEqual(["plan", "door"]);
+  });
+
+  it("a fourth pane across a 1440 stage is refused: none of them drawn a strip wide", () => {
+    let s = home(page);
+    s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: plan, newPaneId: "pl", room: ROOM_1440 });
+    expect(kinds(s)).toEqual(["browser", "plan"]);
+    const three = reduce(s, { type: "splitPane", paneId: "pl", direction: "row", pane: door(), newPaneId: "d", room: ROOM_1440 });
+    expect(three).toBe(s);
+    // Unmeasured (no room), the reducer keeps its old behaviour.
+    expect(kinds(reduce(s, { type: "splitPane", paneId: "pl", direction: "row", pane: door(), newPaneId: "d" }))).toEqual(["browser", "plan", "door"]);
+  });
+
+  it("a merge whose panes cannot keep their minimums is refused", () => {
+    const s = home(plan, door(2));
+    expect(reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "right", room: ROOM_900 })).toBe(s);
+    const merged = reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "right", room: ROOM_1440 });
+    expect(kinds(merged)).toEqual(["plan", "door"]);
+    expect(reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "bottom", room: ROOM_900 })).not.toBe(s);
   });
 });

@@ -1,32 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-/** Minimum useful document-column width. Below this the doc is an unreadable
- *  sliver, so instead of squishing further the encroaching side pane slides
- *  OVER the doc like a curtain and the doc floors here. */
-export const DOC_MIN = 300;
-/** On wide windows the absolute floor is stingy — a 300px doc strip in a
- *  2000px window reads as squeezed shut. The floor scales to a fraction of
- *  the window, so curtain mode engages while the doc is still readable. */
+/** A door pane's hard stop (D40): its composer keeps ONE row of chips —
+ *  harness · project · destination · History, then + 🎙 ↑ (≈ 395 px fixed
+ *  plus the project chip, which ellipsizes) inside the island's 20 px
+ *  padding and the room's 24 px margins — and its headline one line. Every
+ *  other pane kind's stop is `PANE_MIN_W` in workbench/reducer.ts. */
+export const DOOR_MIN_W = 600;
+/** The stage's hard stop (D38's 480 px, raised to the door's by D40, so a
+ *  lone door never draws below its own minimum): the centre column never
+ *  draws narrower. A side column that cannot keep its own minimum beside it
+ *  folds (`workbench/poses.ts`); a hand-opened narrow column curtains over
+ *  it. A split's panes can ask more (`stageMin`). */
+export const STAGE_MIN_W = Math.max(480, DOOR_MIN_W);
+/** Minimum useful document-column width — the stage's hard stop. Below it
+ *  the side columns shrink toward their own minimums first, and only a
+ *  column opened by hand in its narrow regime slides OVER the doc like a
+ *  curtain. */
+export const DOC_MIN = STAGE_MIN_W;
+/** On wide windows the absolute floor is stingy — a 480px doc strip in a
+ *  3000px window reads as squeezed shut. The floor scales to a fraction of
+ *  the window once that fraction beats the absolute minimum. */
 export const DOC_MIN_FRAC = 0.2;
 /** The effective doc floor for a window: the larger of the absolute minimum
  *  and the window fraction. */
 export function docMinFor(winWidth: number): number {
   return Math.max(DOC_MIN, Math.round(winWidth * DOC_MIN_FRAC));
 }
-/** Width of one pane gutter — the strip of hull canvas between two plates.
- *  The gutter IS the divider: PaneDivider's layout box spans it, transparent at
- *  rest so the canvas shows through, painting a slim bar only on hover/drag. */
-export const SHELL_GUTTER = 10;
-/** Alias kept for call sites that mean "the divider's layout width" — the two
- *  names are one constant so drag math and the shell's gutters can never
- *  disagree. */
-export const DIVIDER_W = SHELL_GUTTER;
-/** Window-edge inset: the hull ring around the outer plates. Delivered as
- *  constant padding on the <main> container (never part of drag math) and
- *  subtracted from the row's available width here, so `computePaneLayout`
- *  stays the single source of the space model. */
-export const SHELL_EDGE = 10;
+/** The gap between two columns (D38): none. Sidebar, stage and rail meet on
+ *  a 1px rule, never on a strip of hull. */
+export const SHELL_GUTTER = 0;
+/** The seam between two columns: one 1px rule in `--color-rule`, which IS
+ *  the divider — PaneDivider's layout box is the rule, and its grab zone
+ *  overhangs it on both sides without taking layout width. */
+export const SEAM_W = 1;
+/** The divider's layout width — the seam. One constant, so the drag math
+ *  and the drawn rule can never disagree. */
+export const DIVIDER_W = SEAM_W;
+/** Window-edge inset (D38): none. The columns run to the window's edges; no
+ *  card sits inset on a hull ring. Kept as a name because the space model
+ *  (`computePaneLayout`) and the door's edge hit regions read it. */
+export const SHELL_EDGE = 0;
 
 /** Resting width of the docked voice panel ("Talk to the plan"). */
 export const VOICE_PANE_W = 380;
@@ -165,9 +179,23 @@ export interface PaneLayoutInput {
    *  curtains over the document, and the other column (in its default pose)
    *  stays in flow, taking only what the first cannot (D18). */
   overlayFirst?: "pane" | "sidebar";
+  /** What the stage's tab asks beyond `docMinFor` (D40): the sum of its
+   *  split's pane minimums. Unlike `docMin` it keeps the columns' fit. */
+  stageMin?: number;
+  /** Each open column's hard stop (D38). Given, and outside the narrow
+   *  regime (no `docMin`), a stage short of its floor takes the room back
+   *  from the columns first — the rail down to its minimum, then the
+   *  sidebar — and only what is left becomes curtain. A column never draws
+   *  below its minimum: one that cannot keep it folds (`workbench/poses`). */
+  sidebarMin?: number;
+  paneMin?: number;
 }
 
 export interface PaneLayout {
+  /** Each open column's drawn width: its own width, less what the stage
+   *  took back to keep its floor (never below the column's minimum). */
+  sidebarW: number;
+  paneW: number;
   /** In-flow px each side pane's clip wrapper reserves. */
   sidebarFlowW: number;
   paneFlowW: number;
@@ -182,20 +210,35 @@ export interface PaneLayout {
 }
 
 /** Stateless derivation of the main row's space model. The persisted pane
- *  widths are never clamped — a width that would squish the doc below
- *  DOC_MIN simply becomes overlay (curtain) instead of flow, so dragging
- *  stays continuous and retracts symmetrically as space frees. A fullscreen
+ *  widths are never written — a width that would squish the doc below its
+ *  floor first gives the room back down to the column's minimum (when the
+ *  minimums are given), and only what is left becomes overlay (curtain)
+ *  instead of flow, retracting symmetrically as space frees. A fullscreen
  *  discussion pane is already an absolute overlay and contributes nothing. */
 export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
-  const s = i.sidebarCollapsed ? 0 : i.sidebarWidth;
-  const p = i.paneCollapsed || i.paneFullscreen ? 0 : i.paneWidth;
+  let s = i.sidebarCollapsed ? 0 : i.sidebarWidth;
+  let p = i.paneCollapsed || i.paneFullscreen ? 0 : i.paneWidth;
   // The sidebar divider always renders; the discussion divider is absent in
   // fullscreen (the pane's top-edge divider replaces it).
   const dividers = DIVIDER_W + (i.paneFullscreen ? 0 : DIVIDER_W);
   const edge = (i.paneCollapsed && !i.paneFullscreen ? (i.paneEdgeW ?? 0) : 0) + (i.sidebarCollapsed ? (i.sidebarEdgeW ?? 0) : 0);
   const available = Math.max(0, i.winWidth - dividers - 2 * SHELL_EDGE - edge);
   // Degrade gracefully below tiny window widths.
-  const docTarget = Math.min(Math.max(docMinFor(i.winWidth), i.docMin ?? 0), available);
+  const docTarget = Math.min(Math.max(docMinFor(i.winWidth), i.docMin ?? 0, i.stageMin ?? 0), available);
+  // Hard stops (D38): outside the narrow regime the columns give the stage
+  // its floor back before anything curtains — the rail first, then the
+  // sidebar, each down to its own minimum and no further.
+  if (i.docMin === undefined) {
+    let short = Math.max(0, s + p + docTarget - available);
+    if (short > 0 && i.paneMin !== undefined && p > i.paneMin) {
+      const give = Math.min(short, p - i.paneMin);
+      p -= give;
+      short -= give;
+    }
+    if (short > 0 && i.sidebarMin !== undefined && s > i.sidebarMin) {
+      s -= Math.min(short, s - i.sidebarMin);
+    }
+  }
   const deficit = Math.max(0, s + p + docTarget - available);
   // Attribute the deficit proportionally to pane width, each side capped at
   // its own width. Both panes' visual rectangles are fixed by their widths
@@ -220,6 +263,8 @@ export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
   const docFlowW = Math.max(0, available - sidebarFlowW - paneFlowW);
   const docVisibleW = Math.max(0, docFlowW - sidebarOverlayPx - paneOverlayPx);
   return {
+    sidebarW: s,
+    paneW: p,
     sidebarFlowW,
     paneFlowW,
     sidebarOverlayPx,

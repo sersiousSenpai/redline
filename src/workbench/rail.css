@@ -12,9 +12,17 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  min-width: 0;
+  /* The rail's hard stop (D38, RAIL_MIN_W): its content never reflows
+     below it — the column folds first. */
+  min-width: 280px;
   container-type: inline-size;
   container-name: rl-rail;
+}
+/* The comment cards keep a fixed minimum inner width (D38): the rail's
+   280 px less the list's 14 px gutters. Narrower, they never squish. */
+.rl-rail .rl-fb-card {
+  box-sizing: border-box;
+  min-width: 252px;
 }
 
 .rl-rail-strip {

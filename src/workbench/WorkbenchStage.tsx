@@ -25,10 +25,10 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { RowMenu, type RowAction } from "../components/RowMenu";
 import { rafCoalesce } from "../lib/raf";
 import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
-import { activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
+import { activeTabOf, isSplit, layoutMinWidth, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
 import { focusPaneKeyOf, isEqualizeKey } from "../lib/keymap";
 import { dropTargetAt, paneBoxes, type DropTarget } from "./drop";
-import { MIN_SPLIT_SHARE } from "./reducer";
+import { MIN_SPLIT_SHARE, type WorkbenchAction } from "./reducer";
 import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
@@ -81,12 +81,17 @@ export interface WorkbenchStageProps {
   /** The pane menu's Close pane: App closes it (asking for a running wall).
    *  Absent, the pane just closes. */
   onClosePane?: (paneId: string) => void;
+  /** The widest the stage can be at this window (D40): a merge whose panes
+   *  cannot all keep their minimums in it is refused, and `onNoRoom` says
+   *  so. Absent, merges are not measured. */
+  room?: () => number;
+  onNoRoom?: () => void;
 }
 
 const selectSet = (s: ReturnType<WorkbenchStore["getState"]>): TabSet | null => s.sets[s.activeKey] ?? null;
 const selectKey = (s: ReturnType<WorkbenchStore["getState"]>) => s.activeKey;
 
-export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab, onCloseTab, onSplit, onClosePane }: WorkbenchStageProps) {
+export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab, onCloseTab, onSplit, onClosePane, room, onNoRoom }: WorkbenchStageProps) {
   const set = useWorkbench(store, selectSet);
   const activeKey = useWorkbench(store, selectKey);
   const activeTabId = set?.activeTabId ?? null;
@@ -106,6 +111,16 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
   }, [set, activeKey, activeTabId]);
 
   const dispatch = store.dispatch;
+  // A merge measured against the stage's room (D40): refused, it leaves the
+  // quiet hint instead of a tab whose panes cannot keep their minimums.
+  const merge = useCallback(
+    (action: Extract<WorkbenchAction, { type: "mergeTab" }>) => {
+      const before = store.getState();
+      store.dispatch(room ? { ...action, room: room() } : action);
+      if (room && store.getState() === before) onNoRoom?.();
+    },
+    [store, room, onNoRoom],
+  );
   const onSelect = useCallback((tabId: string) => {
     beginMeasure("wb:tab-switch");
     dispatch({ type: "selectTab", tabId });
@@ -139,9 +154,9 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
       const into = order[order.indexOf(tabId) + dir];
       // Into the tab on its left it lands on that tab's right, and the
       // other way: the strip's order, read across the split.
-      if (into) dispatch({ type: "mergeTab", tabId, intoTabId: into, edge: dir < 0 ? "right" : "left" });
+      if (into) merge({ type: "mergeTab", tabId, intoTabId: into, edge: dir < 0 ? "right" : "left" });
     },
-    [dispatch, store],
+    [merge, store],
   );
 
   // Merge by drag: a tab dragged down out of the strip lights the half of
@@ -234,9 +249,9 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
       const target = targetAt(tabId, at);
       endDragSession();
       setDrop(null);
-      if (target) dispatch({ type: "mergeTab", tabId, paneId: target.paneId, edge: target.edge });
+      if (target) merge({ type: "mergeTab", tabId, paneId: target.paneId, edge: target.edge });
     },
-    [dispatch, endDragSession, targetAt],
+    [merge, endDragSession, targetAt],
   );
   const onResize = useCallback((tabId: string, path: number[], weights: number[]) => dispatch({ type: "resizeSplit", tabId, path, weights }), [dispatch]);
 
@@ -483,6 +498,7 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
     <SplitView
       column={node.direction === "column"}
       weights={node.weights}
+      mins={node.direction === "row" ? node.children.map((child) => layoutMinWidth(child, panes)) : undefined}
       onWeightsChange={(weights) => onResize(tab.id, path, weights)}
       onDraggingChange={onSplitDragging}
     >
@@ -505,12 +521,14 @@ function undrawn(el: Element): boolean {
  *  weight, and a pane goes by its own ✕, not by a drag to the edge. */
 export const MIN_SHARE = MIN_SPLIT_SHARE;
 
-/** The divider's thickness, in px. */
-const DIVIDER = 6;
+/** The divider's thickness, in px: one rule (D38). Its grab zone overhangs
+ *  it on both sides without taking layout (`.rl-split-divider::before`). */
+const DIVIDER = 1;
 
 /** A split of any arity: its children laid out by weight (each child's
  *  `flex-grow`, over a zero basis, so the dividers' own pixels come off the
- *  top), and a divider in every gap. A drag moves the two children either
+ *  top) and never below its minimum across a row (D40: `min-width`, which
+ *  flex honours over the weight), and a divider in every gap. A drag moves the two children either
  *  side of its divider and no other: the pair's total share is fixed, each
  *  keeps `MIN_SHARE` of the whole split. The live shares are written straight
  *  onto the pair's `flex-grow`, so a drag frame costs two style writes plus
@@ -518,9 +536,12 @@ const DIVIDER = 6;
  *  on release. A drag holds a resize session (`lib/resizeSession`), so every
  *  native webview shows its snapshot meanwhile, and `onDraggingChange` tells
  *  App. A double-click evens the pair. */
-export function SplitView({ column, weights, onWeightsChange, onDraggingChange, children }: {
+export function SplitView({ column, weights, mins, onWeightsChange, onDraggingChange, children }: {
   column: boolean;
   weights: readonly number[];
+  /** Each child's hard stop across the split, px (D40; a row split's): a
+   *  child never draws below it, and a divider stops there. */
+  mins?: readonly number[];
   onWeightsChange: (next: number[]) => void;
   onDraggingChange?: (dragging: boolean) => void;
   children: ReactNode[];
@@ -533,7 +554,7 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
     const a = cells.current[gap];
     const b = cells.current[gap + 1];
     if (!a || !b) return;
-    // Captured, so a fast drag that leaves the 6px handle keeps tracking.
+    // Captured, so a fast drag that leaves the seam keeps tracking.
     const handle = e.currentTarget as HTMLElement;
     const pointerId = e.pointerId;
     handle.setPointerCapture?.(pointerId);
@@ -545,8 +566,13 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
     const origin = column ? ra.top : ra.left;
     const span = column ? ra.height + rb.height : ra.width + rb.width;
     const total = shares[gap] + shares[gap + 1];
-    const lo = Math.min(0.5, MIN_SHARE / total);
     const startShare = total > 0 ? shares[gap] / total : 0.5;
+    // The pair's stops: each keeps MIN_SHARE of the whole split and, across
+    // a row, its own minimum in px (D40). A pair already at its floors stays
+    // where it is.
+    const floor = Math.min(0.5, MIN_SHARE / total);
+    const lo = Math.min(startShare, Math.max(floor, span > 0 ? (mins?.[gap] ?? 0) / span : 0));
+    const hi = Math.max(startShare, Math.min(1 - floor, span > 0 ? 1 - (mins?.[gap + 1] ?? 0) / span : 1));
     let pending = startShare;
     const write = (r: number) => {
       a.style.flexGrow = String(r * total);
@@ -556,7 +582,7 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
     const move = (ev: PointerEvent) => {
       if (span <= 0) return;
       const pos = (column ? ev.clientY : ev.clientX) - origin - DIVIDER / 2;
-      pending = Math.max(lo, Math.min(1 - lo, pos / span));
+      pending = Math.max(lo, Math.min(hi, pos / span));
       apply(pending);
     };
     // Every way a drag ends ends it once: a release commits; a cancel (the
@@ -613,7 +639,7 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
           role="separator"
           aria-orientation={column ? "horizontal" : "vertical"}
           data-split-gap={gap}
-          style={{ flex: `0 0 ${DIVIDER}px`, cursor: column ? "row-resize" : "col-resize", background: "var(--color-rule)", touchAction: "none" }}
+          style={{ flex: `0 0 ${DIVIDER}px`, cursor: column ? "row-resize" : "col-resize", touchAction: "none" }}
         />,
       );
     }
@@ -624,7 +650,7 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
           cells.current[i] = el;
         }}
         className="rl-wb-split-cell flex flex-col overflow-hidden min-w-0 min-h-0"
-        style={{ flexGrow: shares[i], flexShrink: 1, flexBasis: 0 }}
+        style={{ flexGrow: shares[i], flexShrink: 1, flexBasis: 0, minWidth: cellMin(mins, i, n) }}
       >
         {child}
       </div>,
@@ -632,6 +658,18 @@ export function SplitView({ column, weights, onWeightsChange, onDraggingChange, 
   });
   cells.current.length = n;
   return <div className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`} data-split-arity={n}>{out}</div>;
+}
+
+/** A cell's `min-width` (D40): its pane's minimum while the split has room
+ *  for every child's — which a split or a merge never lacks when it is made
+ *  — else its share of the room in proportion to the minimums, so a window
+ *  narrowed under a split shares what is left instead of pushing a pane off
+ *  the stage. */
+export function cellMin(mins: readonly number[] | undefined, i: number, n: number): string | undefined {
+  const own = mins?.[i];
+  if (!mins || !own) return undefined;
+  const sum = mins.reduce((a, b) => a + b, 0);
+  return `min(${own}px, calc((100% - ${(n - 1) * DIVIDER}px) * ${+(own / sum).toFixed(4)}))`;
 }
 
 /** `shares` with the pair at `gap`, `gap + 1` re-divided: `r` of their

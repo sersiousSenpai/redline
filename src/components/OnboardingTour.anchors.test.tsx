@@ -75,7 +75,7 @@ describe("the tour's anchors", () => {
     await act(async () =>
       root.render(
         <>
-          <RightRail tabs={["discussion", "talk", "files", "changes"]} active="discussion" onSelect={() => {}} fullscreen={false} onToggleFullscreen={() => {}} onCollapse={() => {}}>
+          <RightRail tabs={["discussion", "talk", "files", "changes"]} active="discussion" onSelect={() => {}} fullscreen={false} onToggleFullscreen={() => {}}>
             <div />
           </RightRail>
           <Footer />

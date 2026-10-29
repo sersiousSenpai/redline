@@ -89,8 +89,6 @@ html[data-theme="aurora"] body::before {
 html[data-theme="aurora"] #root { position: relative; z-index: 1; }
 html[data-theme="aurora"] .rl-plate {
   background: linear-gradient(150deg, #111527, #0b101bf5 55%, #0d1720);
-  border-color: #8fa7da29;
-  box-shadow: 0 0 25px #3ddbb10a, 0 8px 32px #02051165;
 }
 /* The edge light drifts by CROSSFADING two static rings, never by moving one.
    It used to animate `background-position` on a 280%-size gradient, which the
@@ -104,8 +102,11 @@ html[data-theme="aurora"] .rl-plate {
    The ring lies on the plate's 1px border, so the plates' own overflow clip
    shows it only at the rounded corners; the geometry is unchanged here.
    The alpha is set on the rings, never the plate: a custom property changed
-   on the plate would restyle its whole subtree on every focus move. */
-html[data-theme="aurora"] .rl-plate:not([data-rl-curtain])::before { content: ""; }
+   on the plate would restyle its whole subtree on every focus move.
+   D38: the columns have no border and no rounded corner left for a ring to
+   sit on, so no rule here gives the rings `content` and they are never
+   generated — a seam between columns is the 1px `--color-rule` alone. The
+   drift is kept, ready for a floating plate that wants it. */
 html[data-theme="aurora"] .rl-plate::before,
 html[data-theme="aurora"] .rl-plate::after {
   --rl-aurora-edge: 46%;
@@ -215,9 +216,9 @@ html[data-theme="aurora"] .rl-plate::after {
 
 /* Static design scales — deliberately NOT theme-derived: every theme shares one
    geometry and one type ramp, so switching themes recolors the shell without
-   reshaping it. Plate radius pairs with SHELL_GUTTER/SHELL_EDGE in
-   paneLayout.ts; control radius is the inner tier of the three-tier language
-   (hero dialog > plate > control). */
+   reshaping it. The plate radius is for floating sheets (dialogs, menus); the
+   shell's columns are square (D38). Control radius is the inner tier of the
+   three-tier language (hero dialog > plate > control). */
 :root {
   --rl-radius-plate: 10px;
   --rl-radius-control: 6px;
@@ -234,8 +235,8 @@ body,
 
 body {
   margin: 0;
-  /* The hull. Panes paint their own paper as inset plates (.rl-plate); the
-     canvas shows in the gutters between them and the window-edge ring. */
+  /* The hull: the canvas behind the chrome. The shell's columns paint their
+     own paper and meet on 1px rules (D38), so no hull shows between them. */
   background: var(--color-canvas, var(--color-paper));
   color: var(--color-ink);
   /* The app font (--font-sans) drives all chrome and the document; the user
@@ -3339,44 +3340,21 @@ html[data-rl-tile-drag] * {
   z-index: 1;
 }
 
-/* ── Plate shell ───────────────────────────────────────────────────────────
-   One continuous themed canvas — the hull, --color-canvas, painted by body —
-   with the four working panes (sessions sidebar, document column, discussion
-   pane, terminal dock) as inset rounded plates on it. The gutter between two
-   plates IS the divider (PaneDivider's box spans it, transparent at rest), and
-   under the Terminal theme the body::before FX shows through the gutters as
-   the hull's texture. Applied by explicit class on exactly those four
-   containers — never keyed on [data-rl-pane], which the voice dock inside the
-   document plate also carries and would grow a nested plate. */
+/* ── The columns (D38) ─────────────────────────────────────────────────────
+   Sidebar | stage | rail run to the window's edges and meet on 1px rules:
+   no gutter, no inset card, no rounded corner, no shadow. The rule between
+   two columns IS the divider (PaneDivider, one `--color-rule` pixel wide).
+   `.rl-plate` names the three column containers (the sidebar clip, the
+   document column, the rail clip) for the boot and snap-back choreography
+   and the theme layer — never keyed on [data-rl-pane], which the voice dock
+   inside the document column also carries. */
 .rl-plate {
   position: relative;
-  /* A private stacking context keeps the glow overlay's z-index INSIDE the
-     plate — without it the ::after would float over app-level overlays (a
-     fullscreen discussion, the latch). Deliberately isolation, not contain:
-     the terminal dock must stay containment-free (WebGL canvas, see below). */
+  /* A private stacking context keeps anything a theme layers on a column
+     INSIDE it. Deliberately isolation, not contain: the terminal layer must
+     stay containment-free (WebGL canvas). */
   isolation: isolate;
-  border-radius: var(--rl-radius-plate);
-  border: 1px solid var(--color-plate-border);
   background: var(--color-paper);
-  box-shadow: 0 4px 16px
-    color-mix(in srgb, var(--color-plate-glow) 6%, rgba(0, 0, 0, 0.16));
-}
-/* A whisper of the Agent-Seats hero corner-glow, pinned to the plate's
-   top-left. --color-plate-glow is transparent on light themes (deriveTokens),
-   so they read shadow-only. Pointer-transparent and near-invisible by design:
-   ambiance, never a veil over content. */
-.rl-plate::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 40;
-  pointer-events: none;
-  border-radius: inherit;
-  background: radial-gradient(
-    220px 150px at 0% 0%,
-    color-mix(in srgb, var(--color-plate-glow) 5%, transparent),
-    transparent 70%
-  );
 }
 
 /* ── The workbench (W1): the stage, its kept tabs and its panes ─────────────
@@ -3432,6 +3410,13 @@ html[data-rl-tile-drag] * {
 .rl-wb-tabs { position: relative; flex: 1; min-height: 0; min-width: 0; }
 .rl-wb-tab-body { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .rl-wb-tab-body[data-hidden] { content-visibility: hidden; visibility: hidden; pointer-events: none; }
+/* A split's seam (D38): one 1px rule between two panes, never a gutter. The
+   grab zone overhangs it by 4px a side without taking layout; hover and a
+   drag widen the drawn band the way the column seams do. */
+.rl-split-divider { position: relative; z-index: 3; background: var(--color-rule); }
+.rl-split-divider::before { content: ""; position: absolute; inset: 0 -4px; }
+.rl-split-divider[aria-orientation="horizontal"]::before { inset: -4px 0; }
+.rl-split-divider:hover { box-shadow: 0 0 0 1px var(--color-rule-strong); background: var(--color-rule-strong); }
 .rl-wb-pane { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 /* A pane takes the caret when its tab is shown (WorkbenchStage): a landmark, never a ring. */
 .rl-wb-pane:focus { outline: none; }
@@ -4983,44 +4968,34 @@ html[data-rl-tile-drag] * {
   }
 }
 
-/* ── Gutter dividers ───────────────────────────────────────────────────────
-   PaneDivider's layout box spans the whole gutter between two plates. At rest
-   it paints nothing — the gutter is hull, and the gutter IS the divider. Hover
-   raises a slim centered bar as the drag affordance; dragging paints it in the
-   accent (inline, so it never waits on a hover state). Inside a plate (the
-   voice split) there is no hull to show, so the hairline variant keeps a
-   resting 1px rule instead. */
+/* ── Seams ─────────────────────────────────────────────────────────────────
+   PaneDivider's layout box is the 1px rule between two columns (D38). At rest
+   it is `--color-rule`; hover widens it to a 3px band of the strong rule and
+   a drag paints that band in the accent. The band overhangs the rule without
+   taking layout width, and the seam stacks over its neighbours so the grab
+   zone's overhang on both sides takes the pointer. */
+.rl-divider {
+  z-index: 3;
+}
 .rl-divider-bar {
   position: absolute;
   pointer-events: none;
-  background: transparent;
-  transition: background-color 0.12s;
-}
-.rl-divider--v .rl-divider-bar {
   top: 0;
   bottom: 0;
-  left: 50%;
-  width: 2px;
-  transform: translateX(-50%);
-}
-.rl-divider--h .rl-divider-bar {
   left: 0;
-  right: 0;
-  top: 50%;
-  height: 2px;
-  transform: translateY(-50%);
-}
-.rl-divider:not(.rl-divider--static):hover .rl-divider-bar {
-  background: var(--color-plate-border);
-}
-.rl-divider--hairline.rl-divider--v .rl-divider-bar {
   width: 1px;
   background: var(--color-rule);
+  transition: background-color 0.12s;
 }
-.rl-divider--hairline.rl-divider--v:not(.rl-divider--static):hover
-  .rl-divider-bar {
-  width: 2px;
-  background: var(--color-plate-border);
+.rl-divider:not(.rl-divider--static):hover .rl-divider-bar {
+  left: -1px;
+  width: 3px;
+  background: var(--color-rule-strong);
+}
+.rl-divider[data-dragging] .rl-divider-bar {
+  left: -1px;
+  width: 3px;
+  background: var(--color-info);
 }
 
 /* ── Live resizing ─────────────────────────────────────────────────────────
@@ -5047,32 +5022,29 @@ html[data-rl-tile-drag] * {
   /* Containment must lift with the clip: `contain: paint` would clip the
      spilled curtain right back inside the flow width. */
   contain: none;
-  /* The clip stops being the plate too — its chrome would sit mid-curtain at
-     the flow boundary. The spilled aside takes the plate look below, so the
-     curtain reads as a plate sliding over the document plate. */
-  border-color: transparent;
+  /* The clip stops painting — its paper would sit mid-curtain at the flow
+     boundary. The spilled aside takes the paper below. */
   background: transparent;
-  box-shadow: none;
 }
-.rl-sidebar-clip[data-rl-curtain]::after,
-.rl-pane-clip[data-rl-curtain]::after {
-  content: none;
-}
-/* The curtain's plate dress + drop shadow — what makes it read as painted over
-   the doc rather than beside it. (No overflow/clip-path here: the discussion
-   aside scrolls itself, so children may poke the rounded corners by a couple
-   of px — invisible at this radius, and the state is transient.) */
+/* The curtain: the column's own paper, square, its edge the seam copy that
+   rides it (one 1px rule, never a border of its own), and a shadow — what
+   makes it read as painted over the stage rather than beside it. */
 .rl-sidebar-clip[data-rl-curtain] .rl-sidebar-aside {
   background: var(--color-paper);
-  border-radius: var(--rl-radius-plate);
-  border: 1px solid var(--color-plate-border);
   box-shadow: 8px 0 24px rgba(0, 0, 0, 0.18);
 }
 .rl-pane-clip[data-rl-curtain] .rl-pane-aside {
   background: var(--color-paper);
-  border-radius: var(--rl-radius-plate);
-  border: 1px solid var(--color-plate-border);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+}
+/* Hard stops (D38): a column's content never reflows below its minimum —
+   a reveal or a curtain narrower than that clips it instead. Pinned to
+   SIDEBAR_MIN_W / RAIL_MIN_W in workbench/rail.ts. */
+.rl-sidebar-aside {
+  min-width: 200px;
+}
+.rl-pane-aside:not(.absolute) {
+  min-width: 280px;
 }
 
 /* The document column is the DOM-heaviest thing that changes size, and it

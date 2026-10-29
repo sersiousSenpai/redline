@@ -382,6 +382,10 @@ function FrontDoorView(props: FrontDoorProps) {
   // compact flash before the observer fires would be worse than a late one.
   const compact = width !== null && width < 560;
   const tight = width !== null && width < 430;
+  // The harness chip takes its short label below this (D40), so the door's
+  // one chip row fits whole from its minimum (DOOR_MIN_W) up: the long
+  // label alone is ~90 px wider.
+  const chipsTight = width !== null && width < 640;
   const short = !floating && height !== null && height < 620;
   const squat = !floating && height !== null && height < 460;
   // The blocker ⏎ was refused on, surfaced inside the island.
@@ -991,7 +995,7 @@ function FrontDoorView(props: FrontDoorProps) {
               providerInfo={providerInfo}
               onLocate={locateCli}
               onOpen={onNeedModels}
-              compact={tight}
+              compact={chipsTight}
               allowedBackends={liveDestination === "chat" ? ["claude-code", "codex"] : undefined}
             />}
             <ProjectPicker

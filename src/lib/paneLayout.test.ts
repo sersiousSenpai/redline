@@ -8,8 +8,11 @@ import {
   DIVIDER_W,
   DOC_MIN,
   DOC_MIN_FRAC,
+  DOOR_MIN_W,
+  SEAM_W,
   SHELL_EDGE,
   SHELL_GUTTER,
+  STAGE_MIN_W,
   VOICE_DOC_MIN,
   VOICE_PANE_MIN,
   canonicalLayout,
@@ -21,14 +24,18 @@ import {
   type RestingShapeInput,
 } from "./paneLayout";
 
-// The shell's two constants are load-bearing for the plate look: the gutter is
-// the divider (PaneDivider's box spans it) and the edge ring is constant <main>
-// padding. Drag math reads them through computePaneLayout only.
+// D38: the columns meet on 1px rules — no gutter, no window-edge ring — and
+// the stage holds a hard floor: D38's 480 px, raised to a door's minimum by
+// D40. Drag math reads them through computePaneLayout only.
 describe("shell constants", () => {
-  it("pins the gutter/divider identity and the edge ring", () => {
-    expect(DIVIDER_W).toBe(SHELL_GUTTER);
-    expect(SHELL_GUTTER).toBe(10);
-    expect(SHELL_EDGE).toBe(10);
+  it("pins no gutter, no edge ring, a one-rule seam and the stage's floor", () => {
+    expect(SHELL_GUTTER).toBe(0);
+    expect(SHELL_EDGE).toBe(0);
+    expect(SEAM_W).toBe(1);
+    expect(DIVIDER_W).toBe(SEAM_W);
+    expect(DOOR_MIN_W).toBe(600);
+    expect(STAGE_MIN_W).toBe(Math.max(480, DOOR_MIN_W));
+    expect(DOC_MIN).toBe(STAGE_MIN_W);
   });
 });
 
@@ -50,15 +57,15 @@ describe("computePaneLayout", () => {
     const icons = computePaneLayout({ ...base, sidebarCollapsed: true, sidebarEdgeW: 44, paneCollapsed: true, paneEdgeW: 40 });
     expect(icons.docFlowW).toBe(1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE - 44 - 40);
     // A narrow window's floor turns a hand-opened rail into a curtain (D18).
-    const narrow = computePaneLayout({ ...base, winWidth: 900, docMin: 560 });
-    expect(narrow.docFlowW).toBe(560);
+    const narrow = computePaneLayout({ ...base, winWidth: 1000, docMin: 700 });
+    expect(narrow.docFlowW).toBe(700);
     expect(narrow.curtainActive).toBe(true);
     const full = computePaneLayout({ ...base, paneCollapsed: true, paneFullscreen: true, paneEdgeW: 40 });
     expect(full.docFlowW).toBe(1440 - DIVIDER_W - 2 * SHELL_EDGE - 240);
   });
 
   it("a hand-opened narrow rail curtains alone: the sidebar in its default pose stays in flow (D18)", () => {
-    const l = computePaneLayout({ ...base, winWidth: 900, paneWidth: 400, docMin: 560, overlayFirst: "pane" });
+    const l = computePaneLayout({ ...base, winWidth: 1000, paneWidth: 400, docMin: 700, overlayFirst: "pane" });
     expect(l.sidebarOverlayPx).toBe(0);
     expect(l.sidebarFlowW).toBe(240);
     expect(l.paneOverlayPx).toBeGreaterThan(0);
@@ -107,17 +114,50 @@ describe("computePaneLayout", () => {
   });
 
   it("scales the doc floor to 20% of the window when that beats DOC_MIN", () => {
-    expect(docMinFor(1000)).toBe(DOC_MIN); // 200 < 300 → absolute floor
-    expect(docMinFor(2000)).toBe(Math.round(2000 * DOC_MIN_FRAC)); // 400
+    expect(docMinFor(1000)).toBe(DOC_MIN); // 200 < 480 → absolute floor
+    expect(docMinFor(3000)).toBe(Math.round(3000 * DOC_MIN_FRAC)); // 600
     // On a wide window the curtain engages while the doc is still 20% wide.
     const l = computePaneLayout({
       ...base,
-      winWidth: 2000,
-      sidebarWidth: 400,
-      paneWidth: 1400,
+      winWidth: 3000,
+      sidebarWidth: 600,
+      paneWidth: 2000,
     });
-    expect(l.docFlowW).toBe(400);
+    expect(l.docFlowW).toBe(600);
     expect(l.curtainActive).toBe(true);
+  });
+
+  it("gives the stage its floor back from the columns before anything curtains (D38)", () => {
+    const mins = { sidebarMin: 200, paneMin: 280 };
+    // 1440: 360 + 600 + 2 seams leaves 478 — the rail gives 122 px.
+    const l = computePaneLayout({ ...base, sidebarWidth: 360, paneWidth: 600, ...mins });
+    expect(l.paneW).toBe(600 - (STAGE_MIN_W - 478));
+    expect(l.sidebarW).toBe(360);
+    expect(l.docFlowW).toBe(STAGE_MIN_W);
+    expect(l.curtainActive).toBe(false);
+    // The rail gives down to its minimum, then the sidebar down to its own.
+    const tight = computePaneLayout({ ...base, winWidth: 1100, sidebarWidth: 400, paneWidth: 600, ...mins });
+    expect(tight.paneW).toBe(280);
+    expect(tight.sidebarW).toBe(1100 - 2 * DIVIDER_W - STAGE_MIN_W - 280);
+    expect(tight.sidebarW).toBeGreaterThanOrEqual(200);
+    expect(tight.curtainActive).toBe(false);
+    // Neither ever draws below its minimum: what is left curtains.
+    const floor = computePaneLayout({ ...base, winWidth: 900, sidebarWidth: 400, paneWidth: 600, ...mins });
+    expect(floor.paneW).toBe(280);
+    expect(floor.sidebarW).toBe(200);
+    expect(floor.curtainActive).toBe(true);
+    // A tab that asks more of the stage (D40) takes it the same way — and
+    // where both columns at their minimums still leave it short, the rest
+    // would curtain, which is why the poses fold first (workbench/poses.ts).
+    const split = computePaneLayout({ ...base, stageMin: 900, ...mins });
+    expect(split.docFlowW).toBe(900);
+    expect(split.paneW).toBe(1440 - 2 * DIVIDER_W - 900 - 240);
+    expect(split.sidebarW).toBe(240);
+    expect(computePaneLayout({ ...base, stageMin: 1000, ...mins })).toMatchObject({ paneW: 280, sidebarW: 200, curtainActive: true });
+    // A hand-opened narrow column curtains at its own width instead (D18).
+    const narrow = computePaneLayout({ ...base, winWidth: 1000, paneWidth: 400, docMin: 700, overlayFirst: "pane", ...mins });
+    expect(narrow.paneW).toBe(400);
+    expect(narrow.paneOverlayPx).toBeGreaterThan(0);
   });
 
   it("collapsed panes contribute nothing and never curtain", () => {

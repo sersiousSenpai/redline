@@ -84,6 +84,15 @@
 .rl-plan-head-icon-btn[aria-pressed="true"] {
   color: var(--color-ink);
 }
+/* The plan's ⋯ (D38, after D37's rows): never a button at rest. It shows
+   while the header is hovered or holds focus, and while its menu is open. */
+.rl-plan-menu > .rl-plan-head-btn:not([aria-expanded="true"]) {
+  opacity: 0;
+}
+.rl-plan-head:hover .rl-plan-menu > .rl-plan-head-btn,
+.rl-plan-head:focus-within .rl-plan-menu > .rl-plan-head-btn {
+  opacity: 1;
+}
 /* 5a's "☰ Contents" sits flush at the header's 24px inset. */
 .rl-plan-head-contents {
   padding: 0;

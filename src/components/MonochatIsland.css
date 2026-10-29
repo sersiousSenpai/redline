@@ -75,7 +75,14 @@
 /* Between the muted and the full ink, never see-through: a translucent ink
    fell under 4.5:1 on the low-contrast themes (theme/doorContrast.test.ts). */
 .rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink-muted) 66%, var(--color-ink)); }
-.rl-monochat .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
+/* One chip row, always (D40): the door pane never draws below DOOR_MIN_W
+   (lib/paneLayout.ts), where the row fits whole; a long repo or model name
+   ellipsizes inside its chip instead of wrapping the row. */
+.rl-monochat .rl-fd-tools { gap: 7px; }
+.rl-monochat .rl-frontdoor .rl-fd-tools,
+.rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { flex-wrap: nowrap; }
+.rl-monochat .rl-fd-tools > * { min-width: 0; flex-shrink: 1; }
+.rl-monochat .rl-fd-tools > .rl-composer-send-tools { flex-shrink: 0; }
 .rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
 .rl-monochat .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
 /* A fainter wash than the menus' 6%, which pulls their label under 4.5:1 on
@@ -141,7 +148,9 @@
 .rl-monochat .rl-frontdoor.has-welcome { overflow: visible; }
 .rl-monochat .rl-floating-composer > .rl-fd-welcome { position: absolute; left: 0; right: 0; }
 .rl-fd-welcome-hero { bottom: calc(100% + 26px); text-align: center; pointer-events: none; }
-.rl-fd-title { font-weight: 600; line-height: 1.08; letter-spacing: -0.022em; color: var(--color-ink); text-align: center; }
+/* One line down to the door's minimum (D40): the compact step below makes it
+   fit there, so it never wraps. */
+.rl-fd-title { font-weight: 600; line-height: 1.08; letter-spacing: -0.022em; color: var(--color-ink); text-align: center; white-space: nowrap; }
 .rl-fd-welcome-hero .rl-fd-title { font-size: 36px; }
 .rl-frontdoor.is-compact .rl-fd-welcome-hero .rl-fd-title { font-size: 30px; letter-spacing: -0.015em; }
 .rl-fd-welcome-hero .rl-fd-sub { margin: 10px 0 0; }

@@ -20,6 +20,13 @@
     { "name": "status bar Memory chip", "css": [".rl-footer-status .rl-mem-chip"], "expect": { "height": 20 } },
     { "name": "status bar live session", "css": [".rl-footer-meta .rl-live-chip"], "expect": { "height": 20 } }
   ],
+  "door-min": {
+    "probes": [
+      { "name": "door plate at the stage's floor (D40)", "css": [".rl-wb-door-plate"], "expect": { "width": 600 } },
+      { "name": "one chip row at the door's minimum (D40)", "css": [".rl-frontdoor-focus .rl-fd-island .rl-fd-tools"], "expect": { "height": 34 } },
+      { "name": "headline on one line at the door's minimum (D40)", "css": [".rl-fd-welcome-hero .rl-fd-title"], "expect": { "height": 32 } }
+    ]
+  },
   "home": {
     "copy": ["Home", "Browser", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps", "Plans", "Chats"],
     "absent": ["Runs", "Plan a build"],

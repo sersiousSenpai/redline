@@ -24,6 +24,7 @@ import {
   emptyTabSet,
   isSplit,
   launchIdOf,
+  layoutMinWidth,
   normalizeWeights,
   paneIdsOf,
   sessionIdOf,
@@ -101,6 +102,10 @@ export type WorkbenchAction =
       newPaneId?: string;
       /** Place the new pane before the target instead of after. */
       before?: boolean;
+      /** The widest the stage can be at this window, its side columns
+       *  folded (D40). Given, a split whose panes' minimums (`layoutMinWidth`)
+       *  would not fit in it is refused. */
+      room?: number;
     }
   | { type: "closePane"; key?: SessionKey; paneId: string }
   | { type: "replacePreview"; key?: SessionKey; pane: PaneInit; tabId?: string; paneId?: string }
@@ -137,7 +142,17 @@ export type WorkbenchAction =
    *  pane splits that way with the tab's whole layout; on a tab (`intoTabId`,
    *  the tab menu's "Merge into ⟵/⟶"), its root does. The tab leaves the
    *  strip (still open: no ⌘⇧T entry) and the merged tab comes forward. */
-  | { type: "mergeTab"; key?: SessionKey; tabId: string; paneId?: string; intoTabId?: string; edge: DropEdge }
+  | {
+      type: "mergeTab";
+      key?: SessionKey;
+      tabId: string;
+      paneId?: string;
+      intoTabId?: string;
+      edge: DropEdge;
+      /** As `splitPane`'s (D40): no room for the merged panes at their
+       *  minimums, the merge is refused. */
+      room?: number;
+    }
   | {
       type: "openSurface";
       key?: SessionKey;
@@ -183,6 +198,7 @@ export type WorkbenchAction =
 /** The narrowest share a child of a split keeps (10 %): a pane goes by its
  *  own ✕, never by a divider dragged to the edge. */
 export const MIN_SPLIT_SHARE = 0.1;
+
 
 /** `weights` (summing to 1) with every share at least `min`, the shortfall
  *  taken from the others in proportion to what they have above `min`. */
@@ -1016,6 +1032,9 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const paneId = action.newPaneId ?? newId("pane");
       const pane = makePane(action.pane, paneId);
       const root = insertBeside(tab.root, path, action.direction, { pane: paneId }, action.before ?? false);
+      // D40: no room at this window for every pane at its minimum (a door's
+      // one-row composer above all) — the split is refused.
+      if (action.room !== undefined && layoutMinWidth(root, { ...set.panes, [paneId]: pane }) > action.room) return state;
       return putSet(state, key, {
         ...set,
         activeTabId: tab.id,
@@ -1226,6 +1245,7 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const path = action.paneId ? pathTo(target.root, action.paneId) : [];
       if (!path) return state;
       const root = insertBeside(target.root, path, direction, source.root, before);
+      if (action.room !== undefined && layoutMinWidth(root, set.panes) > action.room) return state;
       const tabs = { ...set.tabs, [target.id]: { ...target, root, focusedPaneId: source.focusedPaneId } };
       delete tabs[source.id];
       return putSet(state, key, {

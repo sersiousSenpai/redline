@@ -2,8 +2,10 @@
 // Copyright 2026 Yusuf Al-Bazian
 //
 // The right rail's chrome (W4): the 34px tab strip over whichever tab body
-// App hands it, and — collapsed — the 40px edge strip of the same tabs as
-// icons, so every one of them (the mic included) stays one click away. Pure
+// App hands it, and — collapsed — the plain 40px edge strip of the same tabs
+// as icons, so every one of them (the mic included) stays one click away.
+// No fold button and no chevron in either (D38): ◨ in the top bar, ⌘⌥B, the
+// palette and a drag past the rail's minimum fold it. Pure
 // and presentational: App decides the tabs (`rail.ts`), the active one, the
 // counts, and what each body is; only the active tab's body is ever mounted,
 // so a tab that is not shown cannot poll.
@@ -18,14 +20,11 @@ import {
   FolderTree,
   Globe,
   House,
-  PanelLeftOpen,
   GitCompare,
   Maximize2,
   MessagesSquare,
   Mic,
   Minimize2,
-  PanelRightClose,
-  PanelRightOpen,
   Server,
   type LucideIcon,
 } from "lucide-react";
@@ -100,8 +99,6 @@ export interface RightRailProps extends RailBadges {
   onSelect: (tab: RailTab) => void;
   fullscreen: boolean;
   onToggleFullscreen: () => void;
-  /** ◨: fold the rail to its edge strip (⌘⌥B). */
-  onCollapse: () => void;
   /** The active tab's body. */
   children: ReactNode;
 }
@@ -116,7 +113,7 @@ function Count({ tab, counts, attention }: { tab: RailTab } & RailBadges) {
   );
 }
 
-function RightRailBase({ tabs, active, onSelect, counts, attention, talkKey, fullscreen, onToggleFullscreen, onCollapse, children }: RightRailProps) {
+function RightRailBase({ tabs, active, onSelect, counts, attention, talkKey, fullscreen, onToggleFullscreen, children }: RightRailProps) {
   const away = useTalkAway(active === "talk" ? null : talkKey);
   return (
     <div className="rl-rail" data-rail-tab={active}>
@@ -152,9 +149,6 @@ function RightRailBase({ tabs, active, onSelect, counts, attention, talkKey, ful
         >
           {fullscreen ? <Minimize2 size={14} aria-hidden /> : <Maximize2 size={14} aria-hidden />}
         </button>
-        <button type="button" className="rl-rail-icon" title="Hide the rail (⌘⌥B)" aria-label="Hide the rail" onClick={onCollapse}>
-          <PanelRightClose size={16} aria-hidden />
-        </button>
       </div>
       <div className="rl-rail-body" role="tabpanel" aria-label={RAIL_TAB_LABEL[active]}>
         {children}
@@ -169,13 +163,12 @@ export interface RailEdgeProps extends RailBadges {
   tabs: readonly RailTab[];
   /** Open the rail on this tab. */
   onOpen: (tab: RailTab) => void;
-  /** ◨: open the rail on the tab it remembers (⌘⌥B). */
-  onExpand: () => void;
 }
 
-/** The collapsed rail: the tabs as 16px icons down a 40px strip, the
- *  attention count riding the icon, and the way back open at the foot. */
-function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention, talkKey }: RailEdgeProps) {
+/** The collapsed rail: the tabs as 16px icons down a plain 40px strip, the
+ *  attention count riding the icon (D38: no chevron — a tab opens the rail
+ *  on itself; ◨, ⌘⌥B and the seam's drag open it on the remembered one). */
+function RailEdgeBase({ tabs, onOpen, counts, attention, talkKey }: RailEdgeProps) {
   const away = useTalkAway(talkKey);
   return (
     <div className="rl-rail-edge" aria-label="Rail">
@@ -206,10 +199,6 @@ function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention, talkKey }: Ra
           </button>
         );
       })}
-      <span className="rl-rail-spacer" />
-      <button type="button" className="rl-rail-edge-btn" title="Show the rail (⌘⌥B)" aria-label="Show the rail" onClick={onExpand}>
-        <PanelRightOpen size={16} aria-hidden />
-      </button>
     </div>
   );
 }
@@ -224,15 +213,13 @@ export interface SidebarEdgeProps {
   sessions: readonly { id: string; title: string; tone: EdgeSessionTone; active: boolean }[];
   onPlace: (place: "home" | "browser" | "servers") => void;
   onSession: (id: string) => void;
-  /** ◧: the full sidebar (⌘B). */
-  onExpand: () => void;
 }
 
 /** The collapsed sidebar's icon pose (D18): the Places (Home, Browser,
- *  Localhost — D30), then each
- *  session as a status dot — amber pulsing when it needs you, amber in
- *  review, green when approved — and the way back open at the foot. */
-function SidebarEdgeBase({ place, sessions, onPlace, onSession, onExpand }: SidebarEdgeProps) {
+ *  Localhost — D30), then each session as a status dot — amber pulsing when
+ *  it needs you, amber in review, green when approved. No chevron (D38):
+ *  ◧, ⌘B and the seam's drag bring the full sidebar back. */
+function SidebarEdgeBase({ place, sessions, onPlace, onSession }: SidebarEdgeProps) {
   return (
     <nav className="rl-side-edge" aria-label="Sidebar">
       <button type="button" className="rl-rail-edge-btn" data-current={place === "home" ? "" : undefined} title="Home" aria-label="Home" onClick={() => onPlace("home")}>
@@ -252,10 +239,6 @@ function SidebarEdgeBase({ place, sessions, onPlace, onSession, onExpand }: Side
           </button>
         ))}
       </div>
-      <span className="rl-rail-spacer" />
-      <button type="button" className="rl-rail-edge-btn" title="Show the sidebar (⌘B)" aria-label="Show the sidebar" onClick={onExpand}>
-        <PanelLeftOpen size={16} aria-hidden />
-      </button>
     </nav>
   );
 }

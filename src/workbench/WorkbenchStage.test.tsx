@@ -4,11 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { emptyWorkbench, type AnyPane } from "./model";
+import { PANE_MIN_W, emptyWorkbench, type AnyPane } from "./model";
+import { DOOR_MIN_W } from "../lib/paneLayout";
 import { reduce } from "./reducer";
 import { createWorkbenchStore, type WorkbenchStore } from "./store";
 import { isResizing } from "../lib/resizeSession";
-import { WorkbenchStage } from "./WorkbenchStage";
+import { WorkbenchStage, cellMin } from "./WorkbenchStage";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -206,18 +207,19 @@ describe("any split tree (W5): SplitView", () => {
     await tree();
     const outer = kids(body(), ".rl-wb-split")[0];
     const cells = kids(outer, ".rl-wb-split-cell");
-    // The row is 1000 px of cells: 500 | 250 | 250 (+ two 6 px dividers).
-    const lefts = [0, 506, 762];
-    const widths = [500, 250, 250];
+    // The row is 10 000 px of cells: 5000 | 2500 | 2500 (+ two 1 px seams),
+    // wide enough that 10 % binds before any pane's own minimum (D40).
+    const lefts = [0, 5001, 7502];
+    const widths = [5000, 2500, 2500];
     cells.forEach((c, i) => {
       c.getBoundingClientRect = () => ({ left: lefts[i], top: 0, width: widths[i], height: 600, right: lefts[i] + widths[i], bottom: 600, x: lefts[i], y: 0, toJSON: () => ({}) }) as DOMRect;
     });
     const before = weights()!;
     const second = kids(outer, ".rl-split-divider")[1];
-    await act(async () => { second.dispatchEvent(pointer("pointerdown", 759)); });
+    await act(async () => { second.dispatchEvent(pointer("pointerdown", 7501)); });
     // Dragged far right: the third child stops at 10 % of the whole split.
-    await act(async () => { window.dispatchEvent(pointer("pointermove", 2000)); });
-    await act(async () => { window.dispatchEvent(pointer("pointerup", 2000)); });
+    await act(async () => { window.dispatchEvent(pointer("pointermove", 20000)); });
+    await act(async () => { window.dispatchEvent(pointer("pointerup", 20000)); });
     const after = weights()!;
     expect(after[0]).toBeCloseTo(before[0]);
     expect(after[2]).toBeCloseTo(0.1);
@@ -397,5 +399,68 @@ describe("a door at rest in a split (W5)", () => {
     expect(store.getState().sets.home!.tabs.t1.focusedPaneId).toBe("p1");
     expect(door().querySelector("[data-rl-door-plate]")).not.toBeNull();
     expect(door().querySelector("[data-door-rest]")).toBeNull();
+  });
+});
+
+// D40: a split never draws a pane below its kind's minimum — each cell
+// carries it as `min-width`, which flex honours over the weight — and a
+// divider dragged toward a pane stops at its minimum.
+describe("pane minimums in a split (D40)", () => {
+  const pointer = (type: string, x = 0) => {
+    const ev = new MouseEvent(type, { bubbles: true, clientX: x }) as MouseEvent & { pointerId: number };
+    Object.defineProperty(ev, "pointerId", { value: 1 });
+    return ev;
+  };
+  /** The door p1 beside a plan, laid out across a stage `stage` px wide. */
+  const planBesideDoor = async (stage: number) => {
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, newPaneId: "pl", before: true }));
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    const split = host.querySelector<HTMLElement>(".rl-wb-tab-body:not([data-hidden]) .rl-wb-split")!;
+    const [a, b] = [...split.children].filter((c): c is HTMLElement => c.classList.contains("rl-wb-split-cell"));
+    const half = (stage - 1) / 2;
+    const rect = (left: number, width: number) => ({ left, top: 0, right: left + width, bottom: 600, width, height: 600, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+    a.getBoundingClientRect = () => rect(0, half);
+    b.getBoundingClientRect = () => rect(half + 1, half);
+    const divider = split.querySelector<HTMLElement>(".rl-split-divider")!;
+    const share = () => {
+      const st = store.getState();
+      const node = st.sets[st.activeKey]!.tabs.t1.root;
+      return "split" in node ? node.weights[0] : null;
+    };
+    return { a, b, divider, share };
+  };
+
+  it("each cell carries its pane's minimum, and the seam is one rule", async () => {
+    const { a, b, divider } = await planBesideDoor(1440);
+    // Its own minimum while the split has room; a proportional share of a
+    // window narrowed under it, so no pane is pushed off the stage.
+    expect(a.style.minWidth).toContain(`${PANE_MIN_W.plan}px`);
+    expect(b.style.minWidth).toContain(`${DOOR_MIN_W}px`);
+    expect(cellMin([PANE_MIN_W.plan, DOOR_MIN_W], 1, 2)).toBe(`min(${DOOR_MIN_W}px, calc((100% - 1px) * ${+(DOOR_MIN_W / (PANE_MIN_W.plan + DOOR_MIN_W)).toFixed(4)}))`);
+    expect(divider.style.flex).toBe("0 0 1px");
+  });
+
+  it("on a 1440 stage a drag toward the plan stops at the plan's minimum", async () => {
+    const { divider, share } = await planBesideDoor(1440);
+    await act(async () => { divider.dispatchEvent(pointer("pointerdown", 720)); });
+    await act(async () => { window.dispatchEvent(pointer("pointermove", 40)); });
+    await act(async () => { window.dispatchEvent(pointer("pointerup")); });
+    expect(share()).toBeCloseTo(PANE_MIN_W.plan / 1439, 2);
+  });
+
+  it("on a 1440 stage a drag toward the door stops at the door's minimum", async () => {
+    const { divider, share } = await planBesideDoor(1440);
+    await act(async () => { divider.dispatchEvent(pointer("pointerdown", 720)); });
+    await act(async () => { window.dispatchEvent(pointer("pointermove", 1400)); });
+    await act(async () => { window.dispatchEvent(pointer("pointerup")); });
+    expect(share()).toBeCloseTo(1 - DOOR_MIN_W / 1439, 2);
+  });
+
+  it("on a 900 stage, where the pair is already at its floors, a drag moves nothing", async () => {
+    const { divider, share } = await planBesideDoor(900);
+    await act(async () => { divider.dispatchEvent(pointer("pointerdown", 450)); });
+    await act(async () => { window.dispatchEvent(pointer("pointermove", 100)); });
+    await act(async () => { window.dispatchEvent(pointer("pointerup")); });
+    expect(share()).toBeCloseTo(0.5, 5);
   });
 });

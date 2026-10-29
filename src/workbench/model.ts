@@ -12,6 +12,7 @@
 // `persist.ts` keeps it, `view.ts` reads what the active tab shows. Pure,
 // unit-tested like `tilePolicy.ts`.
 
+import { DOOR_MIN_W } from "../lib/paneLayout";
 import type { DiffSource } from "../types";
 
 /** A tab set's owner: Home, a plan session, or a launch whose plan has not
@@ -383,4 +384,55 @@ export function paneTitle(pane: AnyPane): string {
     case "memory":
       return "Memory";
   }
+}
+
+// ── Hard stops (D38, D40) ───────────────────────────────────────────────
+// Pure, and here rather than in the lazy reducer: App reads what the tab on
+// screen asks of the stage on the boot path.
+
+/** A split's seam between two panes, in px (D38: one rule). */
+export const SPLIT_SEAM_W = 1;
+
+/** Each pane kind's hard stop in a split, px (D40): a split never takes a
+ *  pane below it — the divider stops there, and a split or a merge whose
+ *  panes cannot all keep theirs is refused. */
+export const PANE_MIN_W: Record<PaneKind, number> = {
+  // The composer's one chip row (harness · project · destination · History,
+  // then + 🎙 ↑) and a one-line headline.
+  door: DOOR_MIN_W,
+  // The docked contents (~216 px) beside a 48 ch measure of plan text.
+  plan: 600,
+  // The draft's editor and its toolbar's one row, as the door's.
+  drafter: DOOR_MIN_W,
+  // The page strip beside the address bar.
+  browser: 420,
+  // The compact composer's chips and its send.
+  chat: 400,
+  // Two terminal tiles side by side.
+  terminals: 480,
+  review: 480,
+  memory: 420,
+  file: 360,
+  servers: 360,
+};
+
+/** A pane's hard stop (D40). */
+export function paneMinWidth(pane: AnyPane | undefined): number {
+  return pane ? PANE_MIN_W[pane.kind] : 0;
+}
+
+/** The narrowest `node` can draw with every pane at its minimum: a row adds
+ *  its children and their seams, a column takes its widest child. */
+export function layoutMinWidth(node: LayoutNode, panes: Record<string, AnyPane>): number {
+  if (!isSplit(node)) return paneMinWidth(panes[node.pane]);
+  const mins = node.children.map((child) => layoutMinWidth(child, panes));
+  return node.direction === "row" ? mins.reduce((a, b) => a + b, 0) + (mins.length - 1) * SPLIT_SEAM_W : Math.max(0, ...mins);
+}
+
+/** What the tab on screen asks of the stage: a zoomed pane alone, else its
+ *  whole layout. A lone pane asks nothing beyond the stage's own floor,
+ *  which every lone pane fits. */
+export function tabMinWidth(tab: Tab | null | undefined, panes: Record<string, AnyPane>): number {
+  if (!tab || tab.zoomed || !isSplit(tab.root)) return 0;
+  return layoutMinWidth(tab.root, panes);
 }
