@@ -68,6 +68,9 @@ interface TerminalViewProps {
   onUserData?: (id: string, data: string) => void;
 }
 
+/** How long after a wheel, a key or a press a scroll is still the user's. */
+const USER_SCROLL_MS = 800;
+
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
 /** The viewport sits on the newest line (xterm's `viewportY` at `baseY`). */
 export function viewportAtBottom(term: { buffer: { active: { viewportY: number; baseY: number } } }): boolean {
@@ -280,6 +283,13 @@ export const TerminalView = memo(function TerminalView({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // The viewport belongs at the newest line: true until the user scrolls up
+  // (a wheel, a key, the scrollbar), true again once they come back down.
+  // Anything else that moves it — the box reshaped by a tile added, a pane
+  // closed, ⌘\ in a two-wall tab, walls merged, the layer re-placed — is
+  // not the user, and every fit and every such scroll puts it back
+  // (LAST2: only the wall divider's drag kept it; the rest jumped to the top).
+  const stickRef = useRef(true);
 
   // Debounced, deduped PTY-resize path shared by every fit site. The send is
   // chained per id through enqueuePtyOp so an in-flight resize (or the spawn
@@ -329,7 +339,7 @@ export const TerminalView = memo(function TerminalView({
       if (!term || !fit) return;
       // At the bottom before this fit (or before the drag it settles): kept
       // at the bottom after it.
-      const wasAtBottom = !!opts.stick || viewportAtBottom(term);
+      const wasAtBottom = !!opts.stick || stickRef.current || viewportAtBottom(term);
       let dims: { cols: number; rows: number } | undefined;
       try {
         dims = fit.proposeDimensions();
@@ -468,6 +478,48 @@ export const TerminalView = memo(function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
     const inputOrigin = terminalInputOrigin(term, () => onUserInputRef.current?.(id));
+
+    // Who moved the viewport (`stickRef`). A wheel, a key or a press in the
+    // terminal is the user for a moment after (a press for as long as it is
+    // held: the scrollbar, a selection's autoscroll); a scroll then says
+    // where they left it. A scroll with no user behind it, off the newest
+    // line, is a reshape's or a re-parent's, and goes back to the bottom.
+    // Read a frame later, after xterm's own scroll handler has moved it.
+    let userAt = 0;
+    let pressing = false;
+    const byUser = () => {
+      userAt = performance.now();
+    };
+    const pressed = () => {
+      pressing = true;
+      byUser();
+    };
+    const released = () => {
+      if (pressing) byUser();
+      pressing = false;
+    };
+    const readScroll = () => {
+      if (pressing || performance.now() - userAt < USER_SCROLL_MS) {
+        stickRef.current = viewportAtBottom(term);
+      } else if (viewportAtBottom(term)) {
+        stickRef.current = true;
+      } else if (stickRef.current && visibleRef.current) {
+        term.scrollToBottom();
+      }
+    };
+    let scrollRaf = 0;
+    const onScrolled = () => {
+      if (!scrollRaf) scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        readScroll();
+      });
+    };
+    host.addEventListener("wheel", byUser, { capture: true, passive: true });
+    host.addEventListener("keydown", byUser, true);
+    host.addEventListener("pointerdown", pressed, true);
+    window.addEventListener("pointerup", released, true);
+    host.addEventListener("scroll", onScrolled, true);
+    const scrollSub = term.onScroll?.(onScrolled);
 
     // OSC 0/2. Disposed with the terminal below, along with every other addon
     // and listener it owns.
@@ -690,6 +742,13 @@ export const TerminalView = memo(function TerminalView({
 
     return () => {
       disposed = true;
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      scrollSub?.dispose();
+      host.removeEventListener("wheel", byUser, true);
+      host.removeEventListener("keydown", byUser, true);
+      host.removeEventListener("pointerdown", pressed, true);
+      window.removeEventListener("pointerup", released, true);
+      host.removeEventListener("scroll", onScrolled, true);
       if (termFocusers.get(id) === focusThis) termFocusers.delete(id);
       ro.disconnect();
       cancelTerminalWork(`fit:${id}`);

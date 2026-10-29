@@ -466,12 +466,66 @@ describe("a refit keeps a viewport that was at the bottom at the bottom", () => 
     expect(buffer().viewportY).toBe(120);
   });
 
+  /** The user's wheel scrolls the viewport to `y` (xterm moves it on the
+   *  DOM scroll that follows). */
+  async function userScroll(y: number) {
+    act(() => { terminalHost().dispatchEvent(new Event("wheel", { bubbles: true })); });
+    Object.assign(buffer(), { viewportY: y });
+    act(() => { terminalHost().dispatchEvent(new Event("scroll")); });
+    await frame();
+  }
+  /** Something that is not the user moves the viewport (a reshape, a
+   *  re-parent): xterm reads the box's reset scrollTop. */
+  async function reshapeScroll(y: number) {
+    // Well after any wheel: no user is behind this scroll.
+    const was = performance.now();
+    const spy = vi.spyOn(performance, "now").mockImplementation(() => was + 5000);
+    Object.assign(buffer(), { viewportY: y });
+    act(() => { terminalHost().dispatchEvent(new Event("scroll")); });
+    await frame();
+    spy.mockRestore();
+  }
+
   it("scrolled up by the user: the refit leaves the viewport where it was read", async () => {
     await mount(true);
     await frame();
-    Object.assign(buffer(), { baseY: 120, viewportY: 40 });
+    Object.assign(buffer(), { baseY: 120, viewportY: 120 });
+    await userScroll(40);
     await drag(100);
     expect(buffer().viewportY).toBe(40);
+  });
+
+  // LAST2 walk: a tile added, a pane closed, ⌘\ in a two-wall tab and
+  // walls merged left the tiles at the top of their scrollback: only the
+  // divider's drag kept them at the bottom.
+  it("a scroll nobody asked for (the box reshaped or re-parented) goes back to the bottom", async () => {
+    await mount(true);
+    await frame();
+    Object.assign(buffer(), { baseY: 120, viewportY: 120 });
+    await reshapeScroll(0);
+    expect(buffer().viewportY).toBe(120);
+  });
+
+  it("a refit outside any drag, after the reshape already moved the viewport, lands at the bottom", async () => {
+    await mount(true);
+    await frame();
+    Object.assign(buffer(), { baseY: 120, viewportY: 0 });
+    // The tile added: the box changed, the observer fits, no resize session.
+    mocks.dims = { cols: 60, rows: 20 };
+    act(() => { mocks.resizeObservers[mocks.resizeObservers.length - 1](); });
+    expect(buffer().viewportY).toBe(120);
+  });
+
+  it("back at the bottom after scrolling up, the user's viewport sticks there again", async () => {
+    await mount(true);
+    await frame();
+    Object.assign(buffer(), { baseY: 120, viewportY: 120 });
+    await userScroll(40);
+    await reshapeScroll(10);
+    expect(buffer().viewportY).toBe(10);
+    await userScroll(120);
+    await reshapeScroll(0);
+    expect(buffer().viewportY).toBe(120);
   });
 });
 
