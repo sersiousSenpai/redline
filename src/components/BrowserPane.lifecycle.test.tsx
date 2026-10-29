@@ -36,6 +36,7 @@ vi.mock("./BrowserChat", async () => ({ BrowserChat: (await import("react")).mem
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 import { __resetResizeSession, beginResizeSession, endResizeSession } from "../lib/resizeSession";
+import { PANE_PRESS_EVENT } from "../lib/pressRelease";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, dock: HTMLDivElement, root: Root;
@@ -565,6 +566,20 @@ it("tells the island about a press inside the visible page, never a scroll or a 
     await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "pointerdown" });
     expect(pressed).toHaveBeenCalledOnce();
   } finally { window.removeEventListener("redline:page-press", pressed); }
+});
+
+// LAST2 walk: a click in a browser page did not focus its pane.
+it("a press inside the visible page is raised as a pane press from the page's slot, bubbling to its pane", async () => {
+  const pressed = vi.fn();
+  document.addEventListener(PANE_PRESS_EVENT, pressed);
+  try {
+    await mount();
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "wheel" });
+    expect(pressed).not.toHaveBeenCalled();
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "pointerdown" });
+    expect(pressed).toHaveBeenCalledOnce();
+    expect(host.contains(pressed.mock.calls[0][0].target as Node)).toBe(true);
+  } finally { document.removeEventListener(PANE_PRESS_EVENT, pressed); }
 });
 
 it("finishes hiding a pending native show after the pane unmounts", async () => {

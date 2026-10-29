@@ -84,6 +84,7 @@ import { MissionChat } from "./MissionChat";
 import { MissionStartDialog } from "./MissionStartDialog";
 import { useMission } from "../hooks/useMission";
 import { usePageActions } from "../hooks/usePageActions";
+import { PANE_PRESS_EVENT } from "../lib/pressRelease";
 
 // A native child webview is an OS-level layer painted on top of the React DOM —
 // it does not flow inline. So this component renders an invisible placeholder
@@ -1599,7 +1600,12 @@ function BrowserPaneBase({
       } else if (event.kind === "interaction" || event.kind === "focus") {
         // A press in the page never reaches Redline's own document: say so, for
         // the footer pill's floating card, which closes on a press outside it.
-        if (event.kind === "interaction" && (event.value === "pointerdown" || event.value === "touchstart") && visibleRef.current) window.dispatchEvent(new Event("redline:page-press"));
+        if (event.kind === "interaction" && (event.value === "pointerdown" || event.value === "touchstart") && visibleRef.current) {
+          window.dispatchEvent(new Event("redline:page-press"));
+          // And the pane it sits in takes the focus, as a click anywhere else
+          // in a pane does (the webview swallows the press itself).
+          if (tileIdsRef.current.includes(tab.id)) slotRef.current?.dispatchEvent(new Event(PANE_PRESS_EVENT, { bubbles: true }));
+        }
         if (visibleRef.current && tileIdsRef.current.includes(tab.id) && tab.id !== activeIdRef.current) selectTabRef.current(tab.id);
       } else if (event.kind === "tabs" && typeof event.value === "string" && /^https?:/.test(event.value)) openTabRef.current(event.value);
       else if (event.kind === "selection" && visibleRef.current) parseSelectionEvents([event.value]).forEach((selection, i) => dispatchSelectionRef.current(selection, Date.now() + i));

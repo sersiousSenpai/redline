@@ -55,3 +55,9 @@ export function watchRelease(onRelease: (at: ReleasePoint) => void): () => void 
   window.addEventListener(RELEASE_EVENT, onElsewhere);
   return stop;
 }
+
+/** A press inside a pane that its document never saw: a click in a browser
+ *  page lands on the native webview, not on the pane's box (LAST2: it left
+ *  the focus on the other pane). Raised, bubbling, from inside the pane by
+ *  whoever heard the press; the pane box takes the focus as for its own. */
+export const PANE_PRESS_EVENT = "redline:pane-press";

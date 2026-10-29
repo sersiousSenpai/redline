@@ -33,6 +33,7 @@ import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
 import type { TabStripItem } from "./TabStrip";
+import { PANE_PRESS_EVENT } from "../lib/pressRelease";
 
 /** Lazy, with a null fallback and warmed as this module evaluates: the strip
  *  is the first thing a tab switch paints, and nothing on the boot path
@@ -516,7 +517,13 @@ function PaneBox({ paneId, kind, focused, zoomed, onFocusPane, children }: {
     if (!el || focused) return;
     const press = () => onFocusPane(paneId);
     el.addEventListener("pointerdown", press, true);
-    return () => el.removeEventListener("pointerdown", press, true);
+    // A press its document never saw: a click in a browser page, told by
+    // the page (BrowserPane).
+    el.addEventListener(PANE_PRESS_EVENT, press);
+    return () => {
+      el.removeEventListener("pointerdown", press, true);
+      el.removeEventListener(PANE_PRESS_EVENT, press);
+    };
   }, [paneId, focused, onFocusPane]);
   return (
     <div

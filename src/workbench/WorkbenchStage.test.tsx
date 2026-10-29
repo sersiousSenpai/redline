@@ -9,7 +9,7 @@ import { DOOR_MIN_W } from "../lib/paneLayout";
 import { reduce } from "./reducer";
 import { createWorkbenchStore, type WorkbenchStore } from "./store";
 import { isResizing } from "../lib/resizeSession";
-import { RELEASE_EVENT } from "../lib/pressRelease";
+import { PANE_PRESS_EVENT, RELEASE_EVENT } from "../lib/pressRelease";
 import { WorkbenchStage } from "./WorkbenchStage";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -481,6 +481,22 @@ describe("a press in a singleton's body focuses its pane (W5 fix)", () => {
     // And back: a press in the door focuses the door.
     await act(async () => { host.querySelector<HTMLElement>("[data-pane-input=p1]")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true })); });
     expect(focused()).toBe("p1");
+  });
+});
+
+// LAST2 walk: a click inside a browser page did not focus its pane: the
+// native webview swallows the press; only the page's own signal tells.
+describe("a press a page heard focuses its pane (LAST2)", () => {
+  it("browser | door, the door focused: the page's press, raised from inside the browser pane, focuses it", async () => {
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "browser", data: { workspace: "w1" } }, newPaneId: "br", before: true }));
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "p1" }));
+    const render = (pane: AnyPane) => (pane.kind === "browser" ? <div data-page-slot="" /> : <input data-pane-input={pane.id} aria-label={pane.id} />);
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={render} onNewTab={() => {}} />));
+    const focused = () => store.getState().sets.home!.tabs.t1.focusedPaneId;
+    expect(focused()).toBe("p1");
+    const slot = host.querySelector<HTMLElement>('.rl-wb-pane[data-pane-id="br"] [data-page-slot]')!;
+    await act(async () => { slot.dispatchEvent(new Event(PANE_PRESS_EVENT, { bubbles: true })); });
+    expect(focused()).toBe("br");
   });
 });
 
