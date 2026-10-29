@@ -9,6 +9,7 @@ import { DOOR_MIN_W } from "../lib/paneLayout";
 import { reduce } from "./reducer";
 import { createWorkbenchStore, type WorkbenchStore } from "./store";
 import { isResizing } from "../lib/resizeSession";
+import { RELEASE_EVENT } from "../lib/pressRelease";
 import { WorkbenchStage } from "./WorkbenchStage";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -345,6 +346,36 @@ describe("merge by drag and the pane menu (W5)", () => {
     await act(async () => { keeper.dispatchEvent(at("pointerup", 760, 300)); });
     expect(store.getState().sets.home!.order).toEqual(["t1"]);
     keeper.remove();
+  });
+
+  // LAST2 walk: drops onto a wall, a plan edge and a browser edge still
+  // needed an extra click: the release went to a native page, not here.
+  it("a release a page heard instead of this document lands where the pointer last was, with no click", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    layoutT1();
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
+    expect(document.body.querySelector(".rl-wb-drop-zone")).not.toBeNull();
+    await act(async () => { window.dispatchEvent(new Event(RELEASE_EVENT)); });
+    expect(document.body.querySelector(".rl-wb-drop-zone")).toBeNull();
+    expect(isResizing()).toBe(false);
+    expect(store.getState().sets.home!.tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
+  });
+
+  it("a release that arrives only as a mouseup, on an element outside the strip, lands", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    layoutT1();
+    const outside = document.createElement("div");
+    document.body.append(outside);
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
+    await act(async () => { outside.dispatchEvent(at("mouseup", 760, 300)); });
+    expect(store.getState().sets.home!.order).toEqual(["t1"]);
+    outside.remove();
   });
 
   it("a press whose release was lost while the window was away never swallows the next one", async () => {

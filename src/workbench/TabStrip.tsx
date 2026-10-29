@@ -55,6 +55,7 @@ import {
 } from "lucide-react";
 import { Spinner } from "../components/Spinner";
 import { RowMenu, RowRename, type RowAction } from "../components/RowMenu";
+import { watchRelease } from "../lib/pressRelease";
 import type { PaneKind } from "./model";
 import type { PaneStatus } from "./status";
 import "./workbench.css";
@@ -246,6 +247,11 @@ interface Press {
   out: boolean;
   pointerId: number;
   el: HTMLButtonElement;
+  /** Where the pointer last was: a release heard without a point lands here. */
+  lastX: number;
+  lastY: number;
+  /** Ends the release watch (lib/pressRelease). */
+  stopRelease: () => void;
   /** Set once the press has travelled past DRAG_SLOP. */
   dragging: boolean;
   /** Slots measured on the first real move: each other tab's rect. */
@@ -306,8 +312,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       press.current = null;
       const wasOut = p.dragging && p.out;
       if (wasOut) latest.current.onDragOut?.(p.id, null);
+      p.stopRelease();
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp, true);
       window.removeEventListener("pointercancel", onCancel, true);
       window.removeEventListener("dragstart", noNativeDrag, true);
       window.removeEventListener("blur", onBlur);
@@ -362,14 +368,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
     const onMove = (e: PointerEvent) => {
       const p = press.current;
       if (!p || e.pointerId !== p.pointerId) return;
-      // The mouse's button is up and no pointerup reached us (a release over
-      // the terminal wall was lost, W5 walk): that release was the drop. It
-      // lands here, at once, never on an extra click while the zone follows
-      // the pointer.
-      if (e.pointerType === "mouse" && (e.buttons & 1) === 0) {
-        endPress(true, e.clientX, e.clientY);
-        return;
-      }
+      p.lastX = e.clientX;
+      p.lastY = e.clientY;
       if (!p.dragging) {
         if (Math.max(Math.abs(e.clientX - p.startX), Math.abs(e.clientY - p.startY)) < DRAG_SLOP) return;
         p.dragging = true;
@@ -389,9 +389,6 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       const to = targetOf(p, e.clientX);
       p.to = to;
       setDrag({ id: p.id, to, x: indicatorX(p, to) });
-    };
-    const onUp = (e: PointerEvent) => {
-      if (press.current && e.pointerId === press.current.pointerId) endPress(true, e.clientX, e.clientY);
     };
     const onCancel = (e: PointerEvent) => {
       if (press.current && e.pointerId === press.current.pointerId) endPress(false, e.clientX);
@@ -486,16 +483,24 @@ export function TabStrip(props: TabStripProps): JSX.Element {
         if ((e.target as Element).closest?.(".rl-wb-tab-x, .rl-wb-rename")) return;
         const el = e.currentTarget;
         const stripBottom = list.current?.getBoundingClientRect().bottom ?? Infinity;
-        press.current = { id, startX: e.clientX, startY: e.clientY, stripBottom: stripBottom > 0 ? stripBottom : Infinity, out: false, pointerId: e.pointerId, el, dragging: false, slots: null, to: 0 };
+        const p: Press = { id, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, stripBottom: stripBottom > 0 ? stripBottom : Infinity, out: false, pointerId: e.pointerId, el, dragging: false, slots: null, to: 0, stopRelease: () => {} };
+        press.current = p;
+        // Every move and the release come to the tab itself, whatever is
+        // under the pointer (a wall's tiles, the drop zone).
         try {
           el.setPointerCapture?.(e.pointerId);
         } catch {
           /* jsdom, or a pointer already captured elsewhere */
         }
-        // The release and a cancel are heard in the capture phase, ahead of
-        // anything under the pointer (a wall's tiles) that keeps them.
+        // The release however it shows up (lib/pressRelease): a pointerup or
+        // a mouseup heard in the capture phase, a move with the button up, or
+        // a release a browser page heard instead of this document (LAST2: a
+        // drop over a page or a wall committed only on an extra click). A
+        // release with no point lands where the pointer last was.
+        p.stopRelease = watchRelease((at) => {
+          if (press.current === p) endPress(true, at?.x ?? p.lastX, at?.y ?? p.lastY);
+        });
         window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp, true);
         window.addEventListener("pointercancel", onCancel, true);
         window.addEventListener("dragstart", noNativeDrag, true);
         window.addEventListener("blur", onBlur);
