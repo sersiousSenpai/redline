@@ -37,6 +37,8 @@ export interface RowActs {
   /** The session's own set, its Plan, Agent and Terminals tabs (D29): a row
    *  click opens the plan as a tab of the set on screen instead. */
   workspace?: () => void;
+  /** A plan made from a chat: back to that chat. */
+  chat?: () => void;
   rename?: () => void;
   archive?: () => void;
   remove?: () => void;
@@ -48,6 +50,7 @@ export function planRowActions(session: { archivedAt?: number | null; held: bool
   return [
     { label: "Open plan", icon: glyph(FileText), onSelect: act.open },
     ...(act.workspace ? [{ label: "Open as workspace", icon: glyph(AppWindow), onSelect: act.workspace }] : []),
+    ...(act.chat ? [{ label: "Open chat", icon: glyph(MessageSquare), onSelect: act.chat }] : []),
     ...(act.rename ? [{ label: "Rename", icon: glyph(Pencil), onSelect: act.rename }] : []),
     ...(act.archive ? [{ label: session.archivedAt ? "Unarchive" : "Archive", icon: glyph(session.archivedAt ? ArchiveRestore : Archive), disabled: session.held, onSelect: act.archive }] : []),
     ...(act.remove ? [{ label: "Delete plan", icon: glyph(Trash2), shortcut: "⌫", danger: true, divided: true, onSelect: act.remove }] : []),

@@ -9029,8 +9029,10 @@ function App() {
       // open one reads selected while the door's room holds it.
       chats,
       activeChatId: chatPane,
+      // A chat that became a plan leaves the sidebar's Chats for its plan.
+      chatPlans: Object.fromEntries(Object.entries(chatReceipts).flatMap(([chat, r]) => (r.status === "done" && r.sessionId ? [[chat, r.sessionId]] : []))),
     }),
-    [chatPane, chats, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
+    [chatPane, chats, chatReceipts, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
   // The workbench sidebar's own data (W1): which Place reads selected, the
   // Localhost ports beside it, and each session's terminals

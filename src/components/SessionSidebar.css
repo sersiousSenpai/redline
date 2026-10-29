@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Yusuf Al-Bazian */
-/* The sessions sidebar (SessionSidebar.tsx): the Places, the Sessions label,
-   project groups of plan rows (styled on the row, classic's), chat and launch
-   rows, the terminals nested under a plan, and the New tab footer. 13px UI
+/* The sessions sidebar (SessionSidebar.tsx): the Places, Needs you, the
+   Projects (a folder header over each project's plan rows, styled on the
+   row, classic's), the Chats list of one-line rows, the terminals nested
+   under a plan, and the New tab footer. 13px UI
    text, 28px single-line rows, 16px icons on the Places. Colours are tokens
    only; the row menu itself is styled with RowMenu in styles.css, Combine's
    picker with rl-cmb- there too. */
@@ -45,23 +46,6 @@
 .rl-sb-place[aria-current] { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-sb-place:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 
-/* ── The Sessions label, with Combine ───────────────────────────────────── */
-.rl-sb-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 10px 0 16px;
-  border-bottom: 1px solid var(--color-rule);
-  font-size: var(--rl-text-label);
-  font-weight: 600;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  color: var(--color-ink-4);
-}
-.rl-sb-head > span:first-child { flex: 1; }
-
 .rl-sb-scroll {
   flex: 1;
   min-height: 0;
@@ -84,46 +68,84 @@
   color: var(--color-ink-5);
 }
 .rl-sb-section[data-kind="needs"] > .rl-sb-label { color: var(--color-warning); }
-/* A project's "+": a 24px target laid over the label row, its glyph in the
-   ⋯ column below it. */
+
+/* ── Projects and Chats: the two parts after Needs you ─────────────────── */
+.rl-sb-part { display: flex; flex-direction: column; margin-top: 10px; }
+.rl-sb-part-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--rl-sb-row);
+  margin: 0 6px;
+  padding: 0 10px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-4);
+  font-size: var(--rl-text-chrome);
+  font-weight: 500;
+  text-align: left;
+}
+.rl-sb-part-head > .rl-cmb-enter { margin-left: auto; }
+/* Chats' header folds the list: the whole row is the target. */
+.rl-sb-part-toggle { cursor: pointer; }
+.rl-sb-part-toggle:hover { background: var(--color-fill-1); color: var(--color-ink-3); }
+.rl-sb-part-toggle:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
+.rl-sb-part-toggle > svg { flex: none; margin-left: auto; color: var(--color-ink-5); }
+.rl-sb-part-count { color: var(--color-ink-5); font-variant-numeric: tabular-nums; }
+.rl-sb-part-working { display: inline-flex; align-items: center; color: var(--color-mode-plan-fg); }
+
+/* A project's header: its folder and name (the fold target, the row's
+   width), its servers' chip, then its "+". 28px, the rows' own 13px. */
+.rl-sb-section[data-kind="project"] > .rl-sb-label {
+  gap: 2px;
+  height: var(--rl-sb-row);
+  margin: 2px 6px 0;
+  padding: 0 4px 0 0;
+  font-size: var(--rl-text-row);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--color-ink-2);
+}
+.rl-sb-proj {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--rl-sb-row);
+  padding: 0 6px 0 10px;
+  border-radius: var(--rl-radius-row);
+  color: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.rl-sb-proj > svg { flex: none; color: var(--color-ink-4); }
+.rl-sb-proj-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-sb-proj:hover { background: var(--color-fill-1); color: var(--color-ink); }
+.rl-sb-proj:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
+.rl-sb-section[data-collapsed] > .rl-sb-label { color: var(--color-ink-3); }
+/* "No plans": muted, where a row's title would start. */
+.rl-sb-none { margin: 0; padding: 0 16px 0 40px; height: var(--rl-sb-row); line-height: var(--rl-sb-row); font-size: var(--rl-text-chrome); color: var(--color-ink-5); }
+/* A project's "+": a 24px target at the header's end, out while the header
+   is hovered or holds focus (it stays in the tab order). */
 .rl-sb-add {
-  position: absolute;
-  top: 0;
-  right: 10px;
+  flex: none;
   display: grid;
   place-items: center;
   width: 24px;
   height: 24px;
   border-radius: var(--rl-radius-chip);
-  color: var(--color-ink-5);
+  color: var(--color-ink-4);
   cursor: pointer;
+  opacity: 0;
 }
+.rl-sb-label:hover > .rl-sb-add,
+.rl-sb-label:focus-within > .rl-sb-add { opacity: 1; }
 .rl-sb-add:hover { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-sb-add:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 
 .rl-sb-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 
-/* A project's Plans and Chats (D31): a quiet header row that folds the
-   group, its count beside the word, a spinner while any agent works. */
-.rl-sb-group { display: flex; flex-direction: column; }
-.rl-sb-group-head {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  margin: 0 6px;
-  padding: 0 10px 0 8px;
-  border-radius: var(--rl-radius-row);
-  color: var(--color-ink-4);
-  font-size: var(--rl-text-chrome);
-  text-align: left;
-  cursor: pointer;
-}
-.rl-sb-group-head > svg { flex: none; color: var(--color-ink-5); }
-.rl-sb-group-head:hover { background: var(--color-fill-1); color: var(--color-ink-3); }
-.rl-sb-group-head:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
-.rl-sb-group-label { font-weight: 500; }
-.rl-sb-group-count { color: var(--color-ink-5); font-variant-numeric: tabular-nums; }
-.rl-sb-group-working { display: inline-flex; align-items: center; color: var(--color-mode-plan-fg); }
 .rl-sb-rows[data-archived] > li { opacity: 0.72; }
 .rl-sb-empty { margin: 10px 16px; font-size: 12.5px; line-height: 1.5; color: var(--color-ink-4); }
 .rl-sb-empty b { font-weight: 600; color: var(--color-ink-3); }
@@ -166,43 +188,49 @@
 
 /* ── Chat and launch rows ───────────────────────────────────────────────── */
 .rl-sb-item { position: relative; margin: 1px 6px; border-radius: var(--rl-radius-row); }
-/* A chat is two lines: the title, then its status in colour and how long
-   ago. A launch is one line. */
+/* One 28px line: the icon or status mark, the title, then (a chat) its
+   project's pill and how long ago at the far right, or (a launch) its tag. */
 .rl-sb-row {
   position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  min-height: 47px;
-  padding: 6px 8px 6px 10px;
+  height: var(--rl-sb-row);
+  padding: 0 8px 0 10px;
   border-radius: var(--rl-radius-row);
   color: var(--color-ink-2);
   text-align: left;
   cursor: pointer;
 }
-.rl-sb-item[data-kind="launch"] > .rl-sb-row { align-items: center; min-height: var(--rl-sb-row); padding-top: 0; padding-bottom: 0; color: var(--color-ink-4); }
+.rl-sb-item[data-kind="launch"] > .rl-sb-row { color: var(--color-ink-4); }
 .rl-sb-item[data-kind="launch"] .rl-sb-title { flex: 1; font-style: italic; }
 .rl-sb-tag { flex: none; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-ink-5); }
 .rl-sb-item[data-need] .rl-sb-tag { color: var(--color-warning); }
 .rl-sb-row:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
-.rl-sb-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 14px; height: 18px; color: var(--color-ink-4); }
-.rl-sb-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.rl-sb-line { display: flex; align-items: center; gap: 6px; min-width: 0; height: 18px; }
-.rl-sb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-sb-meta {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
+.rl-sb-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--color-ink-4); }
+/* Short of room, the title and a project's pill give way together, each in
+   proportion to its length: the pill never past two fifths of the row, nor
+   under 44px, so it always reads as a name. */
+.rl-sb-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-sb-chip {
+  flex: 0 1 auto;
+  min-width: 44px;
+  max-width: 40%;
+  box-sizing: border-box;
+  height: 16px;
+  padding: 0 6px;
   overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
-  line-height: 16px;
+  border: 1px solid var(--color-rule);
+  border-radius: 9999px;
+  font-size: var(--rl-text-label);
+  line-height: 14px;
   color: var(--color-ink-4);
 }
-.rl-sb-status { flex: none; font-weight: 500; }
-.rl-sb-age { flex: none; }
+.rl-sb-age { flex: none; margin-left: auto; font-size: var(--rl-text-label); font-variant-numeric: tabular-nums; color: var(--color-ink-5); }
+.rl-sb-item[data-active] .rl-sb-chip { color: var(--color-ink-3); }
 
 .rl-sb-item:hover > .rl-sb-row { background: var(--color-fill-1); }
 .rl-sb-item[data-active] > .rl-sb-row { background: var(--color-fill-2); color: var(--color-ink); }
@@ -225,7 +253,7 @@
   color: var(--color-ink-3);
   cursor: pointer;
 }
-.rl-sb-item[data-kind="launch"] > .rl-sb-dots { top: 2px; }
+.rl-sb-item > .rl-sb-dots { top: 2px; }
 /* A plan row's: centred on its title line, 8px clear of the version chip
    (the row's 36px right padding). */
 .rl-session-row > .rl-sb-dots { top: 6px; }
@@ -233,7 +261,7 @@
 .rl-sb-dots[aria-expanded="true"] { color: var(--color-ink); }
 /* Over the ⋯ the row stays lit. */
 .rl-session-row:has(> .rl-sb-dots:hover) > .hover-elevated { background: color-mix(in srgb, var(--color-bg-elevated) 60%, transparent); }
-.rl-sb-item:has(> .rl-sb-dots) > .rl-sb-row .rl-sb-tag { visibility: hidden; }
+.rl-sb-item:has(> .rl-sb-dots) > .rl-sb-row :is(.rl-sb-tag, .rl-sb-age) { visibility: hidden; }
 .rl-sb-dots:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 
 /* Rename in place: the field starts where the title did. */
@@ -313,6 +341,5 @@
 .rl-sb-port { display: inline-flex; flex: none; align-items: center; gap: 3px; box-sizing: border-box; height: 14px; padding: 0 6px; border: 1px solid var(--color-rule); border-radius: 9999px; font-family: var(--font-mono); font-size: 10px; line-height: 12px; letter-spacing: 0; text-transform: none; white-space: nowrap; color: var(--color-ink-muted); cursor: pointer; }
 .rl-sb-port:hover, .rl-sb-port:focus-visible { color: var(--color-ink); border-color: var(--color-ink-muted); }
 .rl-sb-port:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }
-/* On the project's header: at the label row's end, clear of its "+". */
-.rl-sb-label > .rl-sb-port { margin-left: auto; }
-.rl-sb-label:has(> .rl-sb-add) > .rl-sb-port { margin-right: 22px; }
+/* On the project's header: after the name, before its "+". */
+.rl-sb-label > .rl-sb-port { margin: 0 2px 0 auto; }

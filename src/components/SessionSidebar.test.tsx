@@ -87,7 +87,12 @@ const planRow = (title: string) =>
 const lightRow = (title: string) =>
   [...host.querySelectorAll<HTMLElement>(".rl-sb-item")].find((li) => li.querySelector(".rl-sb-title")?.textContent === title)!;
 
+// The sidebar's kept state, per viewer: each test starts as a first launch.
+const KEPT = ["redline.sidebar.chatsOpen", "redline.sidebar.collapsedProjects", "redline.sidebar.chatPlans"];
+const openChats = () => localStorage.setItem("redline.sidebar.chatsOpen", "true");
+
 beforeEach(() => {
+  for (const k of KEPT) localStorage.removeItem(k);
   rowRenders.mockClear();
   menuRenders.mockClear();
   for (const fn of Object.values(handlers)) fn.mockClear();
@@ -237,33 +242,123 @@ describe("the grouped sidebar", () => {
     expect([...host.querySelectorAll(".rl-sb-label span[id]")].map((l) => l.textContent)).toEqual(["redline"]);
   });
 
-  it("splits a project into Plans and Chats, each folding away on its header, its count kept (D31)", async () => {
-    localStorage.removeItem("redline.sidebar.collapsedGroups");
+  const chatHead = () => host.querySelector<HTMLButtonElement>(".rl-sb-part[data-part=chats] > .rl-sb-part-toggle")!;
+  const projectHead = (name: string) =>
+    [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-proj")].find((b) => b.querySelector(".rl-sb-proj-name")?.textContent === name)!;
+  const chatTitles = () => [...host.querySelectorAll(".rl-sb-part[data-part=chats] .rl-sb-item .rl-sb-title")].map((t) => t.textContent);
+
+  it("Projects then Chats: a project holds only its plans, under a folder header with no Plans/Chats split", async () => {
     await renderWith({
       sessions: [summary("a", 2), summary("b", 1)],
-      chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }],
-      working: new Set(["chat:c"]),
+      chats: [{ companionId: "c", title: "Status check", updatedAt: 3, projectPath: "/repo/redline" }],
+      launches: [{ terminalId: "t", title: "Plan the roadmap", startedAt: 0, projectPath: "/repo/redline", working: true }],
     });
-    const heads = () => [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-group-head")];
-    expect(heads().map((h) => [h.querySelector(".rl-sb-group-label")?.textContent, h.querySelector(".rl-sb-group-count")?.textContent, h.getAttribute("aria-expanded")])).toEqual([
-      ["Plans", "2", "true"],
-      ["Chats", "1", "true"],
-    ]);
-    // A group with an agent at work wears the shared Spinner, and says so.
-    expect(heads()[1].querySelector(".rl-sb-group-working .rl-spinner")).not.toBeNull();
-    expect(heads()[0].querySelector(".rl-sb-group-working")).toBeNull();
-    const group = (kind: string) => host.querySelector(`.rl-sb-group[data-group="${kind}"]`)!;
-    expect(group("plans").querySelectorAll("li.rl-session-row")).toHaveLength(2);
-    expect(group("chats").textContent).toContain("Status check");
-    await click(heads()[1]);
-    expect(heads()[1].getAttribute("aria-expanded")).toBe("false");
-    expect(group("chats").textContent).not.toContain("Status check");
-    expect(heads()[1].querySelector(".rl-sb-group-count")?.textContent).toBe("1");
-    // Kept for the next launch, per viewer.
-    expect(JSON.parse(localStorage.getItem("redline.sidebar.collapsedGroups") ?? "[]")).toEqual(["project:/repo/redline|chats"]);
-    await click(heads()[1]);
-    expect(group("chats").textContent).toContain("Status check");
-    localStorage.removeItem("redline.sidebar.collapsedGroups");
+    expect([...host.querySelectorAll(".rl-sb-part-label")].map((l) => l.textContent)).toEqual(["Projects", "Chats"]);
+    const project = host.querySelector(".rl-sb-section[data-kind=project]")!;
+    expect(project.closest(".rl-sb-part")!.getAttribute("data-part")).toBe("projects");
+    expect(projectHead("redline").querySelector("svg")!.getAttribute("width")).toBe("16");
+    expect([...project.querySelectorAll("li.rl-session-row")].map((li) => li.querySelector(".truncate")!.textContent)).toEqual(["Plan a", "Plan b"]);
+    expect(project.querySelectorAll(".rl-sb-item[data-kind=launch]")).toHaveLength(1);
+    expect(project.querySelector(".rl-sb-item[data-kind=chat]")).toBeNull();
+    expect(host.querySelector(".rl-sb-group, .rl-sb-group-head")).toBeNull();
+  });
+
+  it("Chats is collapsed by default, its count and spinner on the header; opening it is kept", async () => {
+    const props = {
+      sessions: [summary("a", 2)],
+      chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }, { companionId: "d", title: "Lunch ideas", updatedAt: 2 }],
+      working: new Set(["chat:c"]),
+    };
+    await renderWith(props);
+    expect(chatHead().getAttribute("aria-expanded")).toBe("false");
+    expect(chatHead().querySelector(".rl-sb-part-count")!.textContent).toBe("2");
+    expect(chatHead().querySelector(".rl-sb-part-working .rl-spinner")).not.toBeNull();
+    expect(chatTitles()).toEqual([]);
+    await click(chatHead());
+    expect(chatHead().getAttribute("aria-expanded")).toBe("true");
+    expect(chatTitles()).toEqual(["Lunch ideas", "Status check"]);
+    expect(localStorage.getItem("redline.sidebar.chatsOpen")).toBe("true");
+    // A fresh mount (the next launch) opens it as it was left.
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await renderWith(props);
+    expect(chatTitles()).toEqual(["Lunch ideas", "Status check"]);
+    await click(chatHead());
+    expect(chatTitles()).toEqual([]);
+    expect(localStorage.getItem("redline.sidebar.chatsOpen")).toBe("false");
+  });
+
+  it("a chat row is one line: its icon, title, its project's pill only when it has one, and how long ago", async () => {
+    openChats();
+    const now = Date.now();
+    await renderWith({
+      sessions: [summary("a", 2)],
+      chats: [{ companionId: "c", title: "Status check", updatedAt: now - 2 * 3_600_000, projectPath: "/repo/redline" }, { companionId: "d", title: "Lunch ideas", updatedAt: now - 5 * 60_000 }],
+      working: new Set(["chat:d"]),
+    });
+    const inProject = lightRow("Status check");
+    expect(inProject.querySelector(".rl-sb-chip")!.textContent).toBe("redline");
+    expect(inProject.querySelector(".rl-sb-age")!.textContent).toBe("2h");
+    expect(inProject.querySelector(".rl-sb-icon svg")!.getAttribute("width")).toBe("16");
+    expect([...inProject.querySelector(".rl-sb-row")!.children].map((e) => e.className)).toEqual(["rl-sb-icon", "rl-sb-title", "rl-sb-chip", "rl-sb-age"]);
+    const general = lightRow("Lunch ideas");
+    expect(general.querySelector(".rl-sb-chip")).toBeNull();
+    expect(general.querySelector(".rl-sb-age")!.textContent).toBe("5m");
+    // Mid-turn: the shared spinner where the icon was.
+    expect(general.querySelector(".rl-sb-icon .rl-sb-spin")).not.toBeNull();
+    expect(host.querySelector(".rl-sb-status, .rl-sb-meta")).toBeNull();
+  });
+
+  it("a project folds away on its header, kept per project; one with no plans says so", async () => {
+    await renderWith({
+      sessions: [summary("a", 2), summary("m", 1, 0, { projectPath: "/repo/mos", projectName: "mos" })],
+      chats: [{ companionId: "c", title: "Research", updatedAt: 9, projectPath: "/repo/research" }],
+    });
+    expect(projectHead("research").closest(".rl-sb-section")!.querySelector(".rl-sb-none")!.textContent).toBe("No plans");
+    expect(projectHead("redline").getAttribute("aria-expanded")).toBe("true");
+    await click(projectHead("redline"));
+    expect(projectHead("redline").getAttribute("aria-expanded")).toBe("false");
+    expect(planRow("Plan a")).toBeUndefined();
+    expect(planRow("Plan m")).toBeDefined();
+    expect(JSON.parse(localStorage.getItem("redline.sidebar.collapsedProjects") ?? "[]")).toEqual(["project:/repo/redline"]);
+    await click(projectHead("redline"));
+    expect(planRow("Plan a")).toBeDefined();
+  });
+
+  it("Show N more: a project after its five most recent plans, Chats after eight, each expanding in place", async () => {
+    openChats();
+    await renderWith({
+      sessions: Array.from({ length: 7 }, (_, i) => summary(`p${i}`, 100 - i)),
+      chats: Array.from({ length: 10 }, (_, i) => ({ companionId: `c${i}`, title: `Chat ${i}`, updatedAt: 50 - i })),
+    });
+    const project = host.querySelector(".rl-sb-section[data-kind=project]")!;
+    expect([...project.querySelectorAll("li.rl-session-row")].map((li) => li.querySelector(".truncate")!.textContent)).toEqual(["Plan p0", "Plan p1", "Plan p2", "Plan p3", "Plan p4"]);
+    const chatsPart = host.querySelector(".rl-sb-part[data-part=chats]")!;
+    expect(chatTitles()).toHaveLength(8);
+    expect(project.querySelector(".rl-sb-fold")!.textContent).toBe("Show 2 more");
+    expect(chatsPart.querySelector(".rl-sb-fold")!.textContent).toBe("Show 2 more");
+    await click(project.querySelector(".rl-sb-fold"));
+    expect(project.querySelectorAll("li.rl-session-row")).toHaveLength(7);
+    expect(project.querySelector(".rl-sb-fold")!.textContent).toBe("Show less");
+    await click(chatsPart.querySelector(".rl-sb-fold"));
+    expect(chatTitles()).toHaveLength(10);
+  });
+
+  it("a chat that became a plan leaves Chats; its plan's menu opens the chat", async () => {
+    openChats();
+    const chats = [{ companionId: "c", title: "Billing chat", updatedAt: 9, projectPath: "/repo/redline" }, { companionId: "d", title: "Lunch ideas", updatedAt: 2 }];
+    await renderWith({ sessions: [summary("a", 2)], chats, chatPlans: { c: "not-yet" } });
+    expect(chatTitles()).toEqual(["Billing chat", "Lunch ideas"]);
+    await renderWith({ sessions: [summary("a", 2)], chats, chatPlans: { c: "a" } });
+    expect(chatTitles()).toEqual(["Lunch ideas"]);
+    expect(chatHead().querySelector(".rl-sb-part-count")!.textContent).toBe("1");
+    await click(await dots(planRow("Plan a")));
+    expect([...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent)).toEqual(["Open plan", "Open chat", "Rename", "Archive", "Delete plan"]);
+    await click([...document.querySelectorAll(".rl-row-menu-item")].find((b) => b.textContent === "Open chat")!);
+    expect(full.onSelectChat).toHaveBeenCalledWith("c");
+    // Kept: the host forgets the link on a relaunch, the sidebar does not.
+    await renderWith({ sessions: [summary("a", 2)], chats, chatPlans: {} });
+    expect(chatTitles()).toEqual(["Lunch ideas"]);
   });
 
   it("a plan row's menu opens it as a workspace (D29)", async () => {
@@ -493,6 +588,7 @@ describe("the grouped sidebar", () => {
   });
 
   it("a chat row: opens the chat, and its menu archives and deletes the chat", async () => {
+    openChats();
     await renderWith({ sessions: [], chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }] });
     await click(lightRow("Status check").querySelector(".rl-sb-row"));
     expect(full.onSelectChat).toHaveBeenCalledWith("c");
@@ -503,6 +599,7 @@ describe("the grouped sidebar", () => {
   });
 
   it("⌫ on a chat row asks in place; Escape backs out, Delete deletes", async () => {
+    openChats();
     await renderWith({ sessions: [], chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }] });
     await press(lightRow("Status check").querySelector(".rl-sb-row")!, "Backspace");
     const yes = lightRow("Status check").querySelector<HTMLButtonElement>(".rl-sb-confirm-yes")!;
@@ -516,6 +613,7 @@ describe("the grouped sidebar", () => {
   });
 
   it("renames a chat in place: Enter saves, Escape writes nothing, an emptied field is a cancel", async () => {
+    openChats();
     await renderWith({ sessions: [], chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }] });
     const open = async () => {
       await click(await dots(lightRow("Status check")));
@@ -607,15 +705,15 @@ describe("the grouped sidebar", () => {
     expect(host.querySelector("[aria-current='page']:not(.rl-sb-place)")).toBeNull();
   });
 
-  it("folds archived rows at the end and projects past six", async () => {
+  it("folds archived rows at the end and projects past five", async () => {
     const sessions = [
       ...Array.from({ length: 8 }, (_, i) => summary(`s${i}`, 100 - i)),
       summary("old", 1, 0, { archivedAt: 5 }),
     ];
     await renderWith({ sessions });
-    expect(host.querySelectorAll(".rl-session-row")).toHaveLength(6);
+    expect(host.querySelectorAll(".rl-session-row")).toHaveLength(5);
     const folds = [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-fold")];
-    expect(folds.map((f) => f.textContent)).toEqual(["Show 2 more", "Archived · 1"]);
+    expect(folds.map((f) => f.textContent)).toEqual(["Show 3 more", "Archived · 1"]);
     await click(folds[0]);
     expect(host.querySelectorAll(".rl-session-row")).toHaveLength(8);
     await click(host.querySelectorAll(".rl-sb-fold")[1]);
@@ -664,7 +762,7 @@ describe("a row's ⋯ (D37)", () => {
     chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }],
     launches: [{ terminalId: "l", title: "Plan the roadmap", startedAt: 1, projectPath: "/repo/redline", working: true }],
   };
-  const renderAll = () => act(async () => root.render(<SessionSidebar {...props} />));
+  const renderAll = () => { openChats(); return act(async () => root.render(<SessionSidebar {...props} />)); };
   const fire = (el: Element, type: string, init: MouseEventInit = {}) =>
     act(async () => { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, ...init })); });
   const key = (el: Element, init: KeyboardEventInit) =>

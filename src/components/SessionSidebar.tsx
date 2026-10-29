@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
-//! Browser, Localhost — D30) as one row of icons (D39), a "Sessions" label
-//! with Combine, the
-//! joined-session shadow, then project sections from lib/sessionGroups —
-//! Needs you first while something does — each split into Plans (the rich
-//! plan rows: status colour, v{n}, pending count, unseen pulse, build-state
-//! chips, detached/codex chips, the revision tree and the row menu, and the
-//! launches whose plan has not arrived) and Chats, each group collapsible
-//! with its own count and spinner (D31). A row click opens its session as a
-//! tab of the set on screen (D29). A project's dev servers are one chip on
-//! its header, and on a plan row only when the server runs under one of that
-//! plan's own terminals (D44).
+//! Browser, Localhost — D30) as one row of icons (D39), the joined-session
+//! shadow, then the sections from lib/sessionGroups: Needs you while
+//! something does; **Projects** (its label carries Combine), each project a
+//! folder header that folds away (kept per project) over only its plans —
+//! the rich plan rows: status colour, v{n}, pending count, unseen pulse,
+//! build-state chips, detached/codex chips, the revision tree and the row
+//! menu — and the launches whose plan has not arrived, five then "Show N
+//! more", "No plans" when it has none; then **Chats**, one flat list of
+//! one-line rows (the chat's project a pill on it, how long ago at its end),
+//! closed until opened (kept), eight then "Show N more". A chat that became
+//! a plan leaves Chats; its plan's menu has "Open chat". A row click opens
+//! its session as a tab of the set on screen (D29). A project's dev servers
+//! are one chip on its header, and on a plan row only when the server runs
+//! under one of that plan's own terminals (D44).
 //! A plan row's status line wraps a pill to a line of its own rather than
 //! cut it ("DET…"): no pill and no status word is ever truncated.
 //! Under each plan row sit its terminals in the shared status vocabulary
@@ -23,7 +26,7 @@
 //! so only the rows that changed render.
 
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, FileText, Globe, House, MessageSquare, Plus, Server, Terminal, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Globe, House, MessageSquare, Plus, Server, Terminal, X } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
@@ -44,7 +47,7 @@ import {
   type FlowChat,
   type FlowLaunch,
   type NeedReason,
-  type SidebarGroup,
+  type SidebarChats,
   type SidebarItem,
   type SidebarSection,
   type StatusIcon,
@@ -135,8 +138,12 @@ export interface SessionSidebarProps {
   /** The start screen is on the stage, so Home reads as selected and no row
    *  does. Only read when `place` is not given. */
   startActive?: boolean;
-  /** Chats (companion conversations), rows among the plans. */
+  /** Chats (companion conversations): the Chats list after the projects. */
   chats?: readonly FlowChat[];
+  /** Which plan each chat became (companion id → plan session id), as this
+   *  run of the app saw it happen. The sidebar keeps every link it is given,
+   *  so a chat stays elevated after a relaunch. */
+  chatPlans?: Readonly<Record<string, string>>;
   activeChatId?: string | null;
   onSelectChat?: (companionId: string) => void;
   onRenameChat?: (companionId: string, title: string) => void;
@@ -236,7 +243,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     sessions, activeId, pendingCounts, joined, onSelectJoined, onLeaveJoined,
     onSelect, onOpenWorkspace, onDelete, onRename, onArchive, onSetPlanState, onMoveProject, onExport,
     onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow,
-    onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
+    onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, chatPlans, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
     onSelectLaunch, onRemoveLaunch, needs, working, place, onSelectPlace, localhostPorts,
     terminals, homeTerminals, onSelectTerminal, onNewTab, servers, onOpenPort,
@@ -289,15 +296,36 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     [],
   );
 
-  // Section and group ids opened past their "Show N more", and the archived fold.
+  // Section ids (and `chats`) opened past their "Show N more", and the archived fold.
   const [openSections, setOpenSections] = useState<ReadonlySet<string>>(() => new Set());
-  // The Plans and Chats groups the user folded away (D31), kept per viewer.
-  const [collapsedList, setCollapsedList] = usePersistedState<string[]>("redline.sidebar.collapsedGroups", []);
+  // The projects the user folded away, kept per viewer.
+  const [collapsedList, setCollapsedList] = usePersistedState<string[]>("redline.sidebar.collapsedProjects", []);
   const collapsed = useMemo(() => new Set(Array.isArray(collapsedList) ? collapsedList : []), [collapsedList]);
-  const toggleGroup = useCallback((id: string) => setCollapsedList((prev) => {
+  const toggleProject = useCallback((id: string) => setCollapsedList((prev) => {
     const list = Array.isArray(prev) ? prev : [];
     return list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-64);
   }), [setCollapsedList]);
+  // Chats is closed until the user opens it, and stays as they left it.
+  const [chatsOpenValue, setChatsOpen] = usePersistedState<boolean>("redline.sidebar.chatsOpen", false);
+  const chatsOpen = chatsOpenValue === true;
+  const toggleChats = useCallback(() => setChatsOpen((prev) => prev !== true), [setChatsOpen]);
+  // Every chat→plan link the host has handed over, kept: the host learns one
+  // only as the plan arrives, and a chat that became a plan stays one.
+  const [keptLinks, setKeptLinks] = usePersistedState<Record<string, string>>("redline.sidebar.chatPlans", {});
+  useEffect(() => {
+    if (!chatPlans) return;
+    setKeptLinks((prev) => {
+      const base = prev && typeof prev === "object" ? prev : {};
+      const fresh = Object.entries(chatPlans).filter(([chat, plan]) => typeof plan === "string" && base[chat] !== plan);
+      if (fresh.length === 0) return prev;
+      // Bounded: the newest links win once there are more than anyone keeps.
+      return Object.fromEntries([...Object.entries(base).filter(([chat]) => !(chat in chatPlans)), ...Object.entries(chatPlans)].slice(-256));
+    });
+  }, [chatPlans, setKeptLinks]);
+  const links = useMemo(
+    () => ({ ...(keptLinks && typeof keptLinks === "object" ? keptLinks : {}), ...chatPlans }),
+    [keptLinks, chatPlans],
+  );
   const [archivedOpen, setArchivedOpen] = useState(false);
   const toggleSection = useCallback((id: string) => setOpenSections((prev) => {
     const next = new Set(prev);
@@ -312,8 +340,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     return keys.length ? new Set(keys.map((id) => itemKey("plan", id))) : undefined;
   }, [terminals]);
   const model = useMemo(
-    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections, pinned, collapsed }),
-    [sessions, chats, launches, needs, working, activeKey, openSections, pinned, collapsed],
+    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections, pinned, collapsed, chatsOpen, chatPlans: links }),
+    [sessions, chats, launches, needs, working, activeKey, openSections, pinned, collapsed, chatsOpen, links],
   );
 
   // Combine selection. Local because nothing outside the sidebar watches it —
@@ -325,6 +353,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
   // picking auth before billing is how you say which one leads without
   // typing a sentence about it.
   const [combining, setCombining] = useState(false);
+  const projectsLabel = useId();
   const [picked, setPicked] = useState<string[]>([]);
   // A row click picks while combining and opens the plan otherwise. Id-based
   // and stable between those modes, so a memoized row only renders when its
@@ -419,6 +448,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           need={item.need}
           working={item.working}
           terminals={terminals?.[s.sessionId]}
+          chatId={onSelectChat ? item.chatId : undefined}
+          onOpenChat={onSelectChat}
           port={sessionPorts[s.sessionId]}
           onOpenPort={onOpenPort}
           onOpenWorkspace={onOpenWorkspace}
@@ -446,7 +477,10 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     );
   };
 
-  const empty = model.sections.length === 0 && model.archived.length === 0 && !joined;
+  const empty = model.sections.length === 0 && model.chats.count === 0 && model.archived.length === 0 && !joined;
+  const needsSection = model.sections.find((x) => x.kind === "needs");
+  const projects = model.sections.filter((x) => x.kind === "project");
+  const combinable = !!onCombine && !combining && sessions.length >= MIN_COMBINE;
   const places: [SidebarPlace, typeof House, string, boolean][] = [["home", House, "Home", homeCurrent]];
   if (onSelectPlace) places.push(["browser", Globe, "Browser", place === "browser"], ["servers", Server, "Localhost", place === "servers"]);
   // One tab stop for the row: the current Place, else the first.
@@ -487,22 +521,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           </ul>
         )}
       </div>
-      <div className="rl-sb-head">
-        <span>Sessions</span>
-        {/* A text button on the label row, not a header control: the header is
-            a closed set of surfaces, and this is an action on the list under
-            it. Hidden below MIN_COMBINE, where it could only ever refuse. */}
-        {onCombine && !combining && sessions.length >= MIN_COMBINE && (
-          <button
-            type="button"
-            onClick={() => setCombining(true)}
-            title="Combine several plans into one new plan session"
-            className="rl-cmb-enter"
-          >
-            Combine
-          </button>
-        )}
-      </div>
       <div className="rl-sb-scroll rl-thin-scroll-y">
         {joined && (
           <section className="rl-sb-section" aria-label="Joined session">
@@ -515,19 +533,45 @@ function SessionSidebarBase(props: SessionSidebarProps) {
             />
           </section>
         )}
-        {model.sections.map((section) => (
-          <Section key={section.id} section={section} open={openSections.has(section.id)} onToggle={toggleSection}
-            onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}
-            port={section.projectPath ? projectPorts[section.projectPath] : undefined} onOpenPort={onOpenPort}>
-            {section.groups.length === 0
-              ? section.rows.map(row)
-              : section.groups.map((group) => (
-                  <Group key={group.id} group={group} open={openSections.has(group.id)} onToggle={toggleSection} onCollapse={toggleGroup}>
-                    {group.rows.map(row)}
-                  </Group>
-                ))}
+        {needsSection && (
+          <Section section={needsSection} open={false} onToggle={toggleSection}>
+            {needsSection.rows.map(row)}
           </Section>
-        ))}
+        )}
+        {(projects.length > 0 || combinable) && (
+          <section className="rl-sb-part" data-part="projects" aria-labelledby={projectsLabel}>
+            <div className="rl-sb-part-head">
+              <span id={projectsLabel} className="rl-sb-part-label">Projects</span>
+              {/* A text button on the label row, not a header control: the
+                  header is a closed set of surfaces, and this is an action on
+                  the plans under it. Hidden below MIN_COMBINE, where it could
+                  only ever refuse. */}
+              {combinable && (
+                <button
+                  type="button"
+                  onClick={() => setCombining(true)}
+                  title="Combine several plans into one new plan session"
+                  className="rl-cmb-enter"
+                >
+                  Combine
+                </button>
+              )}
+            </div>
+            {projects.map((section) => (
+              <Section key={section.id} section={section} open={openSections.has(section.id)} onToggle={toggleSection}
+                onCollapse={toggleProject}
+                onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}
+                port={section.projectPath ? projectPorts[section.projectPath] : undefined} onOpenPort={onOpenPort}>
+                {section.rows.map(row)}
+              </Section>
+            ))}
+          </section>
+        )}
+        {model.chats.count > 0 && (
+          <ChatsPart chats={model.chats} open={openSections.has(model.chats.id)} onToggle={toggleSection} onCollapse={toggleChats}>
+            {model.chats.rows.map(row)}
+          </ChatsPart>
+        )}
         {empty && (
           <p className="rl-sb-empty">
             No sessions yet. Start one from <b>Home</b>.
@@ -589,10 +633,31 @@ function SessionSidebarBase(props: SessionSidebarProps) {
   );
 }
 
-function Section({ section, open, onToggle, onAdd, port, onOpenPort, children }: {
+/** The "Show N more" / "Show less" row under a list. */
+function Fold({ id, hidden, foldable, open, onToggle }: {
+  id: string;
+  hidden: number;
+  foldable: boolean;
+  open: boolean;
+  onToggle: (id: string) => void;
+}) {
+  if (!(hidden > 0 || (open && foldable))) return null;
+  return (
+    <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(id)}>
+      {open ? "Show less" : `Show ${hidden} more`}
+    </button>
+  );
+}
+
+/** Needs you (a quiet label over its rows, never folded), or a project: a
+ *  folder header that folds the project away, with its servers' chip and
+ *  its "+", over only its plans and launches. */
+function Section({ section, open, onToggle, onCollapse, onAdd, port, onOpenPort, children }: {
   section: SidebarSection;
   open: boolean;
   onToggle: (id: string) => void;
+  /** A project's header folds it away. */
+  onCollapse?: (id: string) => void;
   onAdd?: (projectPath: string) => void;
   /** The project's dev servers, once for the whole project (D44). */
   port?: PortChip;
@@ -600,11 +665,29 @@ function Section({ section, open, onToggle, onAdd, port, onOpenPort, children }:
   children: ReactNode;
 }) {
   const labelId = useId();
+  const listId = useId();
   const folder = section.projectPath;
+  const project = section.kind === "project";
+  const shown = !section.collapsed;
+  const Icon = shown ? FolderOpen : Folder;
   return (
-    <section className="rl-sb-section" aria-labelledby={labelId} data-kind={section.kind}>
+    <section className="rl-sb-section" aria-labelledby={labelId} data-kind={section.kind} data-collapsed={section.collapsed || undefined}>
       <div className="rl-sb-label">
-        <span id={labelId}>{section.label}</span>
+        {project ? (
+          <button
+            type="button"
+            className="rl-sb-proj"
+            aria-expanded={shown}
+            aria-controls={listId}
+            title={folder ?? "Plans with no project folder"}
+            onClick={() => onCollapse?.(section.id)}
+          >
+            <Icon size={16} aria-hidden />
+            <span id={labelId} className="rl-sb-proj-name">{section.label}</span>
+          </button>
+        ) : (
+          <span id={labelId}>{section.label}</span>
+        )}
         {port && onOpenPort && (
           <button type="button" className="rl-sb-port" title={port.title} aria-label={`Open ${port.label} in the browser`}
             onClick={() => onOpenPort(port.url)}>
@@ -612,67 +695,60 @@ function Section({ section, open, onToggle, onAdd, port, onOpenPort, children }:
           </button>
         )}
         {/* A project's own "+": the start screen, pointed at this folder.
-            Always there, as faint as the label it sits on. */}
+            Out while the header is hovered or has focus. */}
         {onAdd && folder && (
           <button type="button" className="rl-sb-add" aria-label={`New session in ${section.label}`} title={`New session in ${folder}`}
             onClick={() => onAdd(folder)}>
-            <Plus size={12} aria-hidden />
+            <Plus size={14} aria-hidden />
           </button>
         )}
       </div>
-      {section.groups.length > 0 ? children : (
-        <>
-          <ul className="rl-sb-rows">{children}</ul>
-          {(section.hidden > 0 || (open && section.foldable)) && (
-            <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
-              {open ? "Show less" : `Show ${section.hidden} more`}
-            </button>
-          )}
-        </>
-      )}
+      {shown && (section.count === 0 ? (
+        <p id={listId} className="rl-sb-none">No plans</p>
+      ) : (
+        <ul id={listId} className="rl-sb-rows">{children}</ul>
+      ))}
+      {shown && <Fold id={section.id} hidden={section.hidden} foldable={section.foldable} open={open} onToggle={onToggle} />}
     </section>
   );
 }
 
-/** A project's Plans or Chats (D31): a header that folds the group away,
- *  with its count and — while any of its agents is mid-turn — the shared
- *  Spinner; then its rows and its own "Show N more". */
-function Group({ group, open, onToggle, onCollapse, children }: {
-  group: SidebarGroup;
+/** Chats: one flat list after the projects, closed until opened. Its header
+ *  folds it, with its count and, while any of its agents is mid-turn, the
+ *  shared Spinner. */
+function ChatsPart({ chats, open, onToggle, onCollapse, children }: {
+  chats: SidebarChats;
   open: boolean;
   onToggle: (id: string) => void;
-  onCollapse: (id: string) => void;
+  onCollapse: () => void;
   children: ReactNode;
 }) {
+  const labelId = useId();
   const listId = useId();
-  const shown = !group.collapsed;
+  const shown = !chats.collapsed;
   return (
-    <div className="rl-sb-group" data-group={group.kind} data-collapsed={group.collapsed || undefined}>
+    <section className="rl-sb-part" data-part="chats" aria-labelledby={labelId} data-collapsed={chats.collapsed || undefined}>
       <button
         type="button"
-        className="rl-sb-group-head"
+        className="rl-sb-part-head rl-sb-part-toggle"
         aria-expanded={shown}
         aria-controls={listId}
-        title={shown ? `Fold ${group.label.toLowerCase()} away` : `Show ${group.label.toLowerCase()}`}
-        onClick={() => onCollapse(group.id)}
+        title={shown ? "Fold chats away" : "Show chats"}
+        onClick={onCollapse}
       >
-        {shown ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
-        <span className="rl-sb-group-label">{group.label}</span>
-        <span className="rl-sb-group-count" aria-label={`${group.count} ${group.count === 1 ? group.kind.slice(0, -1) : group.kind}`}>{group.count}</span>
-        {group.working > 0 && (
-          <span className="rl-sb-group-working" title={`${group.working} working`}>
+        <span id={labelId} className="rl-sb-part-label">Chats</span>
+        <span className="rl-sb-part-count" aria-label={`${chats.count} ${chats.count === 1 ? "chat" : "chats"}`}>{chats.count}</span>
+        {chats.working > 0 && (
+          <span className="rl-sb-part-working" title={`${chats.working} working`}>
             <Spinner size={9} />
-            <span className="sr-only">{group.working} working</span>
+            <span className="sr-only">{chats.working} working</span>
           </span>
         )}
+        {shown ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
       </button>
       {shown && <ul id={listId} className="rl-sb-rows">{children}</ul>}
-      {shown && (group.hidden > 0 || (open && group.foldable)) && (
-        <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(group.id)}>
-          {open ? "Show less" : `Show ${group.hidden} more`}
-        </button>
-      )}
-    </div>
+      {shown && <Fold id={chats.id} hidden={chats.hidden} foldable={chats.foldable} open={open} onToggle={onToggle} />}
+    </section>
   );
 }
 
@@ -863,6 +939,8 @@ function SessionRowBase({
   need = null,
   working = false,
   terminals,
+  chatId,
+  onOpenChat,
   port,
   onOpenPort,
   onClick,
@@ -898,6 +976,9 @@ function SessionRowBase({
   working?: boolean;
   /** The plan's terminals, always listed under the row. */
   terminals?: readonly SidebarTerminal[];
+  /** The chat this plan was made from: its menu's "Open chat". */
+  chatId?: string;
+  onOpenChat?: (companionId: string) => void;
   /** Its own dev servers' chip (a server under one of its terminals,
    *  D44); a click opens the first in the browser. */
   port?: PortChip;
@@ -1260,6 +1341,7 @@ function SessionRowBase({
           actions={planRowActions(session, {
             open: () => onClick(session.sessionId),
             workspace: onOpenWorkspace ? () => onOpenWorkspace(session.sessionId) : undefined,
+            chat: chatId && onOpenChat ? () => onOpenChat(chatId) : undefined,
             rename: onRename ? () => setRenaming(true) : undefined,
             archive: onArchive ? () => onArchive(session.sessionId, !session.archivedAt) : undefined,
             remove: () => setConfirming(true),
@@ -1433,12 +1515,14 @@ function StatusGlyph({ icon, tone, need }: { icon: StatusIcon; tone: StatusTone;
   // Working turns the shared ring: an HTML element the compositor spins. A
   // rotating <svg> is repainted on the main thread every frame.
   if (icon === "spin") return <Spinner size={12} className="rl-sb-spin" style={{ color: TONE[tone] }} />;
-  if (icon === "chat") return <MessageSquare size={14} aria-hidden style={{ color: TONE[tone] }} />;
-  return <FileText size={14} aria-hidden style={{ color: TONE[tone] }} />;
+  if (icon === "chat") return <MessageSquare size={16} aria-hidden style={{ color: TONE[tone] }} />;
+  return <FileText size={16} aria-hidden style={{ color: TONE[tone] }} />;
 }
 
-/** A chat, or a launch whose plan has not arrived: a light two-line row
- *  (a launch is one line, italic, tagged "launching"). Its menu opens on
+/** A chat, or a launch whose plan has not arrived: one 28 px line. A chat
+ *  is its icon (or its status mark: the needs-you pulse, the working
+ *  spinner), its title, its project's pill when it has one and how long
+ *  ago; a launch is italic, tagged "launching". Its menu opens on
  *  right-click, ⇧F10 or the ⋯ it shows while hovered or focused; ⌫ deletes
  *  a chat. */
 function LightRowBase({ item, active, handlers, can }: {
@@ -1490,7 +1574,8 @@ function LightRowBase({ item, active, handlers, can }: {
   };
   const status = rowStatus(item);
   const icon = <span className="rl-sb-icon"><StatusGlyph icon={status.icon} tone={status.tone} need={item.need !== null} /></span>;
-  const tooltip = [item.title, item.projectPath, status.detail].filter(Boolean).join("\n");
+  // A chat's line has no status word: it is the tooltip's, after the title.
+  const tooltip = [item.title, item.projectPath, chat && status.word !== "Chat" ? status.word : null, status.detail].filter(Boolean).join("\n");
   return (
     <li
       className="rl-sb-item"
@@ -1548,15 +1633,13 @@ function LightRowBase({ item, active, handlers, can }: {
           >
             {icon}
             {chat ? (
-              <span className="rl-sb-text">
-                <span className="rl-sb-line">
-                  <span className="rl-sb-title">{item.title}</span>
-                </span>
-                <span className="rl-sb-meta">
-                  <span className="rl-sb-status" style={{ color: TONE[status.tone] }}>{status.word}</span>
-                  <span className="rl-sb-age">· {rowAge(item.at)}</span>
-                </span>
-              </span>
+              <>
+                <span className="rl-sb-title">{item.title}</span>
+                {/* Only a chat with a project wears one: a general chat is
+                    the title and its time, nothing more. */}
+                {item.projectLabel && <span className="rl-sb-chip" title={item.projectPath ?? undefined}>{item.projectLabel}</span>}
+                <span className="rl-sb-age">{rowAge(item.at)}</span>
+              </>
             ) : (
               <>
                 <span className="rl-sb-title">{item.title}</span>
@@ -1588,6 +1671,8 @@ const LightRow = memo(LightRowBase, (a, b) =>
   a.item.key === b.item.key &&
   a.item.title === b.item.title &&
   a.item.at === b.item.at &&
+  a.item.projectLabel === b.item.projectLabel &&
+  a.item.projectPath === b.item.projectPath &&
   a.item.mode === b.item.mode &&
   a.item.need === b.item.need &&
   a.item.working === b.item.working &&
