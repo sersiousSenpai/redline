@@ -319,6 +319,20 @@ describe("the grouped sidebar", () => {
     expect(full.onNewSession).not.toHaveBeenCalled();
   });
 
+  it("App's Home is a door tab in the set on screen, a pristine one reused (D39)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const app = readFileSync("src/App.tsx", "utf8");
+    const handler = app.slice(app.indexOf("onSelectPlace: (place: \"home\""), app.indexOf("selectSurface(place);"));
+    expect(handler).toContain("openHomeDoor();");
+    expect(handler).not.toMatch(/setActiveId\(null\)/);
+    const home = app.slice(app.indexOf("const openHomeDoor = useCallback"), app.indexOf("}, [openDoor]);"));
+    // The doors nobody typed in, by their drafts; the caret lands either way.
+    expect(home).toContain('pane.kind === "door" && !readSharedDraft(pane.data.draftKey).trim()');
+    const open = app.slice(app.indexOf("const openDoor = useCallback"), app.indexOf("const openDoorTab = useCallback"));
+    expect(open).toContain("reuse,");
+    expect(open).toContain("setFrontDoorFocus((n) => n + 1);");
+  });
+
   it("the Places row is one tab stop, the current Place, and the arrows walk it (D39)", async () => {
     const onSelectPlace = vi.fn();
     await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: "browser", onSelectPlace });

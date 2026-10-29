@@ -165,6 +165,10 @@ export type WorkbenchAction =
       data?: PaneDataByKind[PaneKind];
       tabId?: string;
       paneId?: string;
+      /** A door only: the door panes nobody has typed in (the host knows the
+       *  drafts, the store does not). A tab in this set that is one of them
+       *  alone comes forward instead of a second empty door (Home, D39). */
+      reuse?: readonly string[];
     }
   | { type: "ensureDefaults"; key: SessionKey; defaults?: DefaultsContext; tabIds?: string[]; paneIds?: string[] }
   | { type: "revealTerminal"; ptyId: string; key?: SessionKey; tabId?: string; paneId?: string }
@@ -1291,8 +1295,15 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
     case "openSurface": {
       const key = keyOf(state, action.key);
       const set = setOf(state, key) ?? emptyTabSet();
-      // A door is always new (⌘T); anything else comes forward if it is open
-      // with the same data, in the current set, never navigating away.
+      // A door is always new (⌘T), unless the host names pristine ones and
+      // the set holds one alone in a tab (Home): that tab comes forward.
+      // Anything else comes forward if it is open with the same data, in the
+      // current set, never navigating away.
+      if (action.kind === "door" && action.reuse?.length) {
+        const pristine = new Set(action.reuse);
+        const tab = set.order.map((id) => set.tabs[id]).find((t) => t && !isSplit(t.root) && pristine.has(t.focusedPaneId) && set.panes[t.focusedPaneId]?.kind === "door");
+        if (tab) return set.activeTabId === tab.id ? state : putSet(state, key, { ...set, activeTabId: tab.id });
+      }
       if (action.kind !== "door") {
         const open = panesOfKind(set, action.kind).find(({ pane }) => (action.data === undefined ? isSurfacePane(pane, key) : sameData(pane.data, action.data)));
         if (open) {

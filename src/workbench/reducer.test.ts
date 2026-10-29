@@ -569,6 +569,35 @@ describe("previews and surfaces", () => {
     expect(set(s).panes.dp.data).toEqual({ draftKey: doorDraftKey("dp") });
     expect(s.activeKey).toBe(HOME_KEY);
   });
+
+  it("Home (D39): a new door tab in the set on screen, unless a door nobody typed in is already there", () => {
+    // A plan's set: the Plan tab and a file. Home adds a door tab there,
+    // never switching sets.
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1" });
+    s = reduce(s, { type: "openTab", key: "plan:s1", pane: file("/a"), tabId: "fa", paneId: "pa" });
+    s = reduce(s, { type: "openSurface", kind: "door", tabId: "h1", paneId: "hp1", reuse: [] });
+    expect(s.activeKey).toBe("plan:s1");
+    expect(set(s).activeTabId).toBe("h1");
+    expect(set(s).panes.hp1.kind).toBe("door");
+    const tabs = set(s).order.length;
+    // Back on the file; Home again with hp1 still pristine: hp1 comes forward.
+    s = reduce(s, { type: "selectTab", tabId: "fa" });
+    const again = reduce(s, { type: "openSurface", kind: "door", tabId: "h2", paneId: "hp2", reuse: ["hp1"] });
+    expect(set(again).order).toHaveLength(tabs);
+    expect(set(again).activeTabId).toBe("h1");
+    expect(set(again).panes.hp2).toBeUndefined();
+    // Standing on it already: nothing changes.
+    expect(reduce(again, { type: "openSurface", kind: "door", paneId: "hp3", reuse: ["hp1"] })).toBe(again);
+    // Typed in (no longer named pristine): a second door tab.
+    const typed = reduce(s, { type: "openSurface", kind: "door", tabId: "h2", paneId: "hp2", reuse: [] });
+    expect(set(typed).order).toHaveLength(tabs + 1);
+    expect(set(typed).activeTabId).toBe("h2");
+    // A pristine door inside a split is not a tab of its own: a new one.
+    let split = reduce(s, { type: "selectTab", tabId: "h1" });
+    split = reduce(split, { type: "splitPane", paneId: "hp1", direction: "row", pane: file("/b"), newPaneId: "pb" });
+    split = reduce(split, { type: "openSurface", kind: "door", tabId: "h3", paneId: "hp3", reuse: ["hp1"] });
+    expect(set(split).activeTabId).toBe("h3");
+  });
 });
 
 describe("sessions", () => {

@@ -1578,18 +1578,22 @@ function App() {
   const untouchedDoors = useRef(new Set<string>());
   // ⌘T's door, for the mount-once key listener below.
   const openDoorTabRef = useRef<() => void>(() => {});
-  const openDoorTab = useCallback(() => {
+  // ⌘T's door; Home's (the Places' house, D39) passes `reuse`: a door tab
+  // already in the set on screen that nobody typed in comes forward instead
+  // of a second empty one. Either way the caret lands in its box.
+  const openDoor = useCallback((reuse?: readonly string[]) => {
     beginMeasure("wb:new-tab-caret");
     const { set, tab } = activePanes(wb.getState());
     const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
     const paneId = newDoorPaneId();
-    untouchedDoors.current.add(paneId);
     wb.dispatch({
       type: "openSurface",
       kind: "door",
       paneId,
+      reuse,
       data: { draftKey: doorDraftKey(paneId), ...(focused?.kind === "browser" ? { destination: "browser" as const } : {}) },
     });
+    if (activePanes(wb.getState()).set?.panes[paneId]) untouchedDoors.current.add(paneId);
     setFrontDoorOpen(false);
     setFrontDoorFocus((n) => n + 1);
     // The measure ends when the caret rests in the door's box.
@@ -1601,7 +1605,12 @@ function App() {
     document.addEventListener("focusin", landed, true);
     window.setTimeout(() => document.removeEventListener("focusin", landed, true), 2000);
   }, []);
+  const openDoorTab = useCallback(() => openDoor(), [openDoor]);
   openDoorTabRef.current = openDoorTab;
+  const openHomeDoor = useCallback(() => {
+    const { set } = activePanes(wb.getState());
+    openDoor(set ? Object.values(set.panes).filter((pane) => pane.kind === "door" && !readSharedDraft(pane.data.draftKey).trim()).map((pane) => pane.id) : []);
+  }, [openDoor]);
   /** The tab at `key` is a ⌘T door nobody typed in, in a set with other
    *  tabs: close it. */
   const closeUntouchedDoor = useCallback((key: SessionKey, tabId: string | null) => {
@@ -9165,8 +9174,7 @@ function App() {
     // the set on screen.
     onSelectPlace: (place: "home" | "browser" | "servers") => {
       if (place === "home") {
-        tripDoor();
-        setActiveId(null);
+        openHomeDoor();
         return;
       }
       selectSurface(place);
