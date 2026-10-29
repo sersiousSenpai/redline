@@ -12,7 +12,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Check, ChevronRight, CornerDownLeft, Globe, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, CornerDownLeft, Globe, History, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -854,6 +854,7 @@ function FrontDoorView(props: FrontDoorProps) {
     entered ? "is-in" : "",
     compact ? "is-compact" : "",
     tight ? "is-tight" : "",
+    chipsTight ? "is-chips-tight" : "",
     short ? "is-short" : "",
     squat ? "is-squat" : "",
   ]
@@ -1039,7 +1040,7 @@ function FrontDoorView(props: FrontDoorProps) {
             )}
             {floating && !accessories && chats.length > 0 && onOpenChat && <ComposerMenu
               label="Conversation history" options={chats.map(chat => ({ value: chat.id, label: chat.title }))}
-              onChange={onOpenChat}>History</ComposerMenu>}
+              onChange={onOpenChat} chip="history" icon={<History size={12} aria-hidden />}>History</ComposerMenu>}
             <div className="rl-composer-accessories">{accessories}</div>
             <div className="rl-composer-send-tools" style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: "auto" }}>
             <button

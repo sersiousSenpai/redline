@@ -81,10 +81,15 @@ export const hasChildOverlay = () => Array.from(document.querySelectorAll(OVERLA
 const BOX = ".has-welcome .rl-fd-island, .has-welcome .rl-context-chips";
 /** A send control in the box (`data-rl-door-go`, the start screen's Start)
  *  is not the caret going into it: pressed at rest it launches where it is,
- *  instead of zooming the door for the moment the launch takes. */
+ *  instead of zooming the door for the moment the launch takes. Nor is a
+ *  chip that opens a menu (harness, project, destination, History): its
+ *  menu opens over the door where it stands, in a split too, and Esc closes
+ *  the menu only (LAST2: a chip pressed in a split lifted the door to the
+ *  whole window, and Esc left it there). */
+const NOT_THE_CARET = "[data-rl-door-go], .rl-composer-chip, [aria-haspopup]";
 const inBox = (target: EventTarget | null) => {
   const element = target as Element | null;
-  return !!element?.closest?.(BOX) && !element.closest("[data-rl-door-go]");
+  return !!element?.closest?.(BOX) && !element.closest(NOT_THE_CARET);
 };
 /** A key that types into a field: what engages the resting door. */
 const typing = (event: ReactKeyboardEvent) => !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing

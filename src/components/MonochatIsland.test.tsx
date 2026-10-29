@@ -450,6 +450,27 @@ describe("the flow shell", () => {
     expect(pose()).toBe("conversation");
   });
 
+  // LAST2 walk: a chip pressed in a split lifted the door to the whole
+  // window, and Esc (which closed the menu) left it there.
+  it("a chip that opens a menu engages nothing at rest, and zooms nothing when open", async () => {
+    const onOpen = vi.fn();
+    await render(<Harness landing onOpen={onOpen}>
+      <div className="rl-frontdoor has-welcome">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/>
+          <div className="rl-fd-tools"><button id="chip" className="rl-composer-chip" aria-haspopup="menu"><span>Claude</span></button></div>
+        </div>
+      </div>
+    </Harness>);
+    const chip = host.querySelector<HTMLButtonElement>("#chip")!;
+    await pointer(chip, "pointerdown", { button: 0 });
+    await act(async () => chip.focus());
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(pose()).toBe("entry");
+    // The field still engages.
+    await pointer(main(), "pointerdown", { button: 0 });
+    expect(pose()).toBe("conversation");
+  });
+
   it("re-measures a door plate replaced without a surface change (the blank door tab in a plan set)", async () => {
     vi.stubGlobal("innerWidth", 1280); vi.stubGlobal("innerHeight", 800);
     // A detached element measures as all zeros in WebKit.

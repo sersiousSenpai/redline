@@ -99,7 +99,7 @@ export function ProjectPicker({
     }
   };
 
-  return <ComposerMenu label="Choose project" title="Choose the project to launch the plan in" value={value === null ? "home" : `path:${value.replace(/\/+$/, "")}`} icon={<Folder size={13}/>}
+  return <ComposerMenu label="Choose project" title="Choose the project to launch the plan in" value={value === null ? "home" : `path:${value.replace(/\/+$/, "")}`} icon={<Folder size={13}/>} chip="project"
     options={[
       { value: "home", label: "Home (~)", detail: "Use your home directory" },
       ...merged.map(option => ({ value: `path:${option.path.replace(/\/+$/, "")}`, label: option.name, detail: option.path, group: "Projects" })),

@@ -10,14 +10,16 @@ export interface ComposerOption {
 }
 
 /** The composer's menus share placement, keyboard navigation and glass material. */
-export function ComposerMenu({ label, title, value, options, onChange, icon, children }: {
+export function ComposerMenu({ label, title, value, options, onChange, icon, children, chip }: {
   label: string; title?: string; value?: string; options: ComposerOption[];
   onChange: (value: string) => void; icon?: ReactNode; children?: ReactNode;
+  /** Which chip this is (`data-chip`), for the row's sizing rules. */
+  chip?: string;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const pop = useClickPopover(trigger, "left", "above", 304, true);
   return <>
-    <button ref={trigger} type="button" className="rl-composer-chip" aria-label={label}
+    <button ref={trigger} type="button" className="rl-composer-chip" aria-label={label} data-chip={chip}
       title={title} aria-haspopup="menu" aria-expanded={pop.open} onClick={pop.toggle}>
       {icon}<span>{children ?? label}</span><ChevronDown size={12}/>
     </button>

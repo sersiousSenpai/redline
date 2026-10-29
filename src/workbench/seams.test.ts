@@ -129,4 +129,12 @@ describe("the door at its minimum (D40)", () => {
     expect(island).toMatch(/\.rl-monochat \.rl-frontdoor\.is-compact \.rl-fd-tools\s*\{\s*flex-wrap:\s*nowrap;/);
     expect(rule(island, ".rl-fd-title")).toMatch(/white-space:\s*nowrap/);
   });
+
+  // LAST2 walk: in a split the chips read "Cla…", "C…", "Hist…".
+  it("draws every chip at its natural width: only the project's name gives way, History is its icon beside another pane", () => {
+    const island = css("src/components/MonochatIsland.css");
+    expect(island).toMatch(/\.rl-monochat \.rl-fd-tools > \* \{ min-width: 0; flex-shrink: 0; \}/);
+    expect(island).toMatch(/\.rl-fd-tools > \.rl-composer-chip\[data-chip="project"\] \{ flex-shrink: 1; min-width: 96px; \}/);
+    expect(island).toMatch(/\.is-chips-tight \.rl-composer-chip\[data-chip="history"\] > span \{ display: none; \}/);
+  });
 });
