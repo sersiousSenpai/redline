@@ -21,7 +21,11 @@
 #     poll);
 #   - child processes the host spawned during the window (lsof/ps polls);
 #   - the responsiveness probe's own numbers from GET /v1/perf, if it is on,
-#     and the renderer footprint Redline reads for itself (`renderer`).
+#     and the renderer footprint Redline reads for itself (`renderer`);
+#   - the terminal helper (`redline-ptyd`, the process that owns the
+#     terminals so they outlive the app), discovered like the host: its CPU,
+#     wakeups, footprint and the children it spawned in the window. With the
+#     app quit, `--helper-only` samples it alone.
 #
 # The probe can stay on: its frame sampler runs only while you interact.
 # Touch nothing for a few seconds before and while it samples. Twelve seconds
@@ -29,10 +33,12 @@
 #
 # Usage: scripts/perf-idle.sh [--seconds N] [--app NAME] [--port P] [--keep]
 #                             [--gpu PID] [--renderer PID] [--host PID]
+#                             [--helper PID] [--helper-only]
 #   --app       whose processes to sample (default Redline; any WebKit app
 #               works, e.g. --app Safari, to check the recipe itself). The
 #               dev binary is `redline`, the bundle `Redline`; both match.
-#   --gpu, --renderer, --host   skip discovery and sample these pids
+#   --gpu, --renderer, --host, --helper   skip discovery and sample these pids
+#   --helper-only   sample only the terminal helper (the app may be quit)
 #   --keep      keep the raw `sample` and `top` reports and print where they are
 set -euo pipefail
 
@@ -43,6 +49,8 @@ KEEP=0
 GPU=""
 RENDERER=""
 HOST_PID=""
+HELPER_PID=""
+HELPER_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_TO_SAMPLE=$2; shift 2 ;;
@@ -52,7 +60,9 @@ while [ $# -gt 0 ]; do
     --gpu) GPU=$2; shift 2 ;;
     --renderer) RENDERER=$2; shift 2 ;;
     --host) HOST_PID=$2; shift 2 ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    --helper) HELPER_PID=$2; shift 2 ;;
+    --helper-only) HELPER_ONLY=1; shift ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -78,6 +88,41 @@ oldest() { [ $# -gt 0 ] || return 0; ps -o etime=,pid= -p "$(IFS=,; echo "$*")" 
     if (s > best) { best = s; pid = $2 } }
   END { print pid }'; }
 
+# The terminal helper is launchd's child too (it double-forks out of the
+# app's session), so it is found by name: the oldest, should two builds' be up.
+if [ -z "$HELPER_PID" ]; then HELPER_PID=$(oldest $(pgrep -x redline-ptyd || true)); fi
+
+TMP=${TMPDIR:-/tmp}
+
+if [ "$HELPER_ONLY" = 1 ]; then
+  if [ -z "$HELPER_PID" ]; then
+    echo "✗ no redline-ptyd running (pass --helper PID)." >&2
+    exit 1
+  fi
+  OUT=$(mktemp -d "${TMP%/}/redline-perf-idle.XXXXXX")
+  echo "Sampling the terminal helper alone for ${SECONDS_TO_SAMPLE}s — pid $HELPER_PID ($(pgrep -P "$HELPER_PID" | wc -l | tr -d ' ') children)"
+  top -l 2 -s "$SECONDS_TO_SAMPLE" -stats pid,idlew,cpu -pid "$HELPER_PID" > "$OUT/top.txt" 2>/dev/null &
+  sample "$HELPER_PID" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/helper.txt" >/dev/null 2>&1 &
+  BEFORE=" $(pgrep -P "$HELPER_PID" | tr '\n' ' ') "
+  NEW=0
+  END=$(( $(date +%s) + SECONDS_TO_SAMPLE ))
+  while [ "$(date +%s)" -lt "$END" ]; do
+    for c in $(pgrep -P "$HELPER_PID" || true); do
+      case "$BEFORE" in *" $c "*) ;; *) NEW=$((NEW + 1)); BEFORE="$BEFORE$c " ;; esac
+    done
+    sleep 0.2
+  done
+  wait
+  awk -v secs="$SECONDS_TO_SAMPLE" -v pid="$HELPER_PID" '
+    /^PID/ { block++; next }
+    block > 0 && $1 == pid { w[block] = $2; c[block] = $3 }
+    END { printf "%-44s %7s%% %12.1f   %s\n", "terminal helper (pid " pid ")", c[2], (w[2] - w[1]) / secs, "" }' "$OUT/top.txt"
+  printf "    %-32s %s\n" "footprint" "$(sed -n 's/^Physical footprint: *//p' "$OUT/helper.txt" | head -1)"
+  printf "    %-32s %d new child process(es) in %ss\n" "spawned children" "$NEW" "$SECONDS_TO_SAMPLE"
+  if [ "$KEEP" = 1 ]; then echo "Raw reports: $OUT"; else rm -rf "$OUT"; fi
+  exit 0
+fi
+
 if [ -z "$GPU" ]; then GPU=$(oldest $(find_helpers GPU "graphics and media")); fi
 RENDERERS=$(find_helpers WebContent "web content" | tr '\n' ' ')
 if [ -z "$RENDERER" ]; then RENDERER=$(oldest $RENDERERS); fi
@@ -95,7 +140,6 @@ if [ -z "$HOST_PID" ]; then
   exit 1
 fi
 
-TMP=${TMPDIR:-/tmp}
 OUT=$(mktemp -d "${TMP%/}/redline-perf-idle.XXXXXX")
 
 # Children the host spawns during the window: anything that appears under it
@@ -120,7 +164,8 @@ OTHERS=$(echo "$RENDERERS" | tr ' ' '\n' | awk -v r="$RENDERER" 'NF && $0 != r' 
 echo "Sampling $APP for ${SECONDS_TO_SAMPLE}s — host pid $HOST_PID, GPU pid $GPU, renderer pid $RENDERER${OTHERS:+ (other renderers, e.g. browser tabs: $OTHERS)}"
 # `top -l 2` prints one sample now and one after the delay; the second one's
 # %CPU is the window's average and its IDLEW, minus the first's, the wakeups.
-top -l 2 -s "$SECONDS_TO_SAMPLE" -stats pid,idlew,cpu -pid "$GPU" -pid "$RENDERER" -pid "$HOST_PID" > "$OUT/top.txt" 2>/dev/null &
+top -l 2 -s "$SECONDS_TO_SAMPLE" -stats pid,idlew,cpu -pid "$GPU" -pid "$RENDERER" -pid "$HOST_PID" ${HELPER_PID:+-pid "$HELPER_PID"} > "$OUT/top.txt" 2>/dev/null &
+if [ -n "$HELPER_PID" ]; then sample "$HELPER_PID" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/helper.txt" >/dev/null 2>&1 & fi
 sample "$GPU" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/gpu.txt" >/dev/null 2>&1 &
 sample "$RENDERER" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/renderer.txt" >/dev/null 2>&1 &
 sample "$HOST_PID" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/host.txt" >/dev/null 2>&1 &
@@ -221,6 +266,9 @@ printf "%-44s %8s %12s   %s\n" "Process" "CPU" "wakeups/s" "footprint"
 printf "%-44s %7s%% %12s   %s\n" "host ($(display_name "$HOST_PID" | cut -c1-30), pid $HOST_PID)" "$(top_field "$HOST_PID" 3)" "$(top_field "$HOST_PID" 2)" "$(footprint_of "$OUT/host.txt")"
 printf "%-44s %7s%% %12s   %s\n" "GPU process (pid $GPU)" "$(top_field "$GPU" 3)" "$(top_field "$GPU" 2)" "$(footprint_of "$OUT/gpu.txt")"
 printf "%-44s %7s%% %12s   %s\n" "renderer (pid $RENDERER)" "$(top_field "$RENDERER" 3)" "$(top_field "$RENDERER" 2)" "$(footprint_of "$OUT/renderer.txt")"
+if [ -n "$HELPER_PID" ]; then
+  printf "%-44s %7s%% %12s   %s\n" "terminal helper (pid $HELPER_PID)" "$(top_field "$HELPER_PID" 3)" "$(top_field "$HELPER_PID" 2)" "$(footprint_of "$OUT/helper.txt")"
+fi
 
 echo
 echo "Host"

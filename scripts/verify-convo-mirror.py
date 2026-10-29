@@ -28,6 +28,10 @@ installed `claude`, this measures the facts each later step stands on:
   S9  Esc: interrupting a streaming reply; a double Esc on an empty prompt
       (the rewind menu) and how far apart two presses must be to stay single.
   S12 The OSC window titles the TUI sets, and the transcript's `ai-title`.
+  PLANDROP (only with --only) An ExitPlanMode held for review whose hook
+      connection dies mid-hold, once alone and once with the listener gone
+      (Redline quit while its terminal lives on): does the TUI fall back to
+      its own approval prompt, or build unreviewed?
 
 Plus the transcripts the golden fixtures are cut from: a plan turn that is
 denied with feedback and then approved, compact, /clear, an interrupt, a
@@ -132,10 +136,14 @@ class Daemon:
 
             def answer(self, seq, action):
                 kind = action[0]
-                if kind == "drop":
+                if kind in ("drop", "gone"):
                     # The daemon dies mid-hold: close without a response.
+                    # "gone" closes the listener first, as a quit does, so
+                    # every later hook's connect is refused too.
                     time.sleep(action[1])
-                    daemon.record({"kind": "dropped", "seq": seq})
+                    if kind == "gone":
+                        daemon.server.socket.close()
+                    daemon.record({"kind": "dropped" if kind == "drop" else "gone", "seq": seq})
                     self.close_connection = True
                     try:
                         self.connection.shutdown(socket.SHUT_RDWR)
@@ -920,6 +928,73 @@ class Run:
         finally:
             tui.close()
 
+    def plan_drop_case(self, name, kind, wait_after=60):
+        """A plan held for review whose hook connection dies (the app quit
+        while its terminal lives on). Nothing answers the TUI afterwards:
+        does it fall back to its own approval prompt, or carry on?"""
+        r = {}
+        calls = []
+
+        def plan(p):
+            calls.append(p)
+            return (kind, 6.0)
+        self.daemon.plan_policy = plan
+        self.daemon.ask_policy = lambda p: ("reply", {})
+        notes = self.proj / f"NOTES-{name}.md"
+        tui, start = self.tui(f"plandrop-{name}", ["--permission-mode", "plan"], ask_timeout=30)
+        try:
+            dm, tm = self.daemon.mark(), self.transcripts.mark()
+            tui.type(f"Plan adding a file {notes.name} containing the single line hello. Keep the plan to two short "
+                     "steps, then present it with ExitPlanMode. Once it is approved, carry it out.")
+            dropped = self.daemon.wait(dm, lambda rec: rec["kind"] in ("dropped", "gone"), 180, tui.pump)
+            r["hook_calls"] = len(calls)
+            r["dropped_at"] = (dropped or {}).get("t")
+            if not dropped:
+                r["error"] = "the plan hook never fired"
+                return r
+            # Nobody answers anything from here on: the user is away.
+            seen = None
+            end = time.time() + wait_after
+            while time.time() < end:
+                tui.pump(0.5)
+                tail = tui.tail(1500).lower()
+                if seen is None and "proceed" in tail:
+                    seen = now()
+                if notes.exists():
+                    break
+            r["native_prompt_seen_after_s"] = round(seen - dropped["t"], 2) if seen is not None else None
+            r["file_written_unanswered"] = notes.exists()
+            r["hook_retries"] = len(calls) - 1
+            lines = self.transcripts.since(tm)
+            r["exit_plan_mode_result"] = [
+                (b.get("content") if isinstance(b.get("content"), str) else str(b.get("content")))[:200]
+                for l in lines if l["row"].get("type") == "user"
+                for b in ((l["row"].get("message") or {}).get("content") or []) if isinstance(b, dict) and b.get("type") == "tool_result"
+            ][:4]
+            r["tools_used_after"] = [blk for l in lines if l["row"].get("type") == "assistant"
+                                     for blk in brief_row(l["row"]).get("blocks", []) if blk.startswith("tool_use")]
+            r["perm_asks"] = [rec["payload"].get("tool_name") for rec in self.daemon.since(dm)
+                              if rec["kind"] == "post" and rec["path"] == "/v1/term/ask"]
+            r["screen_tail"] = tui.snap(f"plandrop-{name}")[-400:]
+            # Then a person answers the prompt in the terminal ("1. Yes").
+            if seen is not None and not notes.exists():
+                tui.write(b"\r")
+                end = time.time() + 90
+                while time.time() < end and not notes.exists():
+                    tui.pump(0.5)
+                r["file_written_after_answer"] = notes.exists()
+        finally:
+            tui.close()
+        return r
+
+    def session_plan_drop(self):
+        r = self.results["PLANDROP"] = {}
+        # The connection alone dies; the rig stays up for the other hooks.
+        r["drop"] = self.plan_drop_case("drop", "drop")
+        # The listener goes too, as when Redline quits: every hook's connect
+        # is refused from here on.
+        r["gone"] = self.plan_drop_case("gone", "gone")
+
     def session_resume(self):
         sid = getattr(self, "last_session", None)
         if not sid:
@@ -1080,7 +1155,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="haiku")
     p.add_argument("--claude", default=shutil.which("claude") or "claude")
-    p.add_argument("--only", default="", help="comma-separated cases: S1,S2,S4,S5,S7,S8,S9,FIX,PLAN,FOLLOW,QUEUE")
+    p.add_argument("--only", default="", help="comma-separated cases: S1,S2,S4,S5,S7,S8,S9,FIX,PLAN,FOLLOW,QUEUE,PLANDROP")
     p.add_argument("--keep", action="store_true", help="keep the temp dir and the CLI's transcripts")
     args = p.parse_args()
     run = Run(args)
@@ -1095,6 +1170,9 @@ def main():
             steps.append(("QUEUE", run.session_queue))
         if run.wanted("PLAN"):
             steps.append(("PLAN", run.session_plan))
+        if run.only is not None and "PLANDROP" in run.only:
+            # Last: its second variant closes the private daemon's listener.
+            steps.append(("PLANDROP", run.session_plan_drop))
         if run.wanted("S1"):
             steps.append(("RESUME", run.session_resume))
         if run.wanted("S2"):

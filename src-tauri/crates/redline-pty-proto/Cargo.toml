@@ -1,0 +1,12 @@
+[package]
+name = "redline-pty-proto"
+version = "0.1.0"
+description = "The frame codec between Redline and its terminal helper (redline-ptyd): length-prefixed, little-endian, fixed layouts per frame type."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+# No dependencies, on purpose: the same codec runs in the helper, which links
+# nothing but this crate and libc, and in the application.
+[dependencies]

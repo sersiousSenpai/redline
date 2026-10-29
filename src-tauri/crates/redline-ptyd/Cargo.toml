@@ -1,0 +1,25 @@
+[package]
+name = "redline-ptyd"
+version = "0.1.0"
+description = "Redline's terminal helper: a small single-threaded process that owns the terminals' PTYs and replay rings, so a shell keeps running when Redline quits or crashes and the relaunched app reattaches to it."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+[lib]
+name = "redline_ptyd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "redline-ptyd"
+path = "src/main.rs"
+
+# Two dependencies, on purpose. The helper outlives the application and owns
+# every shell the user is running, so it must stay small enough to audit and
+# must not link the application: no tokio, no serde, no tauri, no
+# portable-pty. Its library half (the ring, credit, pacing and the socket and
+# peer rules) is what the application links to talk to it.
+[dependencies]
+redline-pty-proto = { path = "../redline-pty-proto" }
+libc = "0.2"

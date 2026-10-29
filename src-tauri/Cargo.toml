@@ -22,6 +22,8 @@ members = [
     "crates/redline-extension-sdk",
     "crates/redline-activation",
     "crates/redline-activate",
+    "crates/redline-pty-proto",
+    "crates/redline-ptyd",
 ]
 default-members = [
     ".",
@@ -29,6 +31,8 @@ default-members = [
     "crates/redline-extension-sdk",
     "crates/redline-activation",
     "crates/redline-activate",
+    "crates/redline-pty-proto",
+    "crates/redline-ptyd",
 ]
 
 [lib]
