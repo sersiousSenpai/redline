@@ -17,13 +17,17 @@
 // poll resuming). Singleton bodies never mount inside a tab — only their
 // slots do (`SingletonSlot`).
 
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Columns2, Equal, Maximize2, Minimize2, Rows2, SquareArrowOutUpRight, X } from "lucide-react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { RowMenu, type RowAction } from "../components/RowMenu";
 import { rafCoalesce } from "../lib/raf";
 import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
 import { MIN_SPLIT_SHARE, activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
+import { dropTargetAt, paneBoxes, type DropTarget } from "./drop";
 import { beginMeasure, endMeasure } from "./perf";
+import type { PaneRect } from "./reducer";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
 import type { TabStripItem } from "./TabStrip";
@@ -69,12 +73,18 @@ export interface WorkbenchStageProps {
   /** A tab's ×: App closes it (it asks first when a wall in it is still
    *  running). Absent, the tab just closes. */
   onCloseTab?: (tabId: string) => void;
+  /** The pane menu's Split right / down: App splits the focused pane with a
+   *  door (it mints the door's draft), as ⌘D / ⌘⇧D. Absent, no split rows. */
+  onSplit?: (direction: "row" | "column") => void;
+  /** The pane menu's Close pane: App closes it (asking for a running wall).
+   *  Absent, the pane just closes. */
+  onClosePane?: (paneId: string) => void;
 }
 
 const selectSet = (s: ReturnType<WorkbenchStore["getState"]>): TabSet | null => s.sets[s.activeKey] ?? null;
 const selectKey = (s: ReturnType<WorkbenchStore["getState"]>) => s.activeKey;
 
-export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab, onCloseTab }: WorkbenchStageProps) {
+export function WorkbenchStage({ store, renderPane, describePane, onSplitDragging, right, onNewTab, onCloseTab, onSplit, onClosePane }: WorkbenchStageProps) {
   const set = useWorkbench(store, selectSet);
   const activeKey = useWorkbench(store, selectKey);
   const activeTabId = set?.activeTabId ?? null;
@@ -112,6 +122,83 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
     [dispatch, store],
   );
   const onFocusPane = useCallback((paneId: string) => dispatch({ type: "focusPane", paneId }), [dispatch]);
+  const onMoveToNewTab = useCallback(
+    (tabId: string) => {
+      const s = store.getState();
+      const tab = s.sets[s.activeKey]?.tabs[tabId];
+      if (tab) dispatch({ type: "movePaneToTab", paneId: tab.focusedPaneId });
+    },
+    [dispatch, store],
+  );
+  const onMerge = useCallback(
+    (tabId: string, dir: -1 | 1) => {
+      const s = store.getState();
+      const order = s.sets[s.activeKey]?.order ?? [];
+      const into = order[order.indexOf(tabId) + dir];
+      // Into the tab on its left it lands on that tab's right, and the
+      // other way: the strip's order, read across the split.
+      if (into) dispatch({ type: "mergeTab", tabId, intoTabId: into, edge: dir < 0 ? "right" : "left" });
+    },
+    [dispatch, store],
+  );
+
+  // Merge by drag: a tab dragged down out of the strip lights the half of
+  // the pane under it that it would take; let go there, it merges. The tab
+  // in front cannot merge into itself. While a tab hangs over the stage the
+  // webviews show their snapshots (a resize session), so the page under the
+  // pointer is the DOM's and the drop zone paints over it.
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  const [drop, setDrop] = useState<{ tabId: string; target: DropTarget; box: PaneRect } | null>(null);
+  const dragSession = useRef(false);
+  const endDragSession = useCallback(() => {
+    if (!dragSession.current) return;
+    dragSession.current = false;
+    endResizeSession();
+  }, []);
+  useEffect(() => endDragSession, [endDragSession]);
+  const targetAt = useCallback(
+    (tabId: string, at: { x: number; y: number }): DropTarget | null => {
+      const s = store.getState();
+      const current = s.sets[s.activeKey];
+      if (!current?.activeTabId || current.activeTabId === tabId) return null;
+      return dropTargetAt(paneBoxes(tabsRef.current, current.activeTabId, true), at.x, at.y);
+    },
+    [store],
+  );
+  const onDragOut = useCallback(
+    (tabId: string, at: { x: number; y: number } | null) => {
+      if (!at) {
+        endDragSession();
+        setDrop(null);
+        return;
+      }
+      if (!dragSession.current) {
+        dragSession.current = true;
+        beginResizeSession();
+      }
+      const target = targetAt(tabId, at);
+      const host = tabsRef.current?.getBoundingClientRect();
+      if (!target || !host) {
+        setDrop(null);
+        return;
+      }
+      const z = target.zone;
+      const box = { left: z.left - host.left, top: z.top - host.top, width: z.width, height: z.height };
+      setDrop((prev) =>
+        prev && prev.tabId === tabId && prev.target.paneId === target.paneId && prev.target.edge === target.edge && prev.box.width === box.width && prev.box.height === box.height ? prev : { tabId, target, box },
+      );
+    },
+    [endDragSession, targetAt],
+  );
+  const onDropOut = useCallback(
+    (tabId: string, at: { x: number; y: number }) => {
+      const target = targetAt(tabId, at);
+      endDragSession();
+      setDrop(null);
+      if (target) dispatch({ type: "mergeTab", tabId, paneId: target.paneId, edge: target.edge });
+    },
+    [dispatch, endDragSession, targetAt],
+  );
   const onResize = useCallback((tabId: string, path: number[], weights: number[]) => dispatch({ type: "resizeSplit", tabId, path, weights }), [dispatch]);
 
   const tabs: TabStripItem[] = useMemo(() => {
@@ -136,7 +223,7 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
       const statuses = described.map((d) => d.status).filter((s): s is PaneStatus => Boolean(s));
       const status: PaneStatus | undefined = statuses.includes("needs") ? "needs" : statuses.includes("working") ? "working" : statuses.length && statuses.every((s) => s === "exited") ? "exited" : undefined;
       const leadIndex = Math.max(0, panes.indexOf(lead));
-      const item: TabStripItem = { id, kind: lead.kind, title: described[leadIndex]?.title ?? paneTitle(lead), status, preview: lead.preview, count: described[leadIndex]?.count, tour: tourOf(lead) };
+      const item: TabStripItem = { id, kind: lead.kind, title: described[leadIndex]?.title ?? paneTitle(lead), status, preview: lead.preview, count: described[leadIndex]?.count, tour: tourOf(lead), split: isSplit(tab.root) };
       return [item];
     });
   }, [set, describePane]);
@@ -145,9 +232,29 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
   return (
     <div className="rl-wb-stage" data-wb-key={activeKey}>
       <Suspense fallback={<div className="rl-wb-strip" aria-hidden />}>
-        <TabStrip tabs={tabs} activeTabId={activeTabId} onSelect={onSelect} onClose={onClose} onReorder={onReorder} onRename={onRename} onNew={onNewTab} onReopen={onReopen} canReopen={set.closed.length > 0} right={right} />
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelect={onSelect}
+          onClose={onClose}
+          onReorder={onReorder}
+          onRename={onRename}
+          onNew={onNewTab}
+          onReopen={onReopen}
+          canReopen={set.closed.length > 0}
+          onDragOut={onDragOut}
+          onDropOut={onDropOut}
+          onMoveToNewTab={onMoveToNewTab}
+          onMerge={onMerge}
+          right={
+            <>
+              {right}
+              <PaneMenu store={store} onSplit={onSplit} onClosePane={onClosePane} />
+            </>
+          }
+        />
       </Suspense>
-      <div className="rl-wb-tabs">
+      <div className="rl-wb-tabs" ref={tabsRef}>
         {kept.map((tabId) => {
           const tab = set.tabs[tabId];
           if (!tab) return null;
@@ -166,9 +273,54 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
             />
           );
         })}
+        {drop && (
+          <div
+            className="rl-wb-drop-zone"
+            data-drop-edge={drop.target.edge}
+            data-drop-pane={drop.target.paneId}
+            aria-hidden
+            style={{ left: drop.box.left, top: drop.box.top, width: drop.box.width, height: drop.box.height }}
+          />
+        )}
       </div>
     </div>
   );
+}
+
+const selectFocusedTab = (s: ReturnType<WorkbenchStore["getState"]>) => {
+  const set = s.sets[s.activeKey];
+  return set ? activeTabOf(set) : null;
+};
+
+/** The strip's ⋯ (the design's pane menu): what can be done to the focused
+ *  pane — split it, zoom it, even out the tab, move it to a tab of its own,
+ *  close it. Each row names its key. */
+function PaneMenu({ store, onSplit, onClosePane }: { store: WorkbenchStore; onSplit?: (direction: "row" | "column") => void; onClosePane?: (paneId: string) => void }) {
+  const tab = useWorkbench(store, selectFocusedTab);
+  const [open, setOpen] = useState(false);
+  const actions = useMemo<RowAction[]>(() => {
+    if (!tab) return [];
+    const split = isSplit(tab.root);
+    const paneId = tab.focusedPaneId;
+    const out: RowAction[] = [];
+    if (onSplit) {
+      out.push(
+        { label: "Split right", icon: <Columns2 size={14} aria-hidden />, shortcut: "⌘D", onSelect: () => onSplit("row") },
+        { label: "Split down", icon: <Rows2 size={14} aria-hidden />, shortcut: "⌘⇧D", onSelect: () => onSplit("column") },
+      );
+    }
+    if (split) {
+      out.push(
+        { label: tab.zoomed ? "Put the tab back" : "Zoom the pane", icon: tab.zoomed ? <Minimize2 size={14} aria-hidden /> : <Maximize2 size={14} aria-hidden />, shortcut: "⌘⇧↩", divided: out.length > 0, onSelect: () => store.dispatch({ type: "zoomPane" }) },
+        { label: "Even out the splits", icon: <Equal size={14} aria-hidden />, shortcut: "⌘⌥=", onSelect: () => store.dispatch({ type: "equalize" }) },
+        { label: "Move to a new tab", icon: <SquareArrowOutUpRight size={14} aria-hidden />, divided: true, onSelect: () => store.dispatch({ type: "movePaneToTab", paneId }) },
+        { label: "Close pane", icon: <X size={14} aria-hidden />, onSelect: () => (onClosePane ? onClosePane(paneId) : store.dispatch({ type: "closePane", paneId })) },
+      );
+    }
+    return out;
+  }, [tab, onSplit, onClosePane, store]);
+  if (!tab || actions.length === 0) return null;
+  return <RowMenu open={open} onOpenChange={setOpen} actions={actions} label="the pane" triggerClassName="rl-wb-right-btn rl-wb-pane-menu" />;
 }
 
 const TabBody = memo(function TabBody({ tab, panes, active, visible, renderPane, onFocusPane, onResize, onSplitDragging }: {

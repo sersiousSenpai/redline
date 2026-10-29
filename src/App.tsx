@@ -376,7 +376,8 @@ import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
 import { NO_NARROW_OPEN, narrowLayoutInputs, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
 import { RAIL_EDGE_W, SIDEBAR_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
-import type { OpenFileMode, PaneRect, WorkbenchAction } from "./workbench/reducer";
+import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
+import { paneBoxes } from "./workbench/drop";
 import type { OpenFileDetail } from "./lib/fileLinks";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
@@ -600,17 +601,6 @@ persistWorkbench(wb, localStorage);
 void loadWorkbenchStage().catch(() => {});
 void loadPlanPane().catch(() => {});
 let doorCounter = 0;
-/** Each shown pane's box in the tab on screen, as rendered (⌃⌘ + an arrow
- *  picks the neighbour by them). */
-function shownPaneRects(tabId: string): Record<string, PaneRect> {
-  const out: Record<string, PaneRect> = {};
-  const body = document.querySelector<HTMLElement>(`.rl-wb-tab-body[data-wb-tab="${CSS.escape(tabId)}"]`);
-  for (const el of body?.querySelectorAll<HTMLElement>(".rl-wb-pane[data-pane-id]") ?? []) {
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) out[el.dataset.paneId!] = { left: r.left, top: r.top, width: r.width, height: r.height };
-  }
-  return out;
-}
 const newDoorPaneId = () => `door-${Date.now().toString(36)}-${(doorCounter++).toString(36)}`;
 
 interface ComposingState {
@@ -2447,6 +2437,14 @@ function App() {
     else setWallClose({ ...close, running: running.map((id) => termStatusesRef.current.get(id)?.label ?? "terminal") });
   }, [finishWallClose]);
   const closeTabRequest = useCallback((tabId: string) => void requestClose({ tabId }), [requestClose]);
+  const closePaneRequest = useCallback((paneId: string) => void requestClose({ paneId }), [requestClose]);
+  // The pane menu's Split right / down, as ⌘D / ⌘⇧D outside a wall.
+  const splitFocusedWithDoor = useCallback((direction: "row" | "column") => {
+    const { tab } = activePanes(wb.getState());
+    if (!tab) return;
+    const paneId = newDoorPaneId();
+    wb.dispatch({ type: "splitPane", paneId: tab.focusedPaneId, direction, pane: { kind: "door", data: { draftKey: doorDraftKey(paneId) } }, newPaneId: paneId });
+  }, []);
   const closeFromInside = useCallback(() => {
     const { set, tab } = activePanes(wb.getState());
     if (!set || !tab) return;
@@ -2566,7 +2564,7 @@ function App() {
         if (!tab || !isSplit(tab.root)) return;
         e.preventDefault();
         e.stopPropagation();
-        wb.dispatch({ type: "focusPane", dir, rects: shownPaneRects(tab.id) });
+        wb.dispatch({ type: "focusPane", dir, rects: paneBoxes(document, tab.id) });
         return;
       }
       if (isEqualizeKey(e)) {
@@ -9825,6 +9823,8 @@ function App() {
               onSplitDragging={setSplitDragging}
               onNewTab={openDoorTab}
               onCloseTab={closeTabRequest}
+              onSplit={splitFocusedWithDoor}
+              onClosePane={closePaneRequest}
               right={stageActions}
             />
           </Suspense>

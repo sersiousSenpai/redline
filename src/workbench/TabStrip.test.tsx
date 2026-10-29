@@ -288,3 +288,48 @@ describe("memoization", () => {
 function readCss(): string {
   return readFileSync(join(process.cwd(), "src", "workbench", "workbench.css"), "utf8");
 }
+
+describe("merge by drag and the merge rows (W5)", () => {
+  const at = (type: string, clientX: number, clientY: number) => Object.assign(mouse(type, { clientX, clientY }), { pointerId: 1 });
+  const item = (label: string) => [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((el) => el.querySelector(".rl-row-menu-label")?.textContent?.trim() === label);
+
+  it("a tab dragged down past the strip is the stage's: it reports the pointer, drops out, and never reorders", async () => {
+    const onDragOut = vi.fn();
+    const onDropOut = vi.fn();
+    await render({ onDragOut, onDropOut });
+    host.querySelector<HTMLElement>('[role="tablist"]')!.getBoundingClientRect = () => ({ left: 0, right: 400, width: 400, top: 0, bottom: 34, height: 34, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    await act(async () => tab("c").dispatchEvent(at("pointerdown", 250, 17)));
+    // Straight down: a vertical travel starts the drag too.
+    await act(async () => window.dispatchEvent(at("pointermove", 250, 300)));
+    expect(onDragOut).toHaveBeenLastCalledWith("c", { x: 250, y: 300 });
+    // No slot indicator while over the stage.
+    expect(host.querySelector(".rl-wb-drop")).toBeNull();
+    // Back over the strip: the stage hears it left, the indicator returns.
+    await act(async () => window.dispatchEvent(at("pointermove", 260, 20)));
+    expect(onDragOut).toHaveBeenLastCalledWith("c", null);
+    expect(host.querySelector(".rl-wb-drop")).not.toBeNull();
+    await act(async () => window.dispatchEvent(at("pointermove", 270, 400)));
+    await act(async () => window.dispatchEvent(at("pointerup", 270, 400)));
+    expect(onDropOut).toHaveBeenCalledWith("c", { x: 270, y: 400 });
+    expect(onDragOut).toHaveBeenLastCalledWith("c", null);
+    expect(handlers.onReorder).not.toHaveBeenCalled();
+  });
+
+  it("a split tab's menu moves its pane out; every tab merges into a neighbour, never past an end", async () => {
+    const onMoveToNewTab = vi.fn();
+    const onMerge = vi.fn();
+    await render({ onMoveToNewTab, onMerge, tabs: items.map((t) => (t.id === "b" ? { ...t, split: true } : t)) });
+    await act(async () => tab("b").dispatchEvent(mouse("contextmenu", { clientX: 120, clientY: 20 })));
+    expect(menuLabels()).toEqual(["Close", "Close others", "Rename", "Move left", "Move right", "Move pane to a new tab", "Merge into ⟵", "Merge into ⟶"]);
+    await act(async () => item("Move pane to a new tab")!.click());
+    expect(onMoveToNewTab).toHaveBeenCalledWith("b");
+    await act(async () => tab("b").dispatchEvent(mouse("contextmenu", { clientX: 120, clientY: 20 })));
+    await act(async () => item("Merge into ⟶")!.click());
+    expect(onMerge).toHaveBeenCalledWith("b", 1);
+    // A tab of one pane has nothing to move out; the first cannot merge left.
+    await act(async () => tab("a").dispatchEvent(mouse("contextmenu", { clientX: 20, clientY: 20 })));
+    expect(menuLabels()).not.toContain("Move pane to a new tab");
+    expect(item("Merge into ⟵")!.disabled).toBe(true);
+    expect(item("Merge into ⟶")!.disabled).toBe(false);
+  });
+});

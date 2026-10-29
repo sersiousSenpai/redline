@@ -32,7 +32,9 @@ import {
 } from "react";
 import {
   ArrowLeft,
+  ArrowLeftToLine,
   ArrowRight,
+  ArrowRightToLine,
   Brain,
   CircleX,
   DoorOpen,
@@ -46,6 +48,7 @@ import {
   Plus,
   RotateCcw,
   Server,
+  SquareArrowOutUpRight,
   Terminal,
   X,
   type LucideIcon,
@@ -69,6 +72,8 @@ export interface TabStripItem {
   /** The onboarding tour's anchor on this tab (`data-tour`), when it is the
    *  tab a step points at: the first Agent and terminals tabs. */
   tour?: string;
+  /** The tab is a split: its menu offers to move the focused pane out. */
+  split?: boolean;
 }
 
 export interface TabStripProps {
@@ -88,6 +93,19 @@ export interface TabStripProps {
   canReopen?: boolean;
   /** The right-hand cluster: the stage's pane actions. */
   right?: ReactNode;
+  /** A tab dragged down out of the strip, over the stage (W5's merge by
+   *  drag): the pointer on each move, null when it comes back or the drag
+   *  ends. */
+  onDragOut?(id: string, at: { x: number; y: number } | null): void;
+  /** Released out of the strip: the stage's to take (a merge onto the pane
+   *  under it, or nothing); the strip's order is left alone either way. */
+  onDropOut?(id: string, at: { x: number; y: number }): void;
+  /** The tab menu's "Move … to a new tab", for a split tab: its focused
+   *  pane leaves for a tab of its own. */
+  onMoveToNewTab?(id: string): void;
+  /** The tab menu's "Merge into ⟵ / ⟶": the keyboard's merge, into the
+   *  neighbouring tab. */
+  onMerge?(id: string, dir: -1 | 1): void;
 }
 
 /** The glyph per pane kind. */
@@ -221,6 +239,11 @@ interface DragState {
 interface Press {
   id: string;
   startX: number;
+  startY: number;
+  /** The strip's bottom edge: a drag below it is over the stage. */
+  stripBottom: number;
+  /** The pointer is below the strip (a merge drag). */
+  out: boolean;
   pointerId: number;
   el: HTMLButtonElement;
   /** Set once the press has travelled past DRAG_SLOP. */
@@ -277,10 +300,12 @@ export function TabStrip(props: TabStripProps): JSX.Element {
   }, [menu, renaming, focusTab]);
 
   const h = useMemo<Handlers>(() => {
-    const endPress = (commit: boolean, clientX: number) => {
+    const endPress = (commit: boolean, clientX: number, clientY = 0) => {
       const p = press.current;
       if (!p) return;
       press.current = null;
+      const wasOut = p.dragging && p.out;
+      if (wasOut) latest.current.onDragOut?.(p.id, null);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
@@ -296,6 +321,12 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       swallowClick.current = p.id;
       setDrag(null);
       if (!commit) return;
+      // Let go over the stage: the stage's to take (a merge); never a
+      // reorder to wherever the pointer's x happens to be.
+      if (wasOut) {
+        latest.current.onDropOut?.(p.id, { x: clientX, y: clientY });
+        return;
+      }
       const to = targetOf(p, clientX);
       const { tabs: items, onReorder } = latest.current;
       const from = items.findIndex((t) => t.id === p.id);
@@ -330,16 +361,27 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       const p = press.current;
       if (!p || e.pointerId !== p.pointerId) return;
       if (!p.dragging) {
-        if (Math.abs(e.clientX - p.startX) < DRAG_SLOP) return;
+        if (Math.max(Math.abs(e.clientX - p.startX), Math.abs(e.clientY - p.startY)) < DRAG_SLOP) return;
         p.dragging = true;
         p.slots = measure(p);
+      }
+      const out = !!latest.current.onDragOut && e.clientY > p.stripBottom;
+      if (out) {
+        p.out = true;
+        latest.current.onDragOut?.(p.id, { x: e.clientX, y: e.clientY });
+        setDrag((d) => (d && d.id === p.id && d.x < 0 ? d : { id: p.id, to: p.to, x: -1 }));
+        return;
+      }
+      if (p.out) {
+        p.out = false;
+        latest.current.onDragOut?.(p.id, null);
       }
       const to = targetOf(p, e.clientX);
       p.to = to;
       setDrag({ id: p.id, to, x: indicatorX(p, to) });
     };
     const onUp = (e: PointerEvent) => {
-      if (press.current && e.pointerId === press.current.pointerId) endPress(true, e.clientX);
+      if (press.current && e.pointerId === press.current.pointerId) endPress(true, e.clientX, e.clientY);
     };
     const onCancel = (e: PointerEvent) => {
       if (press.current && e.pointerId === press.current.pointerId) endPress(false, e.clientX);
@@ -424,7 +466,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
         swallowClick.current = null;
         if ((e.target as Element).closest?.(".rl-wb-tab-x, .rl-wb-rename")) return;
         const el = e.currentTarget;
-        press.current = { id, startX: e.clientX, pointerId: e.pointerId, el, dragging: false, slots: null, to: 0 };
+        const stripBottom = list.current?.getBoundingClientRect().bottom ?? Infinity;
+        press.current = { id, startX: e.clientX, startY: e.clientY, stripBottom: stripBottom > 0 ? stripBottom : Infinity, out: false, pointerId: e.pointerId, el, dragging: false, slots: null, to: 0 };
         try {
           el.setPointerCapture?.(e.pointerId);
         } catch {
@@ -443,7 +486,7 @@ export function TabStrip(props: TabStripProps): JSX.Element {
   const menuTab = menu ? tabs.find((t) => t.id === menu.id) ?? null : null;
   const menuActions = useMemo<RowAction[]>(() => {
     if (!menuTab) return [];
-    const { tabs: items, onClose, onReorder, canReopen, onReopen } = latest.current;
+    const { tabs: items, onClose, onReorder, canReopen, onReopen, onMoveToNewTab, onMerge } = latest.current;
     const index = items.findIndex((t) => t.id === menuTab.id);
     const actions: RowAction[] = [
       { label: "Close", icon: glyph(X), shortcut: "⌫", onSelect: () => onClose(menuTab.id) },
@@ -483,10 +526,21 @@ export function TabStrip(props: TabStripProps): JSX.Element {
         onSelect: () => onReorder(menuTab.id, index + 1),
       },
     );
+    // W5: the keyboard's way to what a drag does — a split's focused pane
+    // out to a tab of its own, and this tab merged into a neighbour's.
+    if (onMoveToNewTab && menuTab.split) {
+      actions.push({ label: "Move pane to a new tab", icon: glyph(SquareArrowOutUpRight), divided: true, onSelect: () => onMoveToNewTab(menuTab.id) });
+    }
+    if (onMerge && items.length > 1) {
+      actions.push(
+        { label: "Merge into ⟵", icon: glyph(ArrowLeftToLine), divided: !(onMoveToNewTab && menuTab.split), disabled: index <= 0, onSelect: () => onMerge(menuTab.id, -1) },
+        { label: "Merge into ⟶", icon: glyph(ArrowRightToLine), disabled: index < 0 || index >= items.length - 1, onSelect: () => onMerge(menuTab.id, 1) },
+      );
+    }
     return actions;
     // The actions read the latest props when picked; only the target tab and
     // the list's shape change what is offered.
-  }, [menuTab, tabs.length, props.canReopen, props.onReopen]);
+  }, [menuTab, tabs.length, props.canReopen, props.onReopen, props.onMoveToNewTab, props.onMerge]);
 
   const onMenuOpen = useCallback((open: boolean) => {
     if (!open) setMenu(null);
@@ -505,7 +559,7 @@ export function TabStrip(props: TabStripProps): JSX.Element {
             h={h}
           />
         ))}
-        {drag && <span className="rl-wb-drop" aria-hidden style={{ left: drag.x }} />}
+        {drag && drag.x >= 0 && <span className="rl-wb-drop" aria-hidden style={{ left: drag.x }} />}
       </div>
       <button type="button" className="rl-wb-new" aria-label="New tab" title="New tab (⌘T)" onClick={() => onNew()}>
         <Plus size={16} aria-hidden />

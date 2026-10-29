@@ -262,3 +262,75 @@ describe("any split tree (W5): SplitView", () => {
     expect(seen.sv.active).toBe(true);
   });
 });
+
+describe("merge by drag and the pane menu (W5)", () => {
+  const at = (type: string, clientX: number, clientY: number) => {
+    const ev = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY }) as MouseEvent & { pointerId: number };
+    Object.defineProperty(ev, "pointerId", { value: 1 });
+    return ev;
+  };
+  const rect = (left: number, top: number, width: number, height: number) => () => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+  const strip = async () => {
+    for (let i = 0; i < 20 && !host.querySelector('[role="tab"]'); i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    expect(host.querySelector('[role="tab"]')).not.toBeNull();
+  };
+
+  it("a tab dropped on a pane's right quarter merges beside it, the zone lit while it hangs there", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    host.querySelector<HTMLElement>('[role="tablist"]')!.getBoundingClientRect = rect(0, 0, 800, 34);
+    host.querySelector<HTMLElement>(".rl-wb-tabs")!.getBoundingClientRect = rect(0, 34, 800, 600);
+    host.querySelector<HTMLElement>('.rl-wb-tab-body[data-wb-tab="t1"] .rl-wb-pane[data-pane-id="p1"]')!.getBoundingClientRect = rect(0, 34, 800, 600);
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
+    const zone = host.querySelector<HTMLElement>(".rl-wb-drop-zone")!;
+    expect(zone.dataset.dropEdge).toBe("right");
+    expect(zone.dataset.dropPane).toBe("p1");
+    expect([zone.style.left, zone.style.top, zone.style.width, zone.style.height]).toEqual(["400px", "0px", "400px", "600px"]);
+    // The webviews show their snapshots while a tab hangs over the stage.
+    expect(isResizing()).toBe(true);
+    await act(async () => { window.dispatchEvent(at("pointerup", 760, 300)); });
+    expect(isResizing()).toBe(false);
+    expect(host.querySelector(".rl-wb-drop-zone")).toBeNull();
+    const s = store.getState().sets.home!;
+    expect(s.order).toEqual(["t1"]);
+    expect(s.tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
+  });
+
+  it("the tab in front cannot merge into itself: no zone, nothing moves", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    host.querySelector<HTMLElement>('[role="tablist"]')!.getBoundingClientRect = rect(0, 0, 800, 34);
+    host.querySelector<HTMLElement>('.rl-wb-tab-body[data-wb-tab="t1"] .rl-wb-pane[data-pane-id="p1"]')!.getBoundingClientRect = rect(0, 34, 800, 600);
+    const before = store.getState();
+    const t1 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t1"]')!;
+    await act(async () => { t1.dispatchEvent(at("pointerdown", 50, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 60, 300)); });
+    expect(host.querySelector(".rl-wb-drop-zone")).toBeNull();
+    await act(async () => { window.dispatchEvent(at("pointerup", 60, 300)); });
+    expect(store.getState()).toBe(before);
+    expect(isResizing()).toBe(false);
+  });
+
+  it("the strip's ⋯ moves the focused pane of a split to a new tab, and zooms it", async () => {
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "servers", data: {} }, newPaneId: "sv" }));
+    const onSplit = vi.fn();
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} onSplit={onSplit} />));
+    await strip();
+    const open = async () => act(async () => host.querySelector<HTMLButtonElement>(".rl-wb-pane-menu")!.click());
+    const pick = async (label: string) => act(async () => [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((el) => el.textContent?.includes(label))!.click());
+    await open();
+    expect([...document.body.querySelectorAll('[role="menuitem"] .rl-row-menu-label')].map((e) => e.textContent)).toEqual(["Split right", "Split down", "Zoom the pane", "Even out the splits", "Move to a new tab", "Close pane"]);
+    await pick("Split down");
+    expect(onSplit).toHaveBeenCalledWith("column");
+    await open();
+    await pick("Zoom the pane");
+    expect(store.getState().sets.home!.tabs.t1.zoomed).toBe("sv");
+    await open();
+    await pick("Move to a new tab");
+    const s = store.getState().sets.home!;
+    expect(s.tabs.t1.root).toEqual({ pane: "p1" });
+    expect(s.tabs[s.activeTabId!].root).toEqual({ pane: "sv" });
+  });
+});
