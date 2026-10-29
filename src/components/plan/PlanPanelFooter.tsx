@@ -319,7 +319,7 @@ function SplitAction({
     };
   }, [open]);
   return (
-    <span ref={wrap} className="rl-plan-split">
+    <span ref={wrap} className="rl-plan-split" data-disabled={disabled || undefined}>
       <button type="button" className="rl-plan-btn rl-plan-btn--primary" onClick={onPrimary} disabled={disabled} title={title}>
         {label}
       </button>

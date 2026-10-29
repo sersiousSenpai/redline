@@ -243,23 +243,6 @@
   background: var(--color-ink-2);
   color: var(--color-paper);
 }
-.rl-plan-split {
-  position: relative;
-  display: inline-flex;
-  align-items: stretch;
-}
-.rl-plan-split > .rl-plan-btn--primary:first-child:not(:last-of-type) {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.rl-plan-split-more {
-  width: 26px;
-  padding: 0;
-  justify-content: center;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-left: 1px solid color-mix(in srgb, var(--color-paper) 30%, transparent);
-}
 .rl-plan-split-menu {
   position: absolute;
   right: 0;
@@ -363,8 +346,55 @@
   border-radius: var(--rl-radius-row);
   font-size: var(--rl-text-chrome);
 }
-.rl-plan-foot[data-pose="pane"] .rl-plan-split-more {
-  width: 24px;
+
+/* The split action (D43): ONE filled pill, its ▾ inside it behind a hairline
+   — never a second button glued on with a clipped corner. The pill owns the
+   fill and the radius; the two halves are transparent over it and take the
+   pill's corners on their own side. The menu opens from the ▾. */
+.rl-plan-split {
+  --rl-split-r: var(--rl-radius-button);
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: var(--rl-split-r);
+  background: var(--color-ink);
+}
+.rl-plan-foot[data-pose="pane"] .rl-plan-split {
+  --rl-split-r: var(--rl-radius-row);
+}
+.rl-plan-split[data-disabled] {
+  opacity: 0.45;
+}
+.rl-plan-foot .rl-plan-split > .rl-plan-btn--primary {
+  background: transparent;
+  border-radius: var(--rl-split-r);
+}
+.rl-plan-foot .rl-plan-split > .rl-plan-btn--primary:disabled {
+  opacity: 1;
+}
+.rl-plan-foot .rl-plan-split > .rl-plan-btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 12%, transparent);
+}
+.rl-plan-foot .rl-plan-split > .rl-plan-btn--primary:first-child:not(:last-of-type) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  padding-right: 12px;
+}
+.rl-plan-foot .rl-plan-split > .rl-plan-split-more {
+  position: relative;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 0 var(--rl-split-r) var(--rl-split-r) 0;
+}
+.rl-plan-split-more::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 25%;
+  bottom: 25%;
+  width: 1px;
+  background: color-mix(in srgb, var(--color-paper) 28%, transparent);
 }
 .rl-plan-foot[data-pose="pane"] .rl-context-hint {
   font-size: var(--rl-text-chrome);

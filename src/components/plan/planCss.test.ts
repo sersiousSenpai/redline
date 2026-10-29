@@ -42,3 +42,26 @@ describe("plan.css", () => {
     expect(css.slice(start)).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
   });
 });
+
+// D43 (user screenshot): the footer's "Approve & build" split button looked
+// squished: its ▾ glued on as a second button, no gap, a clipped corner.
+describe("the split action (D43)", () => {
+  const block = (selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+  };
+  it("is one filled pill: the pill owns the fill and the radius, the halves are transparent over it", () => {
+    expect(block(".rl-plan-split")).toMatch(/background: var\(--color-ink\)/);
+    expect(block(".rl-plan-split")).toMatch(/border-radius: var\(--rl-split-r\)/);
+    expect(block('.rl-plan-foot[data-pose="pane"] .rl-plan-split')).toMatch(/--rl-split-r: var\(--rl-radius-row\)/);
+    expect(block(".rl-plan-foot .rl-plan-split > .rl-plan-btn--primary")).toMatch(/background: transparent/);
+  });
+  it("keeps the ▾ inside it, 28 px, behind a hairline, its corners the pill's own", () => {
+    const more = block(".rl-plan-foot .rl-plan-split > .rl-plan-split-more");
+    expect(more).toMatch(/width: 28px/);
+    expect(more).toMatch(/border-radius: 0 var\(--rl-split-r\) var\(--rl-split-r\) 0/);
+    expect(block(".rl-plan-split-more::before")).toMatch(/width: 1px/);
+    // No second outlined segment glued on.
+    expect(css).not.toMatch(/\.rl-plan-split-more \{[^}]*border-left:/);
+  });
+});
