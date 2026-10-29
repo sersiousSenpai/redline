@@ -7631,8 +7631,20 @@ function App() {
   // terminal (`watchIds`) and reports each sample (`onProcs`); the shell
   // back in front is the launch stopped (`procs`).
   const waitingLaunchIds = useStableValue(useMemo(() => flowLaunches.filter((l) => !l.stopped).map((l) => l.terminalId), [flowLaunches]));
+  // The same samples say which ports each terminal's processes listen on:
+  // a dev server under a session's own terminal wears a chip on that
+  // session's row, and only there (D44). Kept by value, so a sample that
+  // moved no port renders nothing.
+  const [termPorts, setTermPorts] = useState<ReadonlyMap<string, readonly number[]>>(() => new Map());
   const noteLaunchProcs = useCallback(
-    (rows: readonly LaunchProc[], at: number) => noteFlowLaunch({ type: "procs", rows, at }),
+    (rows: readonly (LaunchProc & { ports?: readonly number[] })[], at: number) => {
+      noteFlowLaunch({ type: "procs", rows, at });
+      setTermPorts((prev) => {
+        const next = new Map(rows.filter((r) => Array.isArray(r.ports) && r.ports.length > 0).map((r) => [r.id, r.ports!] as const));
+        const same = next.size === prev.size && [...next].every(([id, ports]) => prev.get(id)?.join(",") === ports.join(","));
+        return same ? prev : next;
+      });
+    },
     [noteFlowLaunch],
   );
   // Retry on a launch stopped before its plan: its own command, typed again
@@ -9002,8 +9014,9 @@ function App() {
   // for these alone.
   const devServerPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b), [devServers.scan]));
   const sidebarPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b).map((p) => `:${p}`), [devServers.scan]));
-  // Each session's own servers (W7) are its ports chip; the sidebar matches
-  // them to sessions (lib/sessionPorts). The scan runs while Localhost is on
+  // The servers' ports chips (W7): once on their project's header, and on a
+  // session's row only for a server under its own terminal (lib/sessionPorts,
+  // D44). The scan runs while Localhost is on
   // screen and otherwise once per event — boot, and a PTY appearing,
   // exiting or starting to serve (the wall's own process sample) — never on
   // a clock. The scan is kept by value, so an unchanged sweep is no render.
@@ -9018,7 +9031,7 @@ function App() {
   const wbOwners = useWorkbench(wb, (st) => st.owners);
   const wbStowed = useWorkbench(wb, (st) => st.stowed);
   const sidebarTerminals = useMemo(() => {
-    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean }[]> = {};
+    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean; ports?: readonly number[] }[]> = {};
     const listed = new Set<string>();
     // The rows a terminal can nest under: a current plan's (an archived or
     // deleted one has no row on screen) and a pending launch's own row,
@@ -9033,7 +9046,8 @@ function App() {
       const known = termStatuses.get(terminalId);
       const status = terminalStatus(terminalId, { states: termStatuses, attention: terminalKinds, held: heldTermIds, live: liveTermIds });
       const kept = wbStowed.includes(terminalId);
-      (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}) });
+      const ports = termPorts.get(terminalId);
+      (out[row] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || known?.label || fallback, status, ...(kept ? { kept } : {}), ...(ports ? { ports } : {}) });
     };
     for (const [sessionId, terminalId] of sessionTerminals) {
       if (rows.has(sessionId)) push(sessionId, terminalId, "claude");
@@ -9052,7 +9066,7 @@ function App() {
       if (!listed.has(terminalId) && (!liveTermIds || liveTermIds.includes(terminalId))) push("", terminalId, "terminal");
     }
     return out;
-  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches]);
+  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches, termPorts]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on

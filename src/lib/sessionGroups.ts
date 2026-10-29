@@ -393,6 +393,82 @@ export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | 
   }
 }
 
+// ── A plan row's two lines (D44) ────────────────────────────────────────────
+
+/** What a plan row's status mark is, in the one vocabulary: needs you is the
+ *  amber opacity pulse, working the shared Spinner, a plan nobody holds any
+ *  more (detached, aborted) muted, anything else nothing. */
+export type PlanMark = "needs" | "working" | "muted" | null;
+
+export interface PlanRowState {
+  session: Pick<SessionSummary, "status" | "runState" | "held" | "attachState" | "backend" | "model" | "projectName">;
+  /** The engine's open ask on this row. */
+  need: NeedReason | null;
+  /** Claude is mid-turn in its terminal. */
+  working: boolean;
+  /** One of its terminals is blocked on you. */
+  termNeeds?: boolean;
+  /** A plan arrived for it and the reviewer was never taken there. */
+  unseen?: boolean;
+  /** Its unresolved comments. */
+  pending?: number;
+  /** The row sits outside its project's group (Needs you, Archived), so the
+   *  phrase names the project. */
+  showProject?: boolean;
+  /** The tooltip's word on a detached plan, named for its harness
+   *  (`detachedPillTitle`). */
+  detachedNote?: string;
+}
+
+export function planMark(row: PlanRowState): PlanMark {
+  if (row.need || row.termNeeds || row.unseen) return "needs";
+  if (row.working) return "working";
+  if (row.session.attachState === "detached" || row.session.status === "aborted") return "muted";
+  return null;
+}
+
+/** A plan row's second line: ONE short phrase, its parts joined by " · ":
+ *  where the plan is ("Waiting on you", "Building", "In review", "Detached",
+ *  "Approved", "Built"), who wrote it when that is not Claude ("Codex"), and
+ *  how many comments wait ("2 comments"). Short by design, so it never needs
+ *  an ellipsis to fit; `title` carries the longer story. */
+export function planPhrase(row: PlanRowState): { text: string; title: string } {
+  const s = row.session;
+  const detached = s.attachState === "detached";
+  const why: string[] = [];
+  let word: string;
+  if (row.need || row.termNeeds) {
+    word = "Waiting on you";
+    why.push(row.need ? NEED_STATUS[row.need].detail! : "A terminal of this plan is waiting on you");
+  } else if (row.working) {
+    word = s.status === "approved" ? "Building" : s.held ? "Planning" : "Revising";
+    why.push(s.status === "approved" ? "An agent is building this plan in its terminal" : "Claude is working in this plan's terminal");
+  } else if (s.status === "aborted") {
+    word = "Aborted";
+  } else if (s.status === "in_review") {
+    word = detached ? "Detached" : "In review";
+    if (s.held && !detached) why.push("Claude is waiting on your review");
+  } else {
+    const build = planBuildState(s.runState);
+    word = build === "landed" ? "Built" : build === "building" ? "Building" : "Approved";
+    why.push(build === "landed" ? "Marked completed" : build === "building" ? "Handed to an agent to build in its terminal" : "Approved, not built yet");
+  }
+  const parts = [word];
+  // Detached outside review (a waiting terminal, an approved plan) is said
+  // after the state rather than instead of it.
+  if (detached && word !== "Detached" && s.status !== "aborted") parts.push("Detached");
+  if (detached) why.push(row.detachedNote ?? "Detached: restore the session before sending feedback");
+  if (s.backend === "codex") {
+    parts.push("Codex");
+    why.push(s.model ? `Planned by Codex · ${s.model}` : "Planned by Codex");
+  }
+  const pending = row.pending ?? 0;
+  if (pending > 0) parts.push(`${pending} ${pending === 1 ? "comment" : "comments"}`);
+  if (row.showProject && s.projectName) parts.unshift(s.projectName);
+  if (row.unseen) why.unshift("A new plan arrived for this session");
+  return { text: parts.join(" · "), title: why.join("\n") };
+}
+
 /** "now", "5m", "3h", "2d", then the date. */
 export function rowAge(at: number, now: number = Date.now()): string {
   const minutes = Math.floor((now - at) / 60_000);

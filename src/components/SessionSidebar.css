@@ -137,7 +137,6 @@
   .rl-sb-need { animation: rl-sb-breathe 1.6s ease-in-out infinite; }
 }
 @keyframes rl-sb-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-.rl-session-row[data-need] > button .truncate { color: var(--color-ink); }
 
 /* ── A plan's terminals, under its row ──────────────────────────────────── */
 .rl-sb-terms { margin: 0; padding: 3px 0; list-style: none; border-bottom: 1px solid var(--color-rule); }
@@ -163,6 +162,12 @@
 /* Exited: muted, the row and its word. */
 .rl-sb-term[data-status="exited"] .rl-sb-term-row { color: var(--color-ink-5); }
 .rl-sb-term[data-status="exited"] .rl-sb-term-state { color: var(--color-ink-5); }
+
+/* Under a plan row: no rule of their own, and the title's indent. */
+.rl-session-row > .rl-sb-terms { padding: 0 0 2px; border-bottom: 0; }
+.rl-session-row .rl-sb-term-row { padding-left: 32px; border-radius: var(--rl-radius-row); }
+.rl-sb-revs { margin: 0; padding: 0 0 2px; list-style: none; }
+.rl-sb-revs .hover-elevated { border-radius: var(--rl-radius-row); }
 
 /* ── Chat and launch rows ───────────────────────────────────────────────── */
 .rl-sb-item { position: relative; margin: 1px 6px; border-radius: var(--rl-radius-row); }
@@ -226,13 +231,11 @@
   cursor: pointer;
 }
 .rl-sb-item[data-kind="launch"] > .rl-sb-dots { top: 2px; }
-/* A plan row's: centred on its title line, 8px clear of the version chip
-   (the row's 36px right padding). */
-.rl-session-row > .rl-sb-dots { top: 6px; }
+/* A plan row's: centred on its 28px title line, in the 32px the row keeps
+   clear on its right. */
+.rl-session-row > .rl-sb-dots { top: 2px; }
 .rl-sb-dots:hover { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-sb-dots[aria-expanded="true"] { color: var(--color-ink); }
-/* Over the ⋯ the row stays lit. */
-.rl-session-row:has(> .rl-sb-dots:hover) > .hover-elevated { background: color-mix(in srgb, var(--color-bg-elevated) 60%, transparent); }
 .rl-sb-item:has(> .rl-sb-dots) > .rl-sb-row .rl-sb-tag { visibility: hidden; }
 .rl-sb-dots:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 
@@ -295,18 +298,108 @@
 .rl-sb-newtab:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 .rl-sb-newtab kbd { font: inherit; font-size: var(--rl-text-label); color: var(--color-ink-5); }
 
-/* ── A session's dev servers (W7): a quiet chip on its status line ──────── */
-/* Inside the line's own height (10px type at the inherited 1.5 = 15px): a
+/* ── A plan row (D44): two lines at most ──────────────────────────────── */
+/* Line one is 28px: the status mark in a 16px column, the title over all the
+   width left (its ellipsis only at the end), the version chip. Line two, when
+   the plan has one, is one muted 12px phrase, aligned under the title, and
+   the session's own server. The right 32px stay clear for the ⋯ (D37), so
+   hovering moves nothing. No borders, no pills, no badges. */
+.rl-session-row { margin: 1px 6px; border-radius: var(--rl-radius-row); }
+.rl-sb-plan {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  padding: 0 32px 6px 8px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-2);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-sb-plan:hover { background: var(--color-fill-1); }
+.rl-sb-plan[data-active] { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-sb-plan:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
+.rl-sb-plan-line { display: flex; align-items: center; gap: 8px; min-width: 0; height: var(--rl-sb-row); }
+.rl-sb-mark { flex: none; display: grid; place-items: center; width: 16px; height: 16px; }
+.rl-sb-mark > .rl-sb-spin { color: var(--color-mode-plan-fg); }
+/* Muted: a plan nobody holds any more (detached, aborted). */
+.rl-sb-muted { width: 6px; height: 6px; background: var(--color-ink-5); }
+.rl-sb-plan-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rl-text-row);
+  font-weight: 500;
+  color: var(--color-ink);
+}
+.rl-sb-plan[data-active] .rl-sb-plan-title { font-weight: 600; }
+.rl-sb-plan[data-muted] .rl-sb-plan-title { color: var(--color-ink-4); }
+/* "v3", or "v3 ▾" when it toggles the revision tree: small, muted, mono. */
+.rl-sb-ver {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--rl-radius-chip);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 18px;
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+.rl-sb-ver[role="button"] { margin-right: -3px; padding-right: 2px; cursor: pointer; }
+.rl-sb-ver[role="button"]:hover { background: var(--color-fill-2); color: var(--color-ink-2); }
+.rl-sb-ver[role="button"]:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -1px; }
+.rl-sb-ver > svg { flex: none; color: var(--color-ink-5); transition: transform 0.12s; }
+.rl-sb-ver[data-open] > svg { transform: rotate(180deg); }
+.rl-sb-plan-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 16px;
+  margin-top: -4px;
+  /* The ⋯ sits on line one only: line two runs on under its column. */
+  margin-right: -24px;
+  padding-left: 24px;
+  overflow: hidden;
+  container-type: inline-size;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--color-ink-4);
+}
+.rl-sb-plan-meta > * { flex: none; }
+.rl-sb-plan-meta > span:has(> [aria-haspopup]) { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.rl-sb-phrase { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-sb-plan-meta [aria-haspopup] { max-width: 100%; overflow: hidden; vertical-align: top; border-radius: 3px; }
+.rl-sb-plan-meta [aria-haspopup]:hover .rl-sb-phrase { color: var(--color-ink-2); }
+.rl-sb-plan-meta [aria-haspopup]:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 0; }
+.rl-sb-plan-meta > .rl-sb-resume { font-size: 10.5px; }
+/* Over the ⋯ the row stays lit. */
+.rl-session-row:has(> .rl-sb-dots:hover) > .rl-sb-plan { background: var(--color-fill-1); }
+.rl-session-row:has(> .rl-sb-dots:hover) > .rl-sb-plan[data-active] { background: var(--color-fill-2); }
+/* Rename in place: the field lies over the title. */
+.rl-session-row > .rl-row-rename { left: 30px; right: 32px; top: 1px; }
+
+/* ── A dev server's chip (W7, D44) ─────────────────────────────────────── */
+/* Once on its project's header, and on a session's row only when it runs
+   under that session's own terminal. Inside the line it sits on (16px): a
    server starting or stopping must not grow the row. 14px border-box, its
    12px globe on a 12px line. Pinned in SessionSidebar.test.tsx. */
-/* A plan row's status line is ONE line (LAST2: "in review" wrapped and the
-   port chip was clipped at the sidebar's 200 px minimum). The status word
-   and the pills give way first, each with an ellipsis; the port chip, the
-   count and the glyphs keep their width, so the chip always fits. */
-.rl-sb-status-line { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; }
-.rl-sb-status-line > * { flex-shrink: 0; }
-.rl-sb-status-line > .rl-sb-statusword,
-.rl-sb-status-line > .rl-sb-pill { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-sb-status-line > .rl-sb-statusword { min-width: 24px; }
-.rl-sb-port { display: inline-flex; align-items: center; gap: 3px; box-sizing: border-box; height: 14px; padding: 0 6px; border: 1px solid var(--color-rule); border-radius: 9999px; font-family: var(--font-mono); font-size: 10px; line-height: 12px; letter-spacing: 0; text-transform: none; white-space: nowrap; color: var(--color-ink-muted); cursor: pointer; }
+.rl-sb-port { display: inline-flex; flex: none; align-items: center; gap: 3px; box-sizing: border-box; height: 14px; padding: 0 6px; border: 1px solid var(--color-rule); border-radius: 9999px; font-family: var(--font-mono); font-size: 10px; line-height: 12px; letter-spacing: 0; text-transform: none; white-space: nowrap; color: var(--color-ink-muted); cursor: pointer; }
 .rl-sb-port:hover, .rl-sb-port:focus-visible { color: var(--color-ink); border-color: var(--color-ink-muted); }
+.rl-sb-port:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }
+/* A row's own chip gives the phrase the room first: on a narrow line it is
+   its globe alone (its title and label still name the port). */
+@container (max-width: 210px) {
+  .rl-sb-plan-meta > .rl-sb-port { padding: 0 3px; }
+  .rl-sb-plan-meta > .rl-sb-port > .rl-sb-port-n { display: none; }
+}
+/* On the project's header: at the label row's end, clear of its "+". */
+.rl-sb-label > .rl-sb-port { margin-left: auto; }
+.rl-sb-label:has(> .rl-sb-add) > .rl-sb-port { margin-right: 22px; }
