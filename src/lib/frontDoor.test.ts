@@ -317,7 +317,8 @@ describe("the island never moves on its own", () => {
   it("boots shut — resting on the empty plate, never opened over the work", () => {
     const init = app.slice(app.indexOf("const [frontDoorOpen, setFrontDoorOpen] = useState("), app.indexOf("const [doorCompact"));
     expect(init).toContain("return false;");
-    expect(app).toMatch(/landing=\{plateAtRest && shellReady/);
+    // It rests on the focused door pane, wherever that sits (W5 fix 1).
+    expect(app).toMatch(/landing=\{doorLands\(view\) && shellReady/);
     // The open door hides the native page; the compact card is cut out of it.
     const overlay = app.slice(app.indexOf("const browserOverlayActive ="), app.indexOf("const browserVisible ="));
     expect(overlay).toContain("frontDoorOpen ||");
