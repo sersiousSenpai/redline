@@ -89,6 +89,7 @@ pub fn memory_schema_sql() -> String {
     db.schema_sql().expect("memory schema dump")
 }
 mod memchat;
+mod memstatus;
 mod meter;
 mod mirror;
 mod mission;
@@ -10741,82 +10742,9 @@ async fn classmem_organize(
 /// The full chain walk still runs, on the 6h `ledger-backup` keeper watch.
 #[tauri::command]
 fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Value, String> {
-    let db = store.database();
-    let max_seq = db.max_ledger_seq().map_err(|e| e.to_string())?;
-    let last_to = db.last_run_seq_to().map_err(|e| e.to_string())?;
-    let run = db.latest_class_run().map_err(|e| e.to_string())?;
-    let (last_organized_ts, last_summary) = match run {
-        Some(r) if r.status == "done" => (r.finished_at, r.summary),
-        _ => (None, None),
-    };
-    let chain = db
-        .verify_ledger_chain_incremental()
-        .map_err(|e| e.to_string())?;
-    let (compacted, reclaimed, last_compaction_ts) =
-        db.compaction_stats().map_err(|e| e.to_string())?;
-    // The gardener's work queue (B3): structural proposals waiting for a run
-    // — a fact the surface reports, never a count "to review".
-    let queued_proposals = db
-        .count_pending_class_proposals()
-        .map_err(|e| e.to_string())?;
-    // Corpus composition — the number that was missing. Reported as rows AND
-    // bytes per role, because the two tell different stories: 397 machine rows
-    // out of 1,213 is a third of the corpus by count and 92.6% of it by weight.
-    let composition = db.corpus_composition().map_err(|e| e.to_string())?;
-    let corpus_roles: Vec<serde_json::Value> = composition
-        .iter()
-        .map(
-            |(role, rows, bytes)| serde_json::json!({ "role": role, "rows": rows, "bytes": bytes }),
-        )
-        .collect();
-    let corpus_bytes: i64 = composition.iter().map(|(_, _, b)| *b).sum();
-    let user_bytes: i64 = composition
-        .iter()
-        .filter(|(r, _, _)| r == "user")
-        .map(|(_, _, b)| *b)
-        .sum();
-    let (gist_agent, gist_deterministic) = db.gist_source_counts().map_err(|e| e.to_string())?;
-    let (archived_rows, archived_bytes) = db.archive_stats().map_err(|e| e.to_string())?;
-    let (prefetch_hits, prefetch_turns) = db.prefetch_hit_rate().map_err(|e| e.to_string())?;
-    // A HALF-BUILT semantic index degrades recall silently, so it is reported
-    // rather than inferred: `pending` is the honest counterpart to `chunks`,
-    // and `provider: "absent"` says the arm cannot run at all — which is a fact
-    // about this machine, not about the user's history.
-    let embeddings = match embed::provider_for(&db) {
-        Some(p) => {
-            let (chunks, pending) = db.embedding_stats(&p.model_id()).map_err(|e| e.to_string())?;
-            serde_json::json!({
-                "provider": embed::provider_kind().as_str(),
-                "model": p.model_id(),
-                "chunks": chunks,
-                "pending": pending,
-            })
-        }
-        None => serde_json::json!({
-            "provider": embed::ProviderKind::Absent.as_str(),
-            "model": null, "chunks": 0, "pending": 0,
-        }),
-    };
-    Ok(serde_json::json!({
-        "live": true,
-        "itemCount": max_seq,
-        "backlog": (max_seq - last_to).max(0),
-        "lastOrganizedTs": last_organized_ts,
-        "lastOrganizedSummary": last_summary,
-        "chainOk": chain.ok,
-        "compactedCount": compacted,
-        "reclaimedBytes": reclaimed,
-        "lastCompactionTs": last_compaction_ts,
-        "queuedProposals": queued_proposals,
-        "corpusRoles": corpus_roles,
-        "corpusBytes": corpus_bytes,
-        "corpusUserBytes": user_bytes,
-        "keeperGistSource": { "agent": gist_agent, "deterministic": gist_deterministic },
-        "archivedCount": archived_rows,
-        "archivedBytes": archived_bytes,
-        "askPrefetch": { "hits": prefetch_hits, "turns": prefetch_turns },
-        "embeddings": embeddings,
-    }))
+    // Single-flight, cached while nothing commits, and read on its own
+    // read-only connection: see memstatus.rs.
+    memstatus::CACHE.get(&store.database())
 }
 
 /// Set (or clear) the embedding provider. Changing it invalidates the index —

@@ -660,6 +660,13 @@ impl Database {
         read
     }
 
+    /// The file behind the read connections: `Some` for a WAL file database,
+    /// where a separate connection reads a committed snapshot without waiting
+    /// for the writer (`memstatus.rs` opens its own on it).
+    pub(crate) fn reader_path(&self) -> Option<&Path> {
+        self.readers.as_ref().map(|r| r.path.as_path())
+    }
+
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);

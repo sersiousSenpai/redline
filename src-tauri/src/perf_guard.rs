@@ -305,10 +305,22 @@ mod tests {
         // …and it must stay INCREMENTAL. The full re-hash belongs on the 6h
         // keeper watch, not on a poll.
         assert!(
-            src.contains("verify_ledger_chain_incremental"),
-            "lib.rs: `memory_status` must use the incremental chain verify — a \
+            include_str!("memstatus.rs").contains("verify_ledger_chain_incremental"),
+            "memstatus.rs: `memory_status` must use the incremental chain verify — a \
              full re-hash per poll is the regression this guards \
              (see docs/perf-budget.md)"
+        );
+        // …and it must not stampede or hold the shared writer while it reads
+        // (the 2026-10-29 beach ball: three at once, each holding the writer
+        // through a multi-second count, a tab swap queued behind them).
+        assert!(
+            src.contains("memstatus::CACHE.get(&store.database())"),
+            "lib.rs: `memory_status` goes through the single-flight cache (memstatus.rs)"
+        );
+        let status = include_str!("memstatus.rs");
+        assert!(
+            status.contains("PolisStore::open_read_only"),
+            "memstatus.rs: the status reads run on their own read-only connection"
         );
     }
 
