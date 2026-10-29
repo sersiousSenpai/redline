@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { watchRelease } from "../lib/pressRelease";
 import {
   beginResizeSession,
   endResizeSession,
@@ -102,6 +103,22 @@ export function useResizablePane({
   // window listeners when the host re-renders with a new closure.
   const onLiveSizeRef = useRef(onLiveSize);
   onLiveSizeRef.current = onLiveSize;
+  // The seam's grab zone and the pointer it captured at the press. Released
+  // by every end of the drag: a seam dragged shut keeps its capture until
+  // the release otherwise, and if that release never reaches this document
+  // (LAST2: let go over the stage's browser page) every later click went to
+  // the folded seam — the sidebar ignored clicks and the next one pulled
+  // the rail back open.
+  const handle = useRef<{ el: Element; pointerId: number } | null>(null);
+  const releaseHandle = useCallback(() => {
+    const h = handle.current;
+    handle.current = null;
+    try {
+      if (h && h.el.hasPointerCapture?.(h.pointerId)) h.el.releasePointerCapture(h.pointerId);
+    } catch {
+      /* the pointer is already gone */
+    }
+  }, []);
 
   const maxSize = useCallback(() => {
     if (max != null) return max;
@@ -151,6 +168,7 @@ export function useResizablePane({
       // size it started at rather than whatever the previous drag left behind.
       lastWidth.current = startSize;
       maxRef.current = maxSize();
+      handle.current = e.currentTarget instanceof Element ? { el: e.currentTarget, pointerId: e.pointerId } : null;
       openSession();
       setDragging(true);
     },
@@ -193,6 +211,9 @@ export function useResizablePane({
           rafId = 0;
         }
         snappedClosed = true;
+        ended = true;
+        stopRelease();
+        releaseHandle();
         setDragging(false);
         closeSession();
         onCollapse();
@@ -205,7 +226,15 @@ export function useResizablePane({
       lastWidth.current = next;
       if (!rafId) rafId = requestAnimationFrame(flush);
     };
+    // The drag's one end, however it comes: the release (wherever it was
+    // heard, lib/pressRelease), a cancel, or the seam losing its capture
+    // (its column folded and unmounted it mid-drag).
+    let ended = false;
     const onUp = () => {
+      if (ended) return;
+      ended = true;
+      stopRelease();
+      releaseHandle();
       if (rafId) {
         cancelAnimationFrame(rafId);
         rafId = 0;
@@ -234,7 +263,10 @@ export function useResizablePane({
     };
 
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    const stopRelease = watchRelease(onUp);
+    window.addEventListener("pointercancel", onUp, true);
+    const grabbed = handle.current?.el ?? null;
+    grabbed?.addEventListener("lostpointercapture", onUp);
     const prevCursor = document.body.style.cursor;
     const prevSelect = document.body.style.userSelect;
     document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
@@ -243,7 +275,9 @@ export function useResizablePane({
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      stopRelease();
+      window.removeEventListener("pointercancel", onUp, true);
+      grabbed?.removeEventListener("lostpointercapture", onUp);
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevSelect;
       // NOTE: the session is deliberately NOT closed here. This effect
@@ -261,6 +295,7 @@ export function useResizablePane({
     onCollapse,
     collapseOvershoot,
     closeSession,
+    releaseHandle,
   ]);
 
   // Clear any pending settle timer on unmount, and release a session that
