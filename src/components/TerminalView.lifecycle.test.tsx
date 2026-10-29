@@ -558,3 +558,29 @@ describe("file:line links (W4)", () => {
     expect(opened).toEqual([{ path: "/repo/app/src/main.ts", line: 12, mode: "preview" }]);
   });
 });
+
+// LAST2 walk: the Agent CLI view drew its session 8 columns wide. The
+// terminal was fitted (and its CLI started) against a region the layer had
+// not laid out yet; the fit waits for a box with real room.
+describe("a region not laid out yet is never a terminal's size", () => {
+  const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+  const narrow = { x: 0, y: 0, left: 0, top: 0, right: 60, bottom: 300, width: 60, height: 300, toJSON: () => ({}) };
+  const roomy = { x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600, toJSON: () => ({}) };
+
+  it("opened and shown in a sliver: no fit, the shell starts at 80 columns, the PTY is told nothing small; the first real box fits", async () => {
+    const box = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(narrow);
+    mocks.dims = { cols: 8, rows: 40 };
+    await mount(true);
+    await frame();
+    await frame();
+    expect(mocks.fits).toBe(0);
+    const spawn = mocks.invoke.mock.calls.find(([cmd]) => cmd === "pty_spawn");
+    expect(spawn?.[1]).toMatchObject({ cols: 80 });
+    expect(mocks.invoke.mock.calls.some(([cmd, args]) => cmd === "pty_resize" && args.cols === 8)).toBe(false);
+    // The layer gets its rect: the observer's entry fits to it.
+    box.mockReturnValue(roomy);
+    mocks.dims = { cols: 120, rows: 40 };
+    act(() => { mocks.resizeObservers[mocks.resizeObservers.length - 1](); });
+    expect((currentTerm() as unknown as { cols: number }).cols).toBe(120);
+  });
+});

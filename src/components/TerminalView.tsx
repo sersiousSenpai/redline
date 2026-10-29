@@ -68,6 +68,16 @@ interface TerminalViewProps {
   onUserData?: (id: string, data: string) => void;
 }
 
+/** The smallest box a terminal is fitted to. Below it the box is a region
+ *  not laid out yet (no tile or pane is this small: MIN_TILE_W is 360). */
+const MIN_FIT_W = 120;
+const MIN_FIT_H = 40;
+export function roomToFit(el: Element | null): boolean {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return r.width >= MIN_FIT_W && r.height >= MIN_FIT_H;
+}
+
 /** How long after a wheel, a key or a press a scroll is still the user's. */
 const USER_SCROLL_MS = 800;
 
@@ -337,6 +347,10 @@ export const TerminalView = memo(function TerminalView({
       const term = termRef.current;
       const fit = fitRef.current;
       if (!term || !fit) return;
+      // A region not laid out yet (the CLI view's box before the layer has
+      // its rect, a wall frame mid-placement) is never a size to give a
+      // PTY: the next observer entry with real room fits instead.
+      if (!roomToFit(hostRef.current)) return;
       // At the bottom before this fit (or before the drag it settles): kept
       // at the bottom after it.
       const wasAtBottom = !!opts.stick || stickRef.current || viewportAtBottom(term);
@@ -474,7 +488,11 @@ export const TerminalView = memo(function TerminalView({
     term.unicode.activeVersion = "11";
     term.loadAddon(fit);
     term.open(host);
-    fit.fit();
+    // Opened in a box with no room yet (hidden, or a region still being
+    // placed), it keeps xterm's 80×24: the spawn below must never start a
+    // CLI at the handful of columns a transitional box proposes (LAST2: the
+    // Agent CLI view drew its whole session 8 columns wide).
+    if (roomToFit(host)) fit.fit();
     termRef.current = term;
     fitRef.current = fit;
     const inputOrigin = terminalInputOrigin(term, () => onUserInputRef.current?.(id));
@@ -878,8 +896,8 @@ export const TerminalView = memo(function TerminalView({
       term.options.fontFamily = terminalFamily(prefs);
       term.options.fontSize = prefs.size;
       term.options.lineHeight = prefs.lineHeight;
-      if (visibleRef.current && fitRef.current) {
-        const wasAtBottom = viewportAtBottom(term);
+      if (visibleRef.current && fitRef.current && roomToFit(hostRef.current)) {
+        const wasAtBottom = stickRef.current || viewportAtBottom(term);
         fitRef.current.fit();
         keepBottom(term, wasAtBottom);
       }
