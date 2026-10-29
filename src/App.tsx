@@ -300,7 +300,7 @@ const CommandPalette = lazy(() => import("./components/CommandPalette").then((m)
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, isZoomPaneKey, splitKeyOf, tabCycleKeyOf, tabIndexKeyOf, isSplitAnywhereKey, isEqualizeKey, focusPaneKeyOf } from "./lib/keymap";
+import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, isZoomPaneKey, splitKeyOf, tabCycleKeyOf, tabIndexKeyOf, isSplitAnywhereKey } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -377,7 +377,6 @@ import { doorDraftKey } from "./workbench/model";
 import { NO_NARROW_OPEN, narrowLayoutInputs, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
 import { RAIL_EDGE_W, SIDEBAR_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
-import { paneBoxes } from "./workbench/drop";
 import type { OpenFileDetail } from "./lib/fileLinks";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
@@ -2561,28 +2560,6 @@ function App() {
         wb.dispatch({ type: "zoomPane" });
       }
     };
-    // ⌃⌘ + an arrow: the pane that way ON SCREEN (the rendered boxes, not the
-    // tree: a column beside a row has more than one neighbour a tree walk
-    // could pick). ⌘⌥= evens every split of the tab. Capture phase, ahead
-    // of xterm's arrows.
-    const onPaneKey = (e: KeyboardEvent) => {
-      const dir = focusPaneKeyOf(e);
-      if (dir) {
-        const { tab } = activePanes(wb.getState());
-        if (!tab || !isSplit(tab.root)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        wb.dispatch({ type: "focusPane", dir, rects: paneBoxes(document, tab.id) });
-        return;
-      }
-      if (isEqualizeKey(e)) {
-        const { tab } = activePanes(wb.getState());
-        if (!tab || !isSplit(tab.root)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        wb.dispatch({ type: "equalize" });
-      }
-    };
     // ⌘D / ⌘⇧D: inside a wall ⌘D adds a tile; anywhere else they split the
     // focused pane right / down with a door. ⌘\ splits right with a door
     // everywhere, a wall included. Bubble phase, and only for an event
@@ -2604,7 +2581,6 @@ function App() {
     };
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keydown", onZoomKey, true);
-    window.addEventListener("keydown", onPaneKey, true);
     window.addEventListener("keydown", onSplitKey);
     void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
@@ -2612,7 +2588,6 @@ function App() {
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keydown", onZoomKey, true);
-      window.removeEventListener("keydown", onPaneKey, true);
       window.removeEventListener("keydown", onSplitKey);
     };
   }, [closeFromInside]);

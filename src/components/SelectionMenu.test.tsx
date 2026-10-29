@@ -54,7 +54,7 @@ describe("Search from the plan", () => {
     // A plan Search is its own gesture to the chat's structure layer, which
     // opens it in a fresh tab whose own chat takes the turn, whichever way
     // linked mode leans (BC-6, pinned in lib/browserChat/scope.test.ts).
-    expect(effect).toContain('openTabRef.current(openRequest.url, { via: openRequest.chat ? "plan-search" : "user" })');
+    expect(effect).toContain('openTabRef.current(openRequest.url, { via: openRequest.chat ? "plan-search" : "user", owner: openRequest.owner })');
     expect(pane).toContain('via === "plan-search" ? { type: "plan-search-opened", tab }');
     // …and its research turn goes out without taking the caret.
     expect(effect).toContain('source: { kind: "plan-search" }');

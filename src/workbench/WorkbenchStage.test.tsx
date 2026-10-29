@@ -335,3 +335,32 @@ describe("merge by drag and the pane menu (W5)", () => {
     expect(s.tabs[s.activeTabId!].root).toEqual({ pane: "sv" });
   });
 });
+
+describe("the stage's pane keys (W5)", () => {
+  const rect = (left: number, top: number, width: number, height: number) => () => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+  const press = (code: string, over: KeyboardEventInit) => {
+    const ev = new KeyboardEvent("keydown", { code, key: code, bubbles: true, cancelable: true, ...over });
+    act(() => { document.body.dispatchEvent(ev); });
+    return ev;
+  };
+  it("⌃⌘ + an arrow focuses the pane that way on screen; ⌘⌥= evens the tab; a lone pane leaves both alone", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    const lone = press("ArrowRight", { metaKey: true, ctrlKey: true });
+    expect(lone.defaultPrevented).toBe(false);
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "servers", data: {} }, newPaneId: "sv" }));
+    host.querySelector<HTMLElement>('.rl-wb-pane[data-pane-id="p1"]')!.getBoundingClientRect = rect(0, 34, 400, 600);
+    host.querySelector<HTMLElement>('.rl-wb-pane[data-pane-id="sv"]')!.getBoundingClientRect = rect(406, 34, 400, 600);
+    const focus = () => store.getState().sets.home!.tabs.t1.focusedPaneId;
+    expect(focus()).toBe("sv");
+    const left = press("ArrowLeft", { metaKey: true, ctrlKey: true });
+    expect(left.defaultPrevented).toBe(true);
+    expect(focus()).toBe("p1");
+    // ⌘⌥← is the tab cycle's, never the pane's.
+    press("ArrowRight", { metaKey: true, altKey: true });
+    expect(focus()).toBe("p1");
+    await act(async () => store.dispatch({ type: "resizeSplit", path: [], weights: [0.7, 0.3] }));
+    press("Equal", { metaKey: true, altKey: true });
+    const root0 = store.getState().sets.home!.tabs.t1.root;
+    expect("split" in root0 && root0.weights).toEqual([0.5, 0.5]);
+  });
+});

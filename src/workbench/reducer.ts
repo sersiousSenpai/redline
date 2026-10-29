@@ -20,7 +20,6 @@ import {
   MAX_WALL_TILES,
   RECENT_TABS_CAP,
   activeTabOf,
-  clampWeights,
   doorDraftKey,
   emptyTabSet,
   isSplit,
@@ -180,6 +179,28 @@ export type WorkbenchAction =
   /** `knownSessions`, when given, is every session that still exists: a
    *  Plan pane opened in another set for one that does not closes too. */
   | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[]; knownSessions?: readonly string[] };
+
+/** The narrowest share a child of a split keeps (10 %): a pane goes by its
+ *  own ✕, never by a divider dragged to the edge. */
+export const MIN_SPLIT_SHARE = 0.1;
+
+/** `weights` (summing to 1) with every share at least `min`, the shortfall
+ *  taken from the others in proportion to what they have above `min`. */
+export function clampWeights(weights: readonly number[], min: number = MIN_SPLIT_SHARE): number[] {
+  const n = weights.length;
+  if (n === 0) return [];
+  const floor = Math.min(min, 1 / n);
+  const out = weights.slice();
+  for (let pass = 0; pass < n; pass++) {
+    const short = out.reduce((acc, w) => acc + Math.max(0, floor - w), 0);
+    if (short <= 1e-12) break;
+    const spare = out.reduce((acc, w) => acc + Math.max(0, w - floor), 0);
+    for (let i = 0; i < n; i++) {
+      out[i] = out[i] < floor ? floor : out[i] - (spare > 0 ? ((out[i] - floor) / spare) * short : 0);
+    }
+  }
+  return out;
+}
 
 let counter = 0;
 function newId(prefix: string): string {

@@ -5,8 +5,6 @@ import { describe, expect, it } from "vitest";
 import {
   CLOSED_CAP,
   HOME_KEY,
-  MIN_SPLIT_SHARE,
-  clampWeights,
   shownPaneIds,
   MAX_WALL_TILES,
   activeTabOf,
@@ -27,7 +25,7 @@ import {
   type SessionKey,
   type WorkbenchState,
 } from "./model";
-import { DEFAULT_DOOR_DRAFT_KEY, doorDraftKey, geometricNeighbour, neighbourPane, reduce, type PaneRect } from "./reducer";
+import { DEFAULT_DOOR_DRAFT_KEY, MIN_SPLIT_SHARE, clampWeights, doorDraftKey, geometricNeighbour, neighbourPane, reduce, type PaneRect } from "./reducer";
 
 const door = (n = 1): PaneInit => ({ kind: "door", data: { draftKey: `d${n}` } });
 const file = (path: string): PaneInit => ({ kind: "file", data: { path } });

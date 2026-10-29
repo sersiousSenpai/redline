@@ -25,8 +25,10 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { RowMenu, type RowAction } from "../components/RowMenu";
 import { rafCoalesce } from "../lib/raf";
 import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
-import { MIN_SPLIT_SHARE, activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
+import { activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
+import { focusPaneKeyOf, isEqualizeKey } from "../lib/keymap";
 import { dropTargetAt, paneBoxes, type DropTarget } from "./drop";
+import { MIN_SPLIT_SHARE } from "./reducer";
 import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
@@ -156,6 +158,29 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
     endResizeSession();
   }, []);
   useEffect(() => endDragSession, [endDragSession]);
+
+  // ⌃⌘ + an arrow: the pane that way ON SCREEN (the rendered boxes, not the
+  // tree: a column beside a row has more than one neighbour a tree walk
+  // could pick). ⌘⌥= evens every split of the tab. Capture phase, ahead of
+  // xterm's arrows; a lone pane leaves the keys alone. The stage's own keys,
+  // so they ride its chunk, not the boot path.
+  useEffect(() => {
+    const onPaneKey = (e: KeyboardEvent) => {
+      const dir = focusPaneKeyOf(e);
+      const even = !dir && isEqualizeKey(e);
+      if (!dir && !even) return;
+      const s = store.getState();
+      const current = s.sets[s.activeKey];
+      const tab = current ? activeTabOf(current) : null;
+      if (!tab || !isSplit(tab.root)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (dir) dispatch({ type: "focusPane", dir, rects: paneBoxes(tabsRef.current, tab.id) });
+      else dispatch({ type: "equalize" });
+    };
+    window.addEventListener("keydown", onPaneKey, true);
+    return () => window.removeEventListener("keydown", onPaneKey, true);
+  }, [dispatch, store]);
   const targetAt = useCallback(
     (tabId: string, at: { x: number; y: number }): DropTarget | null => {
       const s = store.getState();
