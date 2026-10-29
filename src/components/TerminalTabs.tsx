@@ -54,7 +54,9 @@ import { beginTerminalSwap } from "../lib/terminalSwap";
 import { isAnswerInput } from "../lib/terminalInput";
 import { beginMeasure, endMeasure } from "../workbench/perf";
 import type { WallData } from "../workbench/model";
-import { EMPTY_WALL, sameWall } from "../workbench/wall";
+import { EMPTY_WALL, sameWall, type WallFrame } from "../workbench/wall";
+
+export type { WallFrame } from "../workbench/wall";
 import { rafCoalesce } from "../lib/raf";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
 import { workSignal } from "../lib/termTitle";
@@ -202,6 +204,31 @@ interface TerminalTabsProps {
    *  stays mounted underneath (display:none). An id that isn't open is
    *  ignored. */
   solo?: string | null;
+  /** Several walls on screen at once (W5, D7): the one layer spans them
+   *  all, and this wall — the one the component works on, `wallKey` — sits
+   *  in `frame`, fractions of the layer. Absent, it fills the layer. */
+  frame?: WallFrame | null;
+  /** The other walls on screen, each at its own frame: their tiles show
+   *  live, laid out by the same grid, and a press on one makes that wall
+   *  this one (`onPeerFocus`), so every gesture still works on one wall. A
+   *  terminal is on one wall only, so no view ever moves to a new parent. */
+  peers?: readonly PeerWall[];
+  onPeerFocus?: (wallKey: string) => void;
+}
+
+/** Another wall on screen beside this one. */
+export interface PeerWall {
+  key: string;
+  tiles: readonly string[];
+  zoomed: string | null;
+  frame: WallFrame;
+}
+
+const FULL_FRAME: WallFrame = { left: 0, top: 0, width: 1, height: 1 };
+
+/** `r` (fractions of a wall) as fractions of the layer the wall sits in. */
+function inFrame<T extends { left: number; top: number; width: number; height: number }>(r: T, f: WallFrame): T {
+  return { ...r, left: f.left + r.left * f.width, top: f.top + r.top * f.height, width: r.width * f.width, height: r.height * f.height };
 }
 
 // The tile cap is the workbench's (`MAX_WALL_TILES`): a full wall opens a
@@ -383,6 +410,9 @@ export const TerminalTabs = memo(
       agentSessions,
       onSessionAction,
       solo = null,
+      frame = null,
+      peers,
+      onPeerFocus,
     }: TerminalTabsProps,
     ref,
   ) {
@@ -566,6 +596,8 @@ export const TerminalTabs = memo(
   }, [tiles, focusIdx, zoomed, pinned, wallKey, onWallChange]);
 
   const paneContainerRef = useRef<HTMLDivElement | null>(null);
+  // This wall's box in the layer (all of it, unless walls sit side by side).
+  const wallBoxRef = useRef<HTMLDivElement | null>(null);
   // Tile wrappers keyed by terminal ID, not index — the live drag path and the
   // hover outline write styles through this map without a render.
   const tileElsRef = useRef(new Map<string, HTMLElement>());
@@ -612,13 +644,22 @@ export const TerminalTabs = memo(
   // The current shape, with hysteresis against its own previous value so a
   // 2px container change can't flip the arrangement.
   const shapeRef = useRef<GridShape | null>(null);
+  // This wall's own box: the layer's, or its frame of it (W5's walls side
+  // by side). The grid shapes to it.
+  const wallFrame = frame ?? FULL_FRAME;
+  const frameRef = useRef(wallFrame);
+  frameRef.current = wallFrame;
+  const wallSize = useMemo<SizePx>(
+    () => ({ width: containerSize.width * wallFrame.width, height: containerSize.height * wallFrame.height }),
+    [containerSize, wallFrame.width, wallFrame.height],
+  );
   const shape = useMemo(() => {
-    const next = gridShapeFor(tiles.length, containerSize, {
+    const next = gridShapeFor(tiles.length, wallSize, {
       current: shapeRef.current ?? undefined,
     });
     shapeRef.current = next;
     return next;
-  }, [tiles.length, containerSize]);
+  }, [tiles.length, wallSize]);
 
   // One-time lazy migration of the legacy two-pane split ratio. The old key
   // stays in place and is never written again (rollback safety).
@@ -643,9 +684,27 @@ export const TerminalTabs = memo(
   fractionsRef.current = fractions;
   const rects = useMemo(() => tileRects(shape, fractions), [shape, fractions]);
   const gutterList = useMemo(
-    () => gutters(shape, fractions, containerSize),
-    [shape, fractions, containerSize],
+    () => gutters(shape, fractions, wallSize),
+    [shape, fractions, wallSize],
   );
+  // The other walls on screen, each laid out by the same grid rules at its
+  // own size; which wall each of their terminals is on.
+  const peerTiles = useMemo(() => {
+    const out = new Map<string, { key: string; rect: TileRect | null; zoomed: boolean; frame: WallFrame }>();
+    for (const peer of peers ?? []) {
+      const size = { width: containerSize.width * peer.frame.width, height: containerSize.height * peer.frame.height };
+      const peerShape = gridShapeFor(peer.tiles.length, size);
+      const peerRects = tileRects(peerShape, normalizeFractions(peerShape, fractionStore[shapeKey(peerShape)]));
+      peer.tiles.forEach((id, i) => {
+        if (tiles.includes(id)) return;
+        const zoomedHere = peer.zoomed === id;
+        out.set(id, { key: peer.key, rect: peer.zoomed && !zoomedHere ? null : (peerRects[i] ?? null), zoomed: zoomedHere, frame: peer.frame });
+      });
+    }
+    return out;
+  }, [peers, containerSize, fractionStore, tiles]);
+  const peerIdsRef = useRef(peerTiles);
+  peerIdsRef.current = peerTiles;
 
   // The live drag path: position every tile wrapper directly, keyed by ID.
   // With each header INSIDE its wrapper, nothing outside a wrapper needs
@@ -655,9 +714,11 @@ export const TerminalTabs = memo(
   const applyRects = useCallback((rs: readonly TileRect[]) => {
     const els = tileElsRef.current;
     const ids = tilesRef.current;
-    for (const r of rs) {
-      const el = els.get(ids[r.index]);
+    const f = frameRef.current;
+    for (const raw of rs) {
+      const el = els.get(ids[raw.index]);
       if (!el) continue;
+      const r = inFrame(raw, f);
       el.style.left = pct(r.left);
       el.style.top = pct(r.top);
       el.style.width = pct(r.width);
@@ -708,7 +769,7 @@ export const TerminalTabs = memo(
   // visibility test should be re-evaluated.
   const handleActivity = useCallback(
     (id: string) => {
-      const visibleNow = tiles.includes(id);
+      const visibleNow = tiles.includes(id) || peerIdsRef.current.has(id);
       if (!visibleNow || collapsed) {
         setUnseen((prev) => {
           if (prev.has(id)) return prev;
@@ -909,12 +970,12 @@ export const TerminalTabs = memo(
     setUnseen((prev) => {
       let changed = false;
       const next = new Set(prev);
-      for (const vid of tiles) {
+      for (const vid of [...tiles, ...peerTiles.keys()]) {
         if (next.delete(vid)) changed = true;
       }
       return changed ? next : prev;
     });
-  }, [tiles, collapsed]);
+  }, [tiles, peerTiles, collapsed]);
 
   // Notify the host whenever the focused terminal changes so post-submit PTY
   // injects and cwd-follow polling target the terminal being watched.
@@ -1894,14 +1955,17 @@ export const TerminalTabs = memo(
   // TerminalView is display:none internally already, so nothing changes for
   // the PTY.
   const wrapperStyle = (
-    rect: TileRect | null,
+    raw: TileRect | null,
     isZoomed: boolean,
     hiddenByZoom: boolean,
+    f: WallFrame = wallFrame,
   ): CSSProperties => {
-    if (isZoomed) return { position: "absolute", inset: 0, overflow: "hidden" };
-    if (!rect || hiddenByZoom) {
+    // A zoom fills its wall: the layer, or the wall's frame of it.
+    if (isZoomed) return f === FULL_FRAME ? { position: "absolute", inset: 0, overflow: "hidden" } : { position: "absolute", left: pct(f.left), top: pct(f.top), width: pct(f.width), height: pct(f.height), overflow: "hidden" };
+    if (!raw || hiddenByZoom) {
       return { position: "absolute", inset: 0, display: "none" };
     }
+    const rect = inFrame(raw, f);
     // Explicit width/height (never right/bottom) so the live drag path is a
     // uniform four-property write for every tile. No will-change: several
     // promoted layers each holding a WebGL canvas is exactly the compositing
@@ -1928,26 +1992,29 @@ export const TerminalTabs = memo(
       )}
       <TerminalMenuDataContext.Provider value={menuData}>
       <div ref={paneContainerRef} className="flex-1 relative">
-        {wallKey !== null && soloId === null && tiles.length === 0 && (
-          // A wall with nothing on it (a fresh Terminals tab): one way to
-          // start, never a shell spawned unasked.
-          <div className="rl-wall-empty" role="status">
-            <p>No terminals on this wall</p>
-            <button type="button" onClick={() => handlersRef.current.addTab(null)}>
-              New terminal
-            </button>
-          </div>
-        )}
+        {soloId === null &&
+          (peers ?? []).map((peer) =>
+            peer.tiles.length === 0 ? (
+              // Another wall on screen with nothing on it: a press makes it
+              // this wall, whose own empty state offers a terminal.
+              <div key={`peer-empty-${peer.key}`} className="rl-wall-empty rl-wall-peer-empty" role="status" style={{ position: "absolute", left: pct(peer.frame.left), top: pct(peer.frame.top), width: pct(peer.frame.width), height: pct(peer.frame.height) }} onPointerDown={() => onPeerFocus?.(peer.key)}>
+                <p>No terminals on this wall</p>
+              </div>
+            ) : null,
+          )}
         {tabs.map((t) => {
           const tileIndex = tiles.indexOf(t.id);
           const tiled = tileIndex !== -1;
-          const rect = tiled ? rects[tileIndex] : null;
+          // On another wall on screen (W5): live at that wall's place, and a
+          // press makes that wall this one.
+          const peer = !tiled && soloId === null ? peerTiles.get(t.id) : undefined;
+          const rect = tiled ? rects[tileIndex] : (peer?.rect ?? null);
           // Solo outranks the wall's own layout and zoom, without touching
           // either: the tile keeps its rect for when the view comes back.
           const isSolo = soloId === t.id;
-          const isZoomed = soloId === null ? zoomed === t.id : isSolo;
-          const hiddenByZoom = soloId === null ? zoomed !== null && !isZoomed : !isSolo;
-          const visible = (tiled || isSolo) && !collapsed && !hiddenByZoom;
+          const isZoomed = peer ? peer.zoomed : soloId === null ? zoomed === t.id : isSolo;
+          const hiddenByZoom = peer ? !peer.zoomed && !peer.rect : soloId === null ? zoomed !== null && !isZoomed : !isSolo;
+          const visible = (tiled || isSolo || !!peer) && !collapsed && !hiddenByZoom;
           const ident = identity.byId.get(t.id);
           // What this terminal is doing and on, beside its name. Same
           // derivation the tile menu uses (`workLine`) — just no longer
@@ -1973,19 +2040,21 @@ export const TerminalTabs = memo(
               className="rl-tile-wrap"
               // Frames the tile in amber while its agent is blocked on you
               // (styles.css), on the wall and in a zoom alike.
-              data-term-state={tiled ? line.state : undefined}
-              style={wrapperStyle(rect, isZoomed, hiddenByZoom)}
+              data-term-state={tiled || peer ? line.state : undefined}
+              data-peer-wall={peer?.key}
+              style={wrapperStyle(rect, isZoomed, hiddenByZoom, peer?.frame)}
+              onPointerDownCapture={peer ? () => onPeerFocus?.(peer.key) : undefined}
             >
-              {tiled && soloId === null && ident && (
+              {(tiled || peer) && soloId === null && ident && (
                 // The boundary wraps the HEADER ELEMENT ONLY — around the
                 // whole wrapper it would unmount the TerminalView on a header
                 // crash, which would discard its local rendered history. A
                 // crashed header just disappears; the shell keeps running.
                 <ErrorBoundary fallback={() => null}>
                   <TerminalTileHeader
-                    tile={tileIndex}
+                    tile={tiled ? tileIndex : (peers?.find((w) => w.key === peer?.key)?.tiles.indexOf(t.id) ?? 0)}
                     identity={ident}
-                    focused={tileIndex === focusIdx}
+                    focused={tiled && tileIndex === focusIdx}
                     zoomed={isZoomed}
                     pinned={pinned.has(t.id)}
                     state={line.state}
@@ -2026,23 +2095,38 @@ export const TerminalTabs = memo(
             </div>
           );
         })}
-        {!collapsed && zoomed === null && soloId === null && (
-          // Null fallback: a crashed gutter layer just disappears (resize the
-          // dock to get it back); the tiles keep their shells. ONE boundary
-          // around the whole layer, not one per gutter.
-          <ErrorBoundary fallback={() => null}>
-            {gutterList.map((g) => (
-              <TileGutter
-                key={g.id}
-                gutter={g}
-                containerRef={paneContainerRef}
-                onLive={handleGutterLive}
-                onCommit={handleGutterCommit}
-                onEven={handleGutterEven}
-              />
-            ))}
-          </ErrorBoundary>
-        )}
+        {/* This wall's own box in the layer: the gutters measure and sit in
+            it, and so does its empty state. The box itself takes no
+            pointer (its children do, styles.css): tiles show through it. */}
+        <div ref={wallBoxRef} className="rl-wall-frame" style={{ position: "absolute", left: pct(wallFrame.left), top: pct(wallFrame.top), width: pct(wallFrame.width), height: pct(wallFrame.height), pointerEvents: "none" }}>
+          {wallKey !== null && soloId === null && tiles.length === 0 && (
+            // A wall with nothing on it (a fresh Terminals tab): one way to
+            // start, never a shell spawned unasked.
+            <div className="rl-wall-empty" role="status">
+              <p>No terminals on this wall</p>
+              <button type="button" onClick={() => handlersRef.current.addTab(null)}>
+                New terminal
+              </button>
+            </div>
+          )}
+          {!collapsed && zoomed === null && soloId === null && (
+            // Null fallback: a crashed gutter layer just disappears (resize the
+            // dock to get it back); the tiles keep their shells. ONE boundary
+            // around the whole layer, not one per gutter.
+            <ErrorBoundary fallback={() => null}>
+              {gutterList.map((g) => (
+                <TileGutter
+                  key={g.id}
+                  gutter={g}
+                  containerRef={wallBoxRef}
+                  onLive={handleGutterLive}
+                  onCommit={handleGutterCommit}
+                  onEven={handleGutterEven}
+                />
+              ))}
+            </ErrorBoundary>
+          )}
+        </div>
       </div>
       </TerminalMenuDataContext.Provider>
       {closeAsk && createPortal(

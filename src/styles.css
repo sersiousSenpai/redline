@@ -5332,6 +5332,19 @@ html[data-rl-resizing] [data-rl-pane] {
   color: var(--color-ink);
 }
 .rl-wall-empty button:hover { background: var(--color-rule); }
+/* A wall's own box in the layer (TerminalTabs): it takes no pointer, its
+   gutters and its empty state do. */
+.rl-wall-frame > * { pointer-events: auto; }
+/* Several walls on screen at once (W5, D7): the one layer spans them all,
+   with whatever sits between them (a divider, a plan) showing through and
+   taking its own pointer; each wall's tiles and empty state are opaque. */
+.rl-wb-terminal-layer[data-walls] { background: transparent; pointer-events: none; }
+.rl-wb-terminal-layer[data-walls] .rl-tile-wrap,
+.rl-wb-terminal-layer[data-walls] [data-recovery],
+.rl-wb-terminal-layer[data-walls] .rl-wall-peer-empty,
+.rl-wb-terminal-layer[data-walls] .rl-wall-frame > * { pointer-events: auto; }
+.rl-wb-terminal-layer[data-walls] .rl-tile-wrap,
+.rl-wb-terminal-layer[data-walls] .rl-wall-empty { background: var(--color-paper); }
 
 /* Print (File ▸ Print… on a plan or a file, lib/printPane): the app's own
    webview prints only the copy in #rl-print-root, as long as it needs to

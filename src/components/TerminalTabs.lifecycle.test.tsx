@@ -22,7 +22,7 @@ vi.mock("./TerminalView", async () => {
 });
 vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, pinned, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; pinned: boolean; actions: { onPick: (tile: number, id: string) => void; onRename?: (id: string, name: string) => void; onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void; onTogglePin: (id: string) => void; onDragStart: (id: string, e: unknown) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""} data-pinned={pinned}><button data-pin={identity.id} onClick={() => actions.onTogglePin(identity.id)}>Pin</button><button data-pick={identity.id} onClick={() => actions.onPick(tile, (globalThis as { __pick?: string }).__pick!)}>Pick</button><button data-rename={identity.id} onClick={() => actions.onRename?.(identity.id, "api server")}>Rename</button><span data-label={identity.id}>{(identity as { label?: string }).label}</span><span data-drag={identity.id} onPointerDown={(e) => actions.onDragStart(identity.id, e)}>Drag</span><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
-import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
+import { TerminalTabs, type PeerWall, type TerminalTabsHandle, type WallFrame } from "./TerminalTabs";
 import { TERMINAL_WORKSPACE_KEY } from "../lib/terminalWorkspace";
 import { __resetTerminalSwapForTest } from "../lib/terminalSwap";
 import { lastMeasure, resetMeasuresForTest } from "../workbench/perf";
@@ -49,7 +49,7 @@ const click = async (selector: string) => {
 let walls: Record<string, WallData> = {};
 let wallKey: string | null = "w1";
 let changes: [string, WallData][] = [];
-type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null };
+type MountProps = { onStatesChange?: (states: ReadonlyMap<string, { state: string; label: string }>) => void; collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null; frame?: WallFrame | null; peers?: PeerWall[]; onPeerFocus?: (key: string) => void };
 let props: MountProps = {};
 const order = () => (wallKey ? walls[wallKey]?.tiles ?? [] : []);
 function view() {
@@ -69,6 +69,9 @@ function view() {
         onFocusedCwd={props.onFocusedCwd}
         onActiveTabChange={props.onActiveTabChange}
         solo={props.solo ?? null}
+        frame={props.frame ?? null}
+        peers={props.peers}
+        onPeerFocus={props.onPeerFocus}
       />
     </StrictMode>
   );
@@ -784,5 +787,54 @@ describe("solo: an Agent pane's CLI view", () => {
     expect(active).toHaveBeenLastCalledWith(b);
     await render(null, active);
     expect(active).toHaveBeenLastCalledWith(a);
+  });
+});
+
+describe("two walls on screen, one layer (W5, D7)", () => {
+  const wrap = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)!.closest<HTMLElement>(".rl-tile-wrap")!;
+  it("this wall's tiles sit in its frame, the other wall's live in theirs, and a press there asks for that wall; no view remounts", async () => {
+    await mount();
+    const a = await open();
+    const b = await open();
+    const c = await open(true);
+    walls = { ...walls, w2: { tiles: [c], focus: 0, zoomed: null, pinned: [] } };
+    const onPeerFocus = vi.fn();
+    const left: WallFrame = { left: 0, top: 0, width: 0.5, height: 1 };
+    const right: WallFrame = { left: 0.5, top: 0, width: 0.5, height: 1 };
+    await mount({ frame: left, peers: [{ key: "w2", tiles: [c], zoomed: null, frame: right }], onPeerFocus });
+    const nodes = new Map([a, b, c].map((id) => [id, host.querySelector(`[data-terminal-id="${id}"]`)]));
+    // Every tile of this wall is inside the left half.
+    for (const id of [a, b]) {
+      const st = wrap(id).style;
+      expect(parseFloat(st.left) + parseFloat(st.width)).toBeLessThanOrEqual(50.0001);
+    }
+    // The other wall's one tile fills the right half, shown and headed.
+    expect([wrap(c).style.left, wrap(c).style.top, wrap(c).style.width, wrap(c).style.height]).toEqual(["50%", "0%", "50%", "100%"]);
+    expect(host.querySelector(`[data-terminal-id="${c}"]`)!.getAttribute("data-visible")).toBe("true");
+    expect(host.querySelector(`[data-header-id="${c}"]`)!.getAttribute("data-focused")).toBe("false");
+    expect(wrap(c).dataset.peerWall).toBe("w2");
+    // The gutters and the empty state live in this wall's own box.
+    const box = host.querySelector<HTMLElement>(".rl-wall-frame")!;
+    expect([box.style.left, box.style.width]).toEqual(["0%", "50%"]);
+    await act(async () => { wrap(c).dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })); });
+    expect(onPeerFocus).toHaveBeenCalledWith("w2");
+    // The host makes w2 this wall: the same views, re-pointed.
+    wallKey = "w2";
+    await mount({ frame: right, peers: [{ key: "w1", tiles: [a, b], zoomed: null, frame: left }], onPeerFocus });
+    for (const [id, node] of nodes) expect(host.querySelector(`[data-terminal-id="${id}"]`)).toBe(node);
+    expect(wrap(c).dataset.peerWall).toBeUndefined();
+    expect(wrap(a).dataset.peerWall).toBe("w1");
+    expect(host.querySelector(`[data-terminal-id="${a}"]`)!.getAttribute("data-visible")).toBe("true");
+  });
+
+  it("the other wall's zoom shows its zoomed tile over its whole frame and hides the rest of it", async () => {
+    await mount();
+    await open();
+    const c = await open(true);
+    const d = await open(true);
+    const right: WallFrame = { left: 0.5, top: 0, width: 0.5, height: 1 };
+    await mount({ frame: { left: 0, top: 0, width: 0.5, height: 1 }, peers: [{ key: "w2", tiles: [c, d], zoomed: d, frame: right }] });
+    expect([wrap(d).style.left, wrap(d).style.width]).toEqual(["50%", "50%"]);
+    expect(wrap(c).style.display).toBe("none");
   });
 });
