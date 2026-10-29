@@ -2,9 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePoll } from "../hooks/usePoll";
+import { readMemoryStatus } from "../lib/memoryStatus";
 
 import { useMenuOverlay } from "./menuOverlay";
 
@@ -117,7 +117,7 @@ export function MemoryStatusPill({
   usePoll(() => setNow(Date.now()), LABEL_TICK_MS, { pauseWhenHidden: true, leading: false });
   const load = useCallback(async () => {
     try {
-      const next = await invoke<MemoryStatus>("memory_status");
+      const next = await readMemoryStatus<MemoryStatus>();
       const key = JSON.stringify(next);
       if (key !== statusKeyRef.current) {
         statusKeyRef.current = key;

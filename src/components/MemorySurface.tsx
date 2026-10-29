@@ -79,6 +79,7 @@ import {
   type LibrarianRun,
 } from "../lib/librarian";
 import { relativeTime, type MemoryStatus } from "./MemoryStatusPill";
+import { readMemoryStatus } from "../lib/memoryStatus";
 import { ClassTreeRow, SettingsTab as PortabilitySections } from "./MemoryInspector";
 
 // The Memory surface — the lake as a main-pane citizen (Memory-as-a-Second-
@@ -2840,9 +2841,16 @@ export function MemorySurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabNonce]);
 
+  // Shared with the status chip (lib/memoryStatus.ts), and kept by value: a
+  // re-read that found nothing new re-renders nothing.
+  const statusKeyRef = useRef("");
   const loadStatus = useCallback(async () => {
     try {
-      setStatus(await invoke<MemoryStatus>("memory_status"));
+      const next = await readMemoryStatus<MemoryStatus>();
+      const key = JSON.stringify(next);
+      if (key === statusKeyRef.current) return;
+      statusKeyRef.current = key;
+      setStatus(next);
     } catch {
       /* the hero degrades to em-dashes */
     }
