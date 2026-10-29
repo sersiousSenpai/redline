@@ -301,6 +301,68 @@ describe("merge by drag and the pane menu (W5)", () => {
     expect(s.tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
   });
 
+  /** A mouse's pointer event, its buttons as WebKit reports them. */
+  const mouse = (type: string, clientX: number, clientY: number, buttons: number) => {
+    const ev = at(type, clientX, clientY);
+    Object.defineProperty(ev, "pointerType", { value: "mouse" });
+    Object.defineProperty(ev, "buttons", { value: buttons });
+    return ev;
+  };
+  const layoutT1 = () => {
+    host.querySelector<HTMLElement>('[role="tablist"]')!.getBoundingClientRect = rect(0, 0, 800, 34);
+    host.querySelector<HTMLElement>('.rl-wb-tab-body[data-wb-tab="t1"] .rl-wb-pane[data-pane-id="p1"]')!.getBoundingClientRect = rect(0, 34, 800, 600);
+  };
+
+  // W5 walk: over a wall the release never reached the strip; the zone went
+  // on following the pointer and only an extra click dropped the tab.
+  it("a release that never arrives is read off the next move (the button is up): the drop lands there, no extra click", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    layoutT1();
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    await act(async () => { t2.dispatchEvent(mouse("pointerdown", 150, 17, 1)); });
+    await act(async () => { window.dispatchEvent(mouse("pointermove", 760, 300, 1)); });
+    expect(document.body.querySelector(".rl-wb-drop-zone")).not.toBeNull();
+    // Let go: no pointerup. The next move comes with the button up.
+    await act(async () => { window.dispatchEvent(mouse("pointermove", 762, 301, 0)); });
+    expect(document.body.querySelector(".rl-wb-drop-zone")).toBeNull();
+    expect(isResizing()).toBe(false);
+    const s = store.getState().sets.home!;
+    expect(s.order).toEqual(["t1"]);
+    expect(s.tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
+  });
+
+  it("a release heard in the capture phase lands even when what is under the pointer keeps it", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    layoutT1();
+    const keeper = document.createElement("div");
+    keeper.addEventListener("pointerup", (e) => e.stopPropagation());
+    document.body.append(keeper);
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
+    await act(async () => { keeper.dispatchEvent(at("pointerup", 760, 300)); });
+    expect(store.getState().sets.home!.order).toEqual(["t1"]);
+    keeper.remove();
+  });
+
+  it("a press whose release was lost while the window was away never swallows the next one", async () => {
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await strip();
+    layoutT1();
+    const t1 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t1"]')!;
+    const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
+    // A tab pressed, then another app came forward and took the release.
+    await act(async () => { t1.dispatchEvent(at("pointerdown", 50, 17)); });
+    // Back: the first press, on another tab, drags that tab.
+    await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
+    await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
+    expect(document.body.querySelector(".rl-wb-drop-zone")).not.toBeNull();
+    await act(async () => { window.dispatchEvent(at("pointerup", 760, 300)); });
+    expect(store.getState().sets.home!.order).toEqual(["t1"]);
+  });
+
   it("the tab in front cannot merge into itself: no zone, nothing moves", async () => {
     await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
     await strip();

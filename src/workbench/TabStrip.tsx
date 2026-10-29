@@ -307,8 +307,10 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       const wasOut = p.dragging && p.out;
       if (wasOut) latest.current.onDragOut?.(p.id, null);
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
+      window.removeEventListener("dragstart", noNativeDrag, true);
+      window.removeEventListener("blur", onBlur);
       try {
         if (p.el.hasPointerCapture?.(p.pointerId)) p.el.releasePointerCapture(p.pointerId);
       } catch {
@@ -360,6 +362,14 @@ export function TabStrip(props: TabStripProps): JSX.Element {
     const onMove = (e: PointerEvent) => {
       const p = press.current;
       if (!p || e.pointerId !== p.pointerId) return;
+      // The mouse's button is up and no pointerup reached us (a release over
+      // the terminal wall was lost, W5 walk): that release was the drop. It
+      // lands here, at once, never on an extra click while the zone follows
+      // the pointer.
+      if (e.pointerType === "mouse" && (e.buttons & 1) === 0) {
+        endPress(true, e.clientX, e.clientY);
+        return;
+      }
       if (!p.dragging) {
         if (Math.max(Math.abs(e.clientX - p.startX), Math.abs(e.clientY - p.startY)) < DRAG_SLOP) return;
         p.dragging = true;
@@ -386,6 +396,11 @@ export function TabStrip(props: TabStripProps): JSX.Element {
     const onCancel = (e: PointerEvent) => {
       if (press.current && e.pointerId === press.current.pointerId) endPress(false, e.clientX);
     };
+    // A press on a tab never becomes the webview's own drag (its repo mark is
+    // an image): WebKit cancels the pointer when one starts.
+    const noNativeDrag = (e: DragEvent) => e.preventDefault();
+    // The window losing focus mid-press takes the release with it.
+    const onBlur = () => endPress(false, 0);
     abort.current = () => endPress(false, 0);
 
     return {
@@ -462,7 +477,11 @@ export function TabStrip(props: TabStripProps): JSX.Element {
         }
       },
       pointerDown: (id, e) => {
-        if (e.button !== 0 || press.current) return;
+        if (e.button !== 0) return;
+        // A press still in flight is a stale one: its release never came (the
+        // window lost the mouse mid-press — another app came forward). It
+        // must not swallow this press, the first after the window is back.
+        if (press.current) endPress(false, 0);
         swallowClick.current = null;
         if ((e.target as Element).closest?.(".rl-wb-tab-x, .rl-wb-rename")) return;
         const el = e.currentTarget;
@@ -473,9 +492,13 @@ export function TabStrip(props: TabStripProps): JSX.Element {
         } catch {
           /* jsdom, or a pointer already captured elsewhere */
         }
+        // The release and a cancel are heard in the capture phase, ahead of
+        // anything under the pointer (a wall's tiles) that keeps them.
         window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        window.addEventListener("pointercancel", onCancel);
+        window.addEventListener("pointerup", onUp, true);
+        window.addEventListener("pointercancel", onCancel, true);
+        window.addEventListener("dragstart", noNativeDrag, true);
+        window.addEventListener("blur", onBlur);
       },
     };
   }, [focusTab]);
