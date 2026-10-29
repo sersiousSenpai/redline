@@ -293,8 +293,8 @@ mod tests {
     /// Cosmos, Ask) calls takes the ONE shared `Mutex<Connection>` — the same
     /// lock a `VACUUM INTO` backup, the canary and embedding ticks hold for
     /// seconds. A sync command waits for it on the macOS main thread, and the
-    /// app beach-balls (the 2026-09-29 diag: main thread inside
-    /// `get_work_graph` → SQLite `pagerStress`). Pinned by name, so a refactor
+    /// app beach-balls (the 2026-09-29 diag: main thread inside the since
+    /// removed work graph's `get_work_graph` → SQLite `pagerStress`). Pinned by name, so a refactor
     /// that puts one back on the main thread fails here. The mirror's commands
     /// write the vault on disk (and two ask for its folder first).
     #[test]
@@ -333,9 +333,6 @@ mod tests {
         ] {
             assert_off_main_command(lib, "lib.rs", func);
         }
-        let work = include_str!("work.rs");
-        assert_off_main_command(work, "work.rs", "get_work_graph");
-        assert_off_main_command(work, "work.rs", "work_ready_count");
         let memchat = include_str!("memchat.rs");
         assert_off_main_command(memchat, "memchat.rs", "memchat_thread");
         assert_off_main_command(memchat, "memchat.rs", "memchat_clear");

@@ -42,7 +42,7 @@ use crate::db::Database;
 #[allow(unused_imports)]
 pub use polis_store::record::{
     record_browse_event, record_decision, record_prompt, record_prompt_at,
-    record_revision_event, record_session_link, record_work_event, resolve_parent, BrowseAction,
+    record_revision_event, record_session_link, resolve_parent, BrowseAction,
     BrowseEventInput, DecisionInput, PromptInput, ThreadRef,
 };
 #[allow(unused_imports)]

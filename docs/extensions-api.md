@@ -111,6 +111,6 @@ Delivery is sequential per extension from a bounded queue (overflow drops the ol
 - `drafter.suggest` — write tracked suggestions into a live draft
 - `review.annotate` — post and clear findings in a live code review
 - `ui.panel` — render a sanitized markdown panel in the Extensions view
-- `work.file` — file new items into the work graph
-- `work.claim` — claim and close work-graph items
+- `work.file` — retired: grants no route (the work graph was removed)
+- `work.claim` — retired: grants no route (the work graph was removed)
 

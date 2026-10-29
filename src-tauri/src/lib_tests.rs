@@ -1364,24 +1364,16 @@ fn manual_plan_state_records_completion_reopen_and_refuses_a_held_plan() {
 }
 
 #[test]
-fn moved_project_survives_upsert_and_moves_origin_work() {
+fn moved_project_survives_upsert() {
     let store = make_store(); let md = "# Plan\n\nBody.\n";
     store.upsert_plan("moved", "/old", md.into(), reparse_sections(md), true, false);
     store.set_status("moved", SessionStatus::Approved);
-    store.database().insert_work_item(&crate::work::WorkItem {
-        id: "move-work".into(), title: "Linked work".into(), body: None,
-        status: "open".into(), priority: 2, kind: "task".into(), assignee: None,
-        claimed_at: None, lease_expires_at: None, closed_at: None, close_reason: None,
-        defer_until: None, origin_kind: Some("session".into()), origin_id: Some("moved".into()),
-        project_path: Some("/old".into()), pinned: false, created_at: 1, updated_at: 1,
-    }).unwrap();
     let dir = std::env::temp_dir().join(format!("redline-move-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     set_session_project_inner(&store, "moved", dir.to_str().unwrap()).unwrap();
     let path = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
     let moved = store.get("moved").unwrap();
     assert_eq!(moved.project_path, path);
-    assert_eq!(store.database().get_work_item("move-work").unwrap().project_path.as_deref(), Some(path.as_str()));
     store.database().upsert_session(&moved).unwrap();
     assert_eq!(store.database().load_session("moved").unwrap().unwrap().project_path, path);
     assert!(set_session_project_inner(&store, "moved", "/does-not-exist/redline").is_err());
@@ -1943,81 +1935,5 @@ fn a_build_approval_carries_the_plan_exits_input_and_nothing_else_does() {
     assert!(not_a_plan["hookSpecificOutput"].get("updatedInput").is_none());
     // Codex's Stop answer is unchanged by it.
     assert_eq!(codex_stop_response(answer_for_build(approval_response("ok"), &payload)), json!({}));
-}
-
-// --- T4.2: landing a plan closes the work it opened ---------------------
-
-/// `work_items` carried 595 rows and had never closed one — every close
-/// path existed, none was reached from a transition. Landing is the
-/// transition that means "done"; nothing else is.
-#[test]
-fn landing_a_plan_closes_its_sessions_open_items() {
-    use crate::work::WorkItem;
-    let db = Database::open_in_memory().unwrap();
-    let item = |id: &str, origin_kind: &str, origin_id: &str, status: &str| WorkItem {
-        id: id.to_string(),
-        title: format!("item {id}"),
-        body: None,
-        status: status.to_string(),
-        priority: 2,
-        kind: "task".to_string(),
-        assignee: None,
-        claimed_at: None,
-        lease_expires_at: None,
-        closed_at: None,
-        close_reason: None,
-        defer_until: None,
-        origin_kind: Some(origin_kind.to_string()),
-        origin_id: Some(origin_id.to_string()),
-        project_path: Some("/repo".to_string()),
-        pinned: false,
-        created_at: 1,
-        updated_at: 1,
-    };
-    // Two open items this session opened…
-    db.insert_work_item(&item("w-1", "session", "s1", "open"))
-        .unwrap();
-    db.insert_work_item(&item("w-2", "session", "s1", "open"))
-        .unwrap();
-    // …one already closed (must not be re-stamped)…
-    db.insert_work_item(&item("w-3", "session", "s1", "closed"))
-        .unwrap();
-    // …an item filed from somewhere else about this plan…
-    db.insert_work_item(&item("w-4", "plan_run", "s1", "open"))
-        .unwrap();
-    // …and another session's work.
-    db.insert_work_item(&item("w-5", "session", "s2", "open"))
-        .unwrap();
-
-    // Only `landed` retires work.
-    assert!(run_state_closes_work("landed"));
-    for s in ["building", "approved"] {
-        assert!(!run_state_closes_work(s), "{s} must not close work");
-    }
-
-    let mut moved = close_run_work_items(&db, "s1");
-    moved.sort();
-    assert_eq!(moved, vec!["w-1".to_string(), "w-2".to_string()]);
-
-    let status = |id: &str| db.get_work_item(id).expect("row").status;
-    assert_eq!(status("w-1"), "closed");
-    assert_eq!(status("w-2"), "closed");
-    assert_eq!(
-        db.get_work_item("w-1").unwrap().close_reason.as_deref(),
-        Some("landed"),
-        "the reason names the transition that closed it"
-    );
-    assert_eq!(
-        status("w-4"),
-        "open",
-        "only items whose origin IS the session close"
-    );
-    assert_eq!(status("w-5"), "open", "another session's work is untouched");
-
-    // The already-closed row keeps its original stamp.
-    assert_eq!(db.get_work_item("w-3").unwrap().close_reason, None);
-
-    // Idempotent: landing twice moves nothing the second time.
-    assert!(close_run_work_items(&db, "s1").is_empty());
 }
 

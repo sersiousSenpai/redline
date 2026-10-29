@@ -828,7 +828,6 @@ pub struct SeatRosterEntry {
     pub charter: String,
     pub trigger: String,
     pub last_run_at: Option<i64>,
-    pub items_filed: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
@@ -868,7 +867,6 @@ pub fn roster(db: &Database) -> Vec<SeatRosterEntry> {
                 charter,
                 trigger,
                 last_run_at: st.and_then(|s| s.last_run_at),
-                items_filed: st.map(|s| s.items_filed).unwrap_or(0),
                 input_tokens: b.map(|b| b.input_tokens).unwrap_or(0),
                 output_tokens: b.map(|b| b.output_tokens).unwrap_or(0),
                 cache_read_tokens: b.map(|b| b.cache_read_tokens).unwrap_or(0),
@@ -1561,13 +1559,12 @@ mod tests {
         assert!(!lib.charter.is_empty() && !lib.trigger.is_empty());
         // A seat that never ran renders zeros, not gaps.
         let voice = r.iter().find(|e| e.seat == "voice").unwrap();
-        assert_eq!(voice.items_filed, 0);
         assert_eq!(voice.last_run_at, None);
         assert_eq!(voice.spawns, 0);
         // The rollup serializes camelCase for the FE.
         let json = serde_json::to_string(lib).unwrap();
         assert!(json.contains("\"lastRunAt\""));
-        assert!(json.contains("\"itemsFiled\""));
+        assert!(!json.contains("\"itemsFiled\""));
         assert!(json.contains("\"inputTokens\""));
     }
 }

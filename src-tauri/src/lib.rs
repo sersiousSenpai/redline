@@ -146,7 +146,6 @@ mod update;
 mod userconfig;
 mod voice;
 mod webview_guard;
-mod work;
 mod worktree;
 mod workspace_brief;
 
@@ -1082,44 +1081,9 @@ fn advance_run_state(app: &AppHandle, store: &SessionStore, session_id: &str, st
     }
 }
 
-/// Share work-item closing with manual completion without requiring a window.
+/// Set a plan's build state without requiring a window, for manual completion.
 fn advance_run_state_inner(store: &SessionStore, session_id: &str, state: &str) -> bool {
-    if !store.set_run_state(session_id, state) { return false; }
-    if run_state_closes_work(state) { close_run_work_items(&store.database(), session_id); }
-    true
-}
-
-/// Which build states retire the plan's open work. Exactly one: `landed` is
-/// the only transition that means "this plan is done".
-fn run_state_closes_work(state: &str) -> bool {
-    state == "landed"
-}
-
-/// Close the work a landed plan opened. Returns the ids that moved.
-///
-/// The seam behind `advance_run_state`'s `landed` transition, factored out so
-/// it is testable without an `AppHandle`. Scope is deliberately narrow: items
-/// whose origin IS this plan session. Librarian items keep their own
-/// close-then-recur cycle.
-fn close_run_work_items(db: &Database, session_id: &str) -> Vec<String> {
-    match db.close_open_work_items_for_origin("session", session_id, "landed", ledger::now_millis())
-    {
-        Ok(ids) => {
-            if !ids.is_empty() {
-                tracing::info!(
-                    session_id,
-                    count = ids.len(),
-                    items = ?ids,
-                    "plan landed — closed its session-origin work items"
-                );
-            }
-            ids
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, session_id, "failed to close work items on landing");
-            Vec::new()
-        }
-    }
+    store.set_run_state(session_id, state)
 }
 
 /// Safety net for a revise whose feedback was delivered into a held POST that
@@ -3360,15 +3324,6 @@ async fn run_server(state: AppState) {
                 .post(handle_review_annotations_add)
                 .delete(handle_review_annotations_clear),
         )
-        // Work graph (`work.rs` state plane): the durable item/edge store any
-        // agent files into and claims from. Reads are open like every other
-        // read surface; the writes carry the two work scopes. The handlers
-        // live in `work.rs` — tables, queries, and routes only (no spawning).
-        .route("/v1/work/ready", get(work::handle_work_ready))
-        .route("/v1/work/:id", get(work::handle_work_get))
-        .route("/v1/work", post(work::handle_work_file))
-        .route("/v1/work/:id/claim", post(work::handle_work_claim))
-        .route("/v1/work/:id/close", post(work::handle_work_close))
         // WASM extension surface (Elevation B3): the installed-extensions
         // snapshot (status, strikes, panel) and the one sanctioned UI slot —
         // an extension replaces its own sanitized markdown panel. The panel
@@ -5045,17 +5000,6 @@ fn submit_review_feedback(
         .latest_push_for_review(&review_id)
         .filter(|p| held_since.is_some_and(|t| p.created_at >= t));
     let payload = if approve {
-        // Producers wave: the approval LANDS the review — any annotation
-        // still unresolved files as a durable work item instead of dropping
-        // (it would otherwise never reach the agent: the approve payload
-        // carries no annotations).
-        let filed = review::file_unresolved_annotations(&review_state.db, &review_id);
-        if filed > 0 {
-            tracing::info!(
-                review_id = %review_id, filed,
-                "review landing filed unresolved annotations as work items"
-            );
-        }
         let msg = approve_message
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| review_feedback::DEFAULT_APPROVE_MESSAGE.to_string());
@@ -10398,14 +10342,7 @@ async fn librarian_agent(
     let prompt = librarian::build_librarian_prompt_from_digest(&digest);
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let (text, _session) = librarian::run_librarian(&db, &cwd, prompt).await?;
-    let result = librarian::parse_checklist(&text);
-    // Producers wave: the checklist lands as durable work items (deduped
-    // against the still-open backlog); the advisory strip renders unchanged.
-    let filed = librarian::file_checklist_items(&db, &result);
-    if filed > 0 {
-        tracing::info!(filed, "librarian checklist filed as work items");
-    }
-    Ok(result)
+    Ok(librarian::parse_checklist(&text))
 }
 
 // ---------------------------------------------------------------------------
@@ -10502,7 +10439,6 @@ async fn shipwright_agent(
 
     let now = ledger::now_millis();
     let mut duplicates = 0usize;
-    let mut fresh: Vec<(String, &shipwright::Finding)> = Vec::new();
     for f in &result.findings {
         let row = db::ShipwrightFinding {
             id: uuid::Uuid::new_v4().to_string(),
@@ -10521,17 +10457,9 @@ async fn shipwright_agent(
         };
         match db.insert_shipwright_finding(&row) {
             Ok(None) => duplicates += 1,
-            Ok(Some(id)) => fresh.push((id, f)),
+            Ok(Some(_)) => {}
             Err(e) => tracing::warn!(error = %e, "failed to persist a Shipwright finding"),
         }
-    }
-    // Producers wave: non-dismissed NEWLY-INSERTED findings file durable work
-    // items — the `(category, summary)` finding dedupe (covering dismissed
-    // findings too) is the idempotency backbone, so a duplicate or dismissed
-    // finding never reaches the filer.
-    let filed = shipwright::file_finding_items(&db, &fresh, &repo);
-    if filed > 0 {
-        tracing::info!(filed, "shipwright findings filed as work items");
     }
     let _ = db.append_journal(
         "shipwright_run",
@@ -11469,7 +11397,7 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "thumbs_prune",
     // The rest: the Localhost scan and stops (subprocesses, ports, project roots),
     // hook-conflict scans and file watches, browser workspaces on disk, Build
-    // Redline's patch and preflight, the work graph, Memory Ask's thread, a
+    // Redline's patch and preflight, Memory Ask's thread, a
     // page's appearance (waits on its webview), mission findings, and two memory
     // reads in lib.rs.
     "browser_set_appearance",
@@ -11481,7 +11409,6 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "dev_server_stop",
     "dev_server_stop_plan",
     "dev_servers_scan",
-    "get_work_graph",
     "memchat_clear",
     "memchat_thread",
     "mission_add_finding",
@@ -11489,7 +11416,6 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "scan_hook_conflicts",
     "unwatch_hook_conflicts",
     "watch_hook_conflicts",
-    "work_ready_count",
     // Downloads, loads and asks the end-of-turn model, each waiting on it.
     "turn_scorer",
     // Drives a model download to its end.
@@ -11711,8 +11637,6 @@ pub fn run() {
             apply_seat_picks,
             revert_seat_assignment,
             seat::get_seat_roster,
-            work::get_work_graph,
-            work::work_ready_count,
             userconfig::save_workspace,
             userconfig::list_harnesses,
             userconfig::harness_uninstall,

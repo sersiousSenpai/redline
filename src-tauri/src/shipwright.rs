@@ -335,64 +335,6 @@ pub fn findings_to_markdown(result: &ShipwrightResult, digest: &CodeDigest) -> S
 }
 
 // ---------------------------------------------------------------------------
-// The findings producer — fresh findings become durable work items
-// ---------------------------------------------------------------------------
-
-/// Producers wave: NEWLY-INSERTED findings file durable work items,
-/// `origin_kind="shipwright_finding"` / `origin_id=<finding id>` (provenance,
-/// never ownership). The caller hands over only the `(id, finding)` pairs
-/// `insert_shipwright_finding` actually wrote — its `(category, summary)`
-/// dedupe, which also covers DISMISSED findings, is the idempotency
-/// backbone: a dismissed finding or a re-worded duplicate never reaches this
-/// function, and a finding already filed never files twice (the provenance
-/// triple here is the belt). Rank maps onto the priority column exactly as
-/// the Librarian's does. The Shipwright seat produced these, so its
-/// `items_filed` moves by the count filed. Returns how many items filed.
-pub fn file_finding_items(db: &Database, fresh: &[(String, &Finding)], repo: &str) -> usize {
-    /// Ledger actor + seat whose `items_filed` accrues.
-    const SHIPWRIGHT_ACTOR: &str = "shipwright";
-    let mut filed = 0usize;
-    for (finding_id, f) in fresh {
-        let priority = f.priority.clamp(1, 3);
-        let mut body = format!("[{}] {}", f.category, f.proposal.trim());
-        if !f.evidence.trim().is_empty() {
-            body.push_str(&format!("\n\nEvidence: {}", f.evidence.trim()));
-        }
-        if !f.guard.trim().is_empty() {
-            body.push_str(&format!("\nGuard: {}", f.guard.trim()));
-        }
-        if !f.files.is_empty() {
-            body.push_str(&format!("\nFiles: {}", f.files.join(", ")));
-        }
-        match db.file_produced_work_item(
-            &f.title,
-            Some(&body),
-            "task",
-            "open",
-            priority,
-            "shipwright_finding",
-            Some(finding_id),
-            Some(repo),
-            None,
-            SHIPWRIGHT_ACTOR,
-        ) {
-            Ok(Some(_)) => filed += 1,
-            Ok(None) => {} // the belt: this finding's item already stands
-            Err(e) => tracing::warn!(
-                finding = %finding_id, error = %e,
-                "failed to file a shipwright-finding work item"
-            ),
-        }
-    }
-    if filed > 0 {
-        if let Err(e) = db.upsert_seat_stat(SHIPWRIGHT_ACTOR, None, filed as i64) {
-            tracing::warn!(error = %e, "failed to bump shipwright items_filed");
-        }
-    }
-    filed
-}
-
-// ---------------------------------------------------------------------------
 // Spawn + drive
 // ---------------------------------------------------------------------------
 
@@ -654,7 +596,7 @@ That's the lot."#;
         assert!(empty.contains("healthy tree"));
     }
 
-    // --- the findings producer ----------------------------------------------
+    // --- the findings dedupe ------------------------------------------------
 
     fn finding(title: &str) -> Finding {
         Finding {
@@ -699,45 +641,17 @@ That's the lot."#;
     }
 
     #[test]
-    fn fresh_findings_file_with_finding_provenance_and_seat_credit() {
+    fn a_finding_never_inserts_twice_and_dismissed_wordings_never_resurface() {
         let db = Database::open_in_memory().unwrap();
         let f = finding("No test workflow");
-        let fid = insert_row(&db, &f, false).expect("fresh finding inserts");
-        assert_eq!(file_finding_items(&db, &[(fid.clone(), &f)], "/repo"), 1);
-        let items = db.list_work_items(None, None, 50).unwrap();
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        assert_eq!(item.title, "No test workflow");
-        assert_eq!(item.origin_kind.as_deref(), Some("shipwright_finding"));
-        assert_eq!(item.origin_id.as_deref(), Some(fid.as_str()));
-        assert_eq!(item.project_path.as_deref(), Some("/repo"));
-        assert_eq!(item.priority, 1);
-        assert_eq!(item.status, "open");
-        let body = item.body.as_deref().unwrap();
-        assert!(body.contains("[ci_coverage]"));
-        assert!(body.contains("Evidence: 1112 tests"));
-        assert!(body.contains("Guard: the workflow"));
-        assert_eq!(db.get_seat_stat("shipwright").unwrap().items_filed, 1);
-        // The origin label arm resolves the finding id to its headline.
+        let fid = insert_row(&db, &f, false).unwrap();
+        // The finding's own headline labels its thread.
         assert_eq!(
             db.thread_label("shipwright_finding", &fid).as_deref(),
             Some("No test workflow")
         );
-        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
-    }
-
-    #[test]
-    fn a_finding_never_files_twice_and_dismissed_wordings_never_resurface() {
-        let db = Database::open_in_memory().unwrap();
-        let f = finding("No test workflow");
-        let fid = insert_row(&db, &f, false).unwrap();
-        assert_eq!(file_finding_items(&db, &[(fid.clone(), &f)], "/repo"), 1);
-        // The belt: re-filing the same finding id files nothing.
-        assert_eq!(file_finding_items(&db, &[(fid, &f)], "/repo"), 0);
-        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 1);
-        // The backbone: the identical wording re-inserted is swallowed by the
-        // finding dedupe, so the caller has nothing to hand the filer — and a
-        // DISMISSED wording behaves the same way.
+        // The identical wording re-inserted is swallowed by the finding
+        // dedupe — and a DISMISSED wording behaves the same way.
         assert!(insert_row(&db, &f, false).is_none());
         let g = finding("drafter_set_doc is sync");
         let gid = insert_row(&db, &g, true).expect("inserts, then dismissed");
@@ -746,6 +660,5 @@ That's the lot."#;
             "a dismissed wording never comes back as fresh"
         );
         let _ = gid;
-        assert_eq!(db.get_seat_stat("shipwright").unwrap().items_filed, 1);
     }
 }

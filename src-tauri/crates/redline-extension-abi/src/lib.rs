@@ -80,9 +80,11 @@ pub mod scopes {
     /// Write the extension's sanctioned UI slot: a host-sanitized markdown
     /// panel in Redline's Extensions view. The only UI surface v1 grants.
     pub const UI_PANEL: &str = "ui.panel";
-    /// File new items into the work graph (`POST /v1/work`).
+    /// Retired with the work graph and its `/v1/work` routes: grants no
+    /// route. Still a known name, so a manifest that asks for it keeps
+    /// loading.
     pub const WORK_FILE: &str = "work.file";
-    /// Claim and close work-graph items (`/v1/work/:id/claim`, `…/close`).
+    /// Retired with `WORK_FILE`; the same rule.
     pub const WORK_CLAIM: &str = "work.claim";
 
     pub const KNOWN_SCOPES: &[&str] = &[
@@ -119,8 +121,7 @@ pub mod scopes {
             DRAFTER_SUGGEST => "write tracked suggestions into a live draft",
             REVIEW_ANNOTATE => "post and clear findings in a live code review",
             UI_PANEL => "render a sanitized markdown panel in the Extensions view",
-            WORK_FILE => "file new items into the work graph",
-            WORK_CLAIM => "claim and close work-graph items",
+            WORK_FILE | WORK_CLAIM => "retired: grants no route (the work graph was removed)",
             _ => return None,
         })
     }

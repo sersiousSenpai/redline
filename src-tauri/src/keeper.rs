@@ -137,19 +137,6 @@ const BACKUP_EVERY: Duration = Duration::from_secs(6 * 3600);
 /// seen-twice rule a session reconciles 5–10 minutes after its held POST
 /// silently died, never on a single racy observation.
 const STALENESS_SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
-/// Friction-filer cadence — deliberately conservative: recurring friction is
-/// a slow signal, so the bus considers filing at most every 6 hours.
-const FRICTION_FILE_EVERY: Duration = Duration::from_secs(6 * 3600);
-/// The documented friction threshold: a friction kind files ONE work item
-/// only once it has fired at least this many times inside the window.
-pub(crate) const FRICTION_FILE_THRESHOLD: i64 = 5;
-/// The window `friction_summary` aggregates over for the filer: 7 days —
-/// wide enough that "recurring" means a pattern, not one bad afternoon.
-const FRICTION_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
-/// Settings-key prefix for the per-kind high-water marks (the house
-/// app_settings pattern, one key per friction kind).
-const FRICTION_MARK_PREFIX: &str = "redline.frictionWatch.highWater.";
-
 /// Due-cadence bookkeeping (pure): `None` = never checked → due now.
 pub fn cadence_due(last_run_ms: Option<i64>, cadence_ms: i64, now_ms: i64) -> bool {
     last_run_ms.map_or(true, |l| now_ms - l >= cadence_ms)
@@ -288,165 +275,6 @@ fn staleness_act(ctx: &WatchCtx, _now: i64) {
     });
 }
 
-// --- friction filer (producers wave) ----------------------------------------
-
-fn friction_mark_key(kind: &str) -> String {
-    format!("{FRICTION_MARK_PREFIX}{kind}")
-}
-
-/// The friction-filer's pure step: given the windowed per-kind counts and the
-/// stored per-kind high-water marks, return `(kinds to file now, marks to
-/// LOWER)`. A kind files when its count is at-or-over the threshold AND above
-/// its mark — i.e. it *crossed* since the last filing; a mark lowers when the
-/// sliding window fell under it, so a genuine later re-surge can cross again
-/// instead of being blocked forever by a stale peak.
-pub fn friction_step(
-    counts: &[(String, i64)],
-    marks: &HashMap<String, i64>,
-    threshold: i64,
-) -> (Vec<(String, i64)>, Vec<(String, i64)>) {
-    let mut to_file = Vec::new();
-    let mut to_lower = Vec::new();
-    for (kind, count) in counts {
-        let mark = marks.get(kind).copied().unwrap_or(0);
-        if *count >= threshold && *count > mark {
-            to_file.push((kind.clone(), *count));
-        } else if *count < mark {
-            to_lower.push((kind.clone(), *count));
-        }
-    }
-    (to_file, to_lower)
-}
-
-/// The stored high-water mark for each kind in `counts` (missing / unparsable
-/// keys read as 0).
-fn friction_marks(db: &Database, counts: &[(String, i64)]) -> HashMap<String, i64> {
-    counts
-        .iter()
-        .map(|(kind, _)| {
-            let mark = db
-                .get_setting(&friction_mark_key(kind))
-                .and_then(|s| s.trim().parse::<i64>().ok())
-                .unwrap_or(0);
-            (kind.clone(), mark)
-        })
-        .collect()
-}
-
-/// One friction-filer pass (producers wave): read the summary window, apply
-/// [`friction_step`], file ONE `bug` work item per crossing kind —
-/// `origin_kind="friction"` / `origin_id=<kind>`, provenance never ownership
-/// — advance the crossed kinds' marks, lower decayed ones, and credit the
-/// keeper seat's `items_filed`. A kind with an UNCLOSED friction item still
-/// standing never files a second (the belt on top of the marks); its mark
-/// still advances so the watch goes quiet. The act FILES STATE ONLY — it
-/// spawns nothing, wakes nothing, dispatches nothing.
-pub(crate) fn file_friction_items(db: &Database, window_ms: i64, threshold: i64) -> usize {
-    /// Ledger actor + the seat whose `items_filed` accrues.
-    const FRICTION_ACTOR: &str = "keeper";
-    let rows = match db.friction_summary(window_ms) {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "friction summary failed; nothing filed");
-            return 0;
-        }
-    };
-    let counts: Vec<(String, i64)> = rows.iter().map(|r| (r.kind.clone(), r.count)).collect();
-    let marks = friction_marks(db, &counts);
-    let (to_file, to_lower) = friction_step(&counts, &marks, threshold);
-    for (kind, count) in &to_lower {
-        let _ = db.set_setting(&friction_mark_key(kind), &count.to_string());
-    }
-    let mut filed = 0usize;
-    for (kind, count) in &to_file {
-        match db.find_unclosed_work_item("friction", Some(kind), None) {
-            Ok(Some(_)) => {
-                // One standing item per kind — the mark still advances so the
-                // predicate goes quiet until the count crosses again.
-                let _ = db.set_setting(&friction_mark_key(kind), &count.to_string());
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                // Without the idempotency answer, filing could duplicate —
-                // SKIP this kind (the watch re-derives next pass). The mark
-                // does NOT advance, so the crossing stays visible.
-                tracing::warn!(kind = %kind, error = %e, "friction idempotency lookup failed; nothing filed");
-                continue;
-            }
-        }
-        let days = (window_ms / 86_400_000).max(1);
-        let title = format!("Recurring friction: {kind} ({count}× in {days}d)");
-        let mut body = format!(
-            "The `{kind}` friction event fired {count} times in the last \
-             {days} days (files at {threshold})."
-        );
-        if let Some(detail) = rows
-            .iter()
-            .find(|r| r.kind == *kind)
-            .and_then(|r| r.last_detail.as_deref())
-        {
-            body.push_str(&format!("\n\nMost recent detail:\n{detail}"));
-        }
-        match db.file_produced_work_item(
-            &title,
-            Some(&body),
-            "bug",
-            "open",
-            2,
-            "friction",
-            Some(kind),
-            None,
-            None,
-            FRICTION_ACTOR,
-        ) {
-            Ok(Some(_)) => {
-                filed += 1;
-                let _ = db.set_setting(&friction_mark_key(kind), &count.to_string());
-            }
-            Ok(None) => {
-                let _ = db.set_setting(&friction_mark_key(kind), &count.to_string());
-            }
-            // A failed write does NOT advance the mark — the next pass retries.
-            Err(e) => tracing::warn!(
-                kind = %kind, error = %e,
-                "failed to file a friction work item"
-            ),
-        }
-    }
-    if filed > 0 {
-        if let Err(e) = db.upsert_seat_stat(FRICTION_ACTOR, None, filed as i64) {
-            tracing::warn!(error = %e, "failed to bump keeper items_filed");
-        }
-    }
-    filed
-}
-
-/// Fires when a kind crossed OR a decayed mark needs lowering — the latter is
-/// the bookkeeping half ("the tracked set needs clearing"), so marks don't stay stale behind an inactive frontier.
-fn friction_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
-    let rows = match ctx.db.friction_summary(FRICTION_WINDOW_MS) {
-        Ok(rows) => rows,
-        Err(_) => return false,
-    };
-    let counts: Vec<(String, i64)> = rows.iter().map(|r| (r.kind.clone(), r.count)).collect();
-    let marks = friction_marks(&ctx.db, &counts);
-    let (to_file, to_lower) = friction_step(&counts, &marks, FRICTION_FILE_THRESHOLD);
-    !to_file.is_empty() || !to_lower.is_empty()
-}
-
-/// The act files state — it spawns nothing. Off the loop via the house
-/// `spawn_blocking` pattern so a slow disk never stalls the bus tick.
-fn friction_watch_act(ctx: &WatchCtx, _now: i64) {
-    let db = ctx.db.clone();
-    tokio::task::spawn_blocking(move || {
-        let filed = file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD);
-        if filed > 0 {
-            tracing::info!(filed, "friction watch filed recurring-friction work items");
-        }
-    });
-}
-
 /// The registry — the bus's whole schedule, one table.
 pub(crate) static WATCHES: &[Watch] = &[
     Watch {
@@ -472,14 +300,6 @@ pub(crate) static WATCHES: &[Watch] = &[
         gate: always,
         predicate: staleness_predicate,
         act: staleness_act,
-    },
-    Watch {
-        name: "friction-filer",
-        target_role: "keeper",
-        cadence: FRICTION_FILE_EVERY,
-        gate: always,
-        predicate: friction_watch_predicate,
-        act: friction_watch_act,
     },
     Watch {
         name: "shots-retention",
@@ -584,9 +404,9 @@ fn take_due_oneshots(now_ms: i64) -> Vec<OneShot> {
 // ---------------------------------------------------------------------------
 
 /// Spawn the background keeper — the memory passes AND the watch bus, one
-/// loop. Wakes every `TICK`; each wake (1) expires lapsed work-graph leases,
-/// (2) drives the watch bus (due-cadence watches, then due scheduled
-/// one-shots), and (3) runs the idle/growth/debounce-gated memory passes.
+/// loop. Wakes every `TICK`; each wake (1) drives the watch bus (due-cadence
+/// watches, then due scheduled one-shots), and (2) runs the
+/// idle/growth/debounce-gated memory passes.
 /// Async because the classifier/summarizer are async; runs on the Tauri
 /// runtime.
 pub(crate) fn spawn(ctx: WatchCtx) {
@@ -607,15 +427,6 @@ pub(crate) fn spawn(ctx: WatchCtx) {
         loop {
             tokio::time::sleep(TICK).await;
             let now = now_millis();
-
-            // Work-graph lease expiry — EVERY tick, before the memory gates:
-            // a lapsed claim must fall back to `open` on wall-clock time even
-            // while idle/debounce/growth keep the memory passes parked.
-            match db.expire_work_leases(now) {
-                Ok(n) if n > 0 => tracing::info!(expired = n, "work leases lapsed back to open"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "work lease expiry failed"),
-            }
 
             // --- the watch bus: due watches, then due one-shots. Runs every
             // tick, BEFORE the memory gates below can `continue` past it. ---
@@ -676,9 +487,6 @@ mod tests {
         assert_eq!(find("ledger-backup").cadence, Duration::from_secs(6 * 3600));
         // The sweeps and the hub watch are registered, conservatively paced.
         assert_eq!(find("review-staleness-sweep").cadence, Duration::from_secs(300));
-        // The friction filer: conservative cadence, the keeper as its actor.
-        assert_eq!(find("friction-filer").cadence, Duration::from_secs(6 * 3600));
-        assert_eq!(find("friction-filer").target_role, "keeper");
         // Names are unique — the last-check map keys on them.
         let mut names: Vec<_> = WATCHES.iter().map(|w| w.name).collect();
         names.sort();
@@ -700,112 +508,6 @@ mod tests {
         // A suspect that resolved in between is simply forgotten.
         let (detach, carried) = staleness_step(&one, &HashSet::new());
         assert!(detach.is_empty() && carried.is_empty());
-    }
-
-    // --- the friction filer (producers wave) --------------------------------
-
-    #[test]
-    fn friction_step_files_on_crossing_and_lowers_decayed_marks() {
-        let t = FRICTION_FILE_THRESHOLD;
-        let counts = vec![
-            ("hook_timeout".to_string(), t + 1), // over threshold, no mark → file
-            ("spawn_fail".to_string(), t - 1),   // under threshold → nothing
-            ("carried".to_string(), t),          // at threshold but not above mark
-            ("decayed".to_string(), 1),          // window slid under its mark
-        ];
-        let marks: HashMap<String, i64> = [
-            ("carried".to_string(), t),
-            ("decayed".to_string(), t + 3),
-        ]
-        .into_iter()
-        .collect();
-        let (to_file, to_lower) = friction_step(&counts, &marks, t);
-        assert_eq!(to_file, vec![("hook_timeout".to_string(), t + 1)]);
-        assert_eq!(to_lower, vec![("decayed".to_string(), 1)]);
-        // After a lowering, a re-surge past the threshold crosses again.
-        let resurged = vec![("decayed".to_string(), t)];
-        let lowered: HashMap<String, i64> = [("decayed".to_string(), 1)].into_iter().collect();
-        let (to_file, _) = friction_step(&resurged, &lowered, t);
-        assert_eq!(to_file.len(), 1);
-        // Empty inputs are quiet.
-        assert_eq!(friction_step(&[], &HashMap::new(), t), (vec![], vec![]));
-    }
-
-    #[test]
-    fn friction_filer_files_one_bug_per_kind_with_marks_and_seat_credit() {
-        let db = Database::open_in_memory().unwrap();
-        for _ in 0..6 {
-            db.record_friction("hook_timeout", Some("plan"), None, Some("hook died"))
-                .unwrap();
-        }
-        db.record_friction("spawn_fail", None, None, None).unwrap(); // under threshold
-        assert_eq!(
-            file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD),
-            1
-        );
-        let items = db.list_work_items(None, None, 50).unwrap();
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        assert_eq!(item.kind, "bug");
-        assert_eq!(item.status, "open");
-        assert_eq!(item.origin_kind.as_deref(), Some("friction"));
-        assert_eq!(item.origin_id.as_deref(), Some("hook_timeout"));
-        assert!(item.title.contains("hook_timeout"));
-        assert!(item.title.contains("6×"));
-        assert!(item.body.as_deref().unwrap().contains("hook died"));
-        // The high-water mark persisted through the house settings pattern.
-        assert_eq!(
-            db.get_setting("redline.frictionWatch.highWater.hook_timeout")
-                .as_deref(),
-            Some("6")
-        );
-        // The keeper seat's items_filed became real.
-        assert_eq!(db.get_seat_stat("keeper").unwrap().items_filed, 1);
-        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
-    }
-
-    #[test]
-    fn friction_filer_is_high_water_gated_and_refiles_after_close() {
-        let db = Database::open_in_memory().unwrap();
-        for _ in 0..5 {
-            db.record_friction("hook_timeout", None, None, None).unwrap();
-        }
-        assert_eq!(
-            file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD),
-            1
-        );
-        // Re-running with nothing new files nothing (count == mark).
-        assert_eq!(
-            file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD),
-            0
-        );
-        // More events cross the mark, but the UNCLOSED item is the belt: no
-        // second item — the mark just advances so the watch goes quiet.
-        db.record_friction("hook_timeout", None, None, None).unwrap();
-        assert_eq!(
-            file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD),
-            0
-        );
-        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 1);
-        assert_eq!(
-            db.get_setting("redline.frictionWatch.highWater.hook_timeout")
-                .as_deref(),
-            Some("6")
-        );
-        // Close the item; a genuine further crossing may honestly refile.
-        let id = db
-            .find_unclosed_work_item("friction", Some("hook_timeout"), None)
-            .unwrap()
-            .unwrap()
-            .id;
-        db.close_work_item(&id, Some("fixed"), now_millis()).unwrap();
-        db.record_friction("hook_timeout", None, None, None).unwrap();
-        assert_eq!(
-            file_friction_items(&db, FRICTION_WINDOW_MS, FRICTION_FILE_THRESHOLD),
-            1
-        );
-        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 2);
-        assert_eq!(db.get_seat_stat("keeper").unwrap().items_filed, 2);
     }
 
     #[test]

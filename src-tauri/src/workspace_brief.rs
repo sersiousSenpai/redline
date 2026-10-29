@@ -5,8 +5,8 @@
 //! curl for it.
 //!
 //! Deterministic and bounded by construction. It is built only from local
-//! readers (the session store, the projects' git state, the work graph, the
-//! context journal, the ledger and the active mission), never from a model
+//! readers (the session store, the projects' git state, the context
+//! journal, the ledger and the active mission), never from a model
 //! call, and it carries no relative times. The same workspace therefore
 //! renders the same bytes, which is what lets a follow-up turn send only a
 //! hash-keyed DELTA instead of the whole brief again.
@@ -29,7 +29,6 @@ pub const BRIEF_DELTA_MAX_BYTES: usize = 2_000;
 const LINE_CHARS: usize = 160;
 const MAX_PLANS: usize = 8;
 const MAX_REPOS: usize = 5;
-const MAX_READY: usize = 5;
 const MAX_PAGES: usize = 15;
 const MAX_DECISIONS: usize = 5;
 /// One git probe's ceiling. The brief is on the turn's critical path, so a
@@ -78,9 +77,6 @@ pub struct BriefMission {
 pub struct BriefInputs {
     pub plans: Vec<BriefPlan>,
     pub repos: Vec<BriefRepo>,
-    /// `None` when the count could not be read: unknown, not zero.
-    pub ready_count: Option<i64>,
-    pub ready: Vec<String>,
     pub pages: Vec<BriefPage>,
     pub decisions: Vec<String>,
     pub mission: Option<BriefMission>,
@@ -161,14 +157,6 @@ fn sections(inputs: &BriefInputs) -> Vec<(String, Vec<String>)> {
                 })
                 .collect(),
         ));
-    }
-    match inputs.ready_count {
-        Some(n) if n > 0 => out.push((
-            format!("Ready work items ({n} ready; top {}):", inputs.ready.len()),
-            inputs.ready.iter().map(|t| format!("- {t}")).collect(),
-        )),
-        Some(_) => out.push(("Ready work items: none ready.".to_string(), Vec::new())),
-        None => {}
     }
     if let Some(m) = &inputs.mission {
         out.push((
@@ -252,7 +240,7 @@ pub fn delta(previous: &str, current: &str) -> Option<String> {
         if !line.starts_with("- ") {
             header = Some(line);
             header_written = false;
-            // A changed header (a ready count moved) is news on its own.
+            // A changed header is news on its own.
             if !old.contains(line) {
                 out.push_str(line);
                 out.push('\n');
@@ -313,7 +301,7 @@ async fn probe_repo(path: PathBuf) -> (Option<String>, Option<usize>) {
 }
 
 /// Gather the brief from local readers. Never fails: an unreadable source is
-/// left out (or, for the ready count, reported as unknown).
+/// left out.
 pub async fn gather(
     sessions: Vec<SessionSummary>,
     db: &Database,
@@ -364,26 +352,6 @@ pub async fn gather(
         repos.push(BriefRepo { name, path, branch, dirty });
     }
 
-    let now = crate::ledger::now_millis();
-    let ready_count = db.count_ready_work_items(None, now).ok();
-    let ready = if ready_count.unwrap_or(0) > 0 {
-        db.list_ready_work_items(None, now, MAX_READY as i64)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|w| {
-                let project = w
-                    .project_path
-                    .as_deref()
-                    .and_then(|p| Path::new(p).file_name())
-                    .map(|n| format!(" ({})", n.to_string_lossy()))
-                    .unwrap_or_default();
-                format!("{}{project}", clip(&w.title, 100))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     let mut urls = HashSet::new();
     let pages: Vec<BriefPage> = db
         .list_recent_journal_kind("nav", 60)
@@ -420,8 +388,6 @@ pub async fn gather(
     BriefInputs {
         plans,
         repos,
-        ready_count,
-        ready,
         pages,
         decisions,
         mission: mission.map(|(title, goal)| BriefMission {
@@ -449,8 +415,6 @@ mod tests {
             repos: (0..n)
                 .map(|i| BriefRepo { name: format!("repo{i}"), path: format!("/Users/me/repo{i}"), branch: Some("main".into()), dirty: Some(i) })
                 .collect(),
-            ready_count: Some(n as i64),
-            ready: (0..n).map(|i| format!("Work item {i}")).collect(),
             pages: (0..n)
                 .map(|i| BriefPage { title: format!("Page {i}"), url: format!("https://example.com/{i}") })
                 .collect(),
@@ -499,11 +463,9 @@ mod tests {
         let mut after = before.clone();
         assert!(delta(&render(&before), &render(&after)).is_none(), "an unchanged workspace sends nothing");
         after.plans[1].status = "building".into();
-        after.ready_count = Some(4);
         let d = delta(&render(&before), &render(&after)).unwrap();
         assert!(d.contains("building"), "{d}");
         assert!(d.contains("Plan sessions"), "the changed line keeps its header: {d}");
-        assert!(d.contains("4 ready"), "a moved count is news: {d}");
         assert!(!d.contains("Plan number 0"), "unchanged lines stay out: {d}");
         assert!(!d.contains("https://example.com/0"), "{d}");
         assert!(d.len() <= BRIEF_DELTA_MAX_BYTES);
@@ -522,10 +484,9 @@ mod tests {
         assert_eq!(urls, ["https://a.test/", "https://b.test/"]);
         assert_eq!(inputs.pages[0].title, "Again");
         assert!(inputs.decisions.is_empty());
-        assert_eq!(inputs.ready_count, Some(0));
         assert_eq!(inputs.mission.as_ref().map(|m| m.goal.as_str()), Some("Find it"));
         let text = render(&inputs);
-        assert!(text.contains("Ready work items: none ready."));
+        assert!(!text.contains("Ready work"), "the brief carries no work-item section");
         assert!(text.contains("Again — https://a.test/"));
     }
 

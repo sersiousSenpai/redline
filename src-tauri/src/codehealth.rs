@@ -320,7 +320,8 @@ const HEAVY_MARKERS: &[&str] = &[
     // The shared DB lock. Every SQLite write waits on ONE `Mutex<Connection>`
     // that a backup, the canary, or an embedding tick can hold for seconds; a
     // sync command waiting on it waits on the main thread (the 2026-09-29
-    // memory beach ball was exactly this, in `get_work_graph`). A command
+    // memory beach ball was exactly this, in the since removed work graph's
+    // `get_work_graph`). A command
     // reaches the database through a store handle as often as through
     // `.database()`, called or lent to the helper that queries it
     // (`&companion.db`), and a read connection is still disk I/O.

@@ -362,7 +362,8 @@ pub fn compose(sources: &[SourceRow], instruction: &str) -> CombineBrief {
     for row in sources {
         // The TITLE rides beside each hash, not just the id: `delete_session`
         // cascades `revisions`, so a bare hash goes dangling and unreadable.
-        // Same provenance-not-FK posture the work graph's schema law takes.
+        // Provenance, not a foreign key: the record names its sources and
+        // owns none of them.
         // The hash is over the STORED markdown, sidecars included.
         record.push_str(&format!(
             "- {} — session {} v{} — {}\n",
