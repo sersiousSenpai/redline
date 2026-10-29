@@ -20,33 +20,30 @@
   line-height: normal;
 }
 
-/* ── Places ─────────────────────────────────────────────────────────────── */
+/* ── Places: one row of icons (D39) ────────────────────────────────────── */
 .rl-sb-places {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding: 8px 8px 10px;
+  padding: 8px;
   border-bottom: 1px solid var(--color-rule);
 }
+/* House · globe · server at the left, a 28px target each, 4px apart. */
+.rl-sb-place-row { display: flex; align-items: center; gap: 4px; height: var(--rl-sb-row); }
 .rl-sb-place {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--rl-sb-row);
   height: var(--rl-sb-row);
-  padding: 0 8px;
   border-radius: var(--rl-radius-chip);
-  color: var(--color-ink-2);
-  text-align: left;
+  color: var(--color-ink-4);
   cursor: pointer;
 }
-.rl-sb-place > svg { flex: none; color: var(--color-ink-4); }
-.rl-sb-place:hover { background: var(--color-fill-1); }
+.rl-sb-place:hover { background: var(--color-fill-1); color: var(--color-ink-2); }
+/* The current Place wears the row-selection fill, as a selected row does. */
 .rl-sb-place[aria-current] { background: var(--color-fill-2); color: var(--color-ink); }
-.rl-sb-place[aria-current] > svg { color: var(--color-ink); }
 .rl-sb-place:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
-.rl-sb-place-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-sb-place-ports { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 10.5px; color: var(--color-ink-5); }
 
 /* ── The Sessions label, with Combine ───────────────────────────────────── */
 .rl-sb-head {
@@ -213,9 +210,11 @@
 /* The row a menu is open on: the menu's own fill, an inset ring, its ⋯ lit. */
 .rl-sb-item[data-menu] > .rl-sb-row { background: var(--color-glass-2); color: var(--color-ink); box-shadow: inset 0 0 0 1px var(--color-focus-rim); }
 
-/* The ⋯: under the pointer, on focus and while its menu is open. */
+/* The ⋯ (D37): rendered only under the pointer, on focus and while its menu
+   is open, at the row's far edge. A row at rest shows none. */
 .rl-sb-dots {
   position: absolute;
+  z-index: 1;
   top: 3px;
   right: 4px;
   display: grid;
@@ -225,13 +224,16 @@
   border-radius: var(--rl-radius-chip);
   color: var(--color-ink-3);
   cursor: pointer;
-  opacity: 0;
 }
 .rl-sb-item[data-kind="launch"] > .rl-sb-dots { top: 2px; }
+/* A plan row's: centred on its title line, 8px clear of the version chip
+   (the row's 36px right padding). */
+.rl-session-row > .rl-sb-dots { top: 6px; }
 .rl-sb-dots:hover { background: var(--color-fill-2); color: var(--color-ink); }
-.rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-dots { opacity: 1; }
-.rl-sb-item[data-menu] > .rl-sb-dots { color: var(--color-ink); }
-.rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-row .rl-sb-tag { visibility: hidden; }
+.rl-sb-dots[aria-expanded="true"] { color: var(--color-ink); }
+/* Over the ⋯ the row stays lit. */
+.rl-session-row:has(> .rl-sb-dots:hover) > .hover-elevated { background: color-mix(in srgb, var(--color-bg-elevated) 60%, transparent); }
+.rl-sb-item:has(> .rl-sb-dots) > .rl-sb-row .rl-sb-tag { visibility: hidden; }
 .rl-sb-dots:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 
 /* Rename in place: the field starts where the title did. */

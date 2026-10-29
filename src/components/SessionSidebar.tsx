@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
-//! Browser, Localhost — D30), a "Sessions" label with Combine, the
+//! Browser, Localhost — D30) as one row of icons (D39), a "Sessions" label
+//! with Combine, the
 //! joined-session shadow, then project sections from lib/sessionGroups —
 //! Needs you first while something does — each split into Plans (the rich
 //! plan rows: status colour, v{n}, pending count, unseen pulse, build-state
-//! chips, detached/codex chips, the revision tree and a ⋯ menu, and the
+//! chips, detached/codex chips, the revision tree and the row menu, and the
 //! launches whose plan has not arrived) and Chats, each group collapsible
 //! with its own count and spinner (D31). A row click opens its session as a
 //! tab of the set on screen (D29).
@@ -17,7 +18,7 @@
 //! item, but an unchanged session keeps its object (App's `refreshSummaries`),
 //! so only the rows that changed render.
 
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, FileText, Globe, House, MessageSquare, Plus, Server, Terminal } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
@@ -146,7 +147,7 @@ export interface SessionSidebarProps {
   /** Given, both Places render and Home goes here; absent, only Home
    *  renders and it calls `onNewPlan`/`onNewSession`. */
   onSelectPlace?: (place: SidebarPlace) => void;
-  /** Local dev servers' ports (":5173"), summarized on the Localhost place. */
+  /** Local dev servers' ports (":5173"), listed in the Localhost tooltip. */
   localhostPorts?: readonly string[];
   /** The running dev servers (the Localhost scan, kept by value): each
    *  session's own (lib/sessionPorts) are a chip on its row that opens the
@@ -212,11 +213,6 @@ interface LightCan {
   deleteChat: boolean;
 }
 
-const PLACE_TITLES: Record<SidebarPlace, string> = {
-  home: "Home — the front door and its tabs",
-  browser: "Browser — its tab, here",
-  servers: "Localhost — your local dev servers",
-};
 
 function SessionSidebarBase(props: SessionSidebarProps) {
   const {
@@ -425,28 +421,44 @@ function SessionSidebarBase(props: SessionSidebarProps) {
   };
 
   const empty = model.sections.length === 0 && model.archived.length === 0 && !joined;
-  const ports = localhostPorts ?? [];
-  const portsSummary = ports.length === 0
-    ? null
-    : ports.slice(0, 3).join(" · ") + (ports.length > 3 ? ` +${ports.length - 3}` : "");
+  const places: [SidebarPlace, typeof House, string, boolean][] = [["home", House, "Home", homeCurrent]];
+  if (onSelectPlace) places.push(["browser", Globe, "Browser", place === "browser"], ["servers", Server, "Localhost", place === "servers"]);
+  // One tab stop for the row: the current Place, else the first.
+  const stop = Math.max(0, places.findIndex((p) => p[3]));
 
   return (
     <nav className="rl-sb" aria-label="Sessions">
-      {/* The Places. Home is the door and its tabs; Localhost is a full
-          view. Without `onSelectPlace` there is nowhere but Home. */}
+      {/* The Places, one row of icons (D39), as the folded sidebar's (D18).
+          Home is the door and its tabs; Localhost is a full view. Without
+          `onSelectPlace` there is nowhere but Home. The arrows walk the row;
+          Tab enters it at the current Place. */}
       <div className="rl-sb-places">
-        <PlaceRow id="home" icon={House} label="Home" current={homeCurrent} onSelect={selectPlace} />
+        <div className="rl-sb-place-row" role="toolbar" aria-label="Places" onKeyDown={(e) => {
+          const all = [...e.currentTarget.querySelectorAll<HTMLButtonElement>(".rl-sb-place")];
+          const at = all.indexOf(e.target as HTMLButtonElement);
+          const to = { ArrowLeft: at - 1, ArrowUp: at - 1, ArrowRight: at + 1, ArrowDown: at + 1, Home: 0, End: -1 }[e.key];
+          if (at < 0 || to === undefined) return;
+          e.preventDefault();
+          all[(to + all.length) % all.length].focus();
+        }}>
+          {places.map(([id, Icon, label, current], i) => (
+            <button key={id} type="button" className="rl-sb-place" data-place={id} aria-label={label}
+              // Background colour alone is invisible to a screen reader and
+              // to anyone who can't tell the fills apart. `aria-current` says it.
+              aria-current={current ? "page" : undefined}
+              tabIndex={i === stop ? 0 : -1}
+              title={id === "servers" && localhostPorts?.length ? `${label} · ${localhostPorts.join(" · ")}` : label}
+              onClick={() => selectPlace(id)}>
+              <Icon size={16} aria-hidden />
+            </button>
+          ))}
+        </div>
         {homeTerminals && homeTerminals.length > 0 && (
           <ul className="rl-sb-terms" aria-label="Home's terminals">
             {homeTerminals.map((t) => (
               <TerminalRow key={t.id} sessionId="" terminal={t} onSelect={onSelectTerminal} />
             ))}
           </ul>
-        )}
-        {onSelectPlace && <PlaceRow id="browser" icon={Globe} label="Browser" current={place === "browser"} onSelect={selectPlace} />}
-        {onSelectPlace && (
-          <PlaceRow id="servers" icon={Server} label="Localhost" current={place === "servers"} onSelect={selectPlace}
-            end={portsSummary ? <span className="rl-sb-place-ports" title={ports.join(" · ")}>{portsSummary}</span> : null} />
         )}
       </div>
       <div className="rl-sb-head">
@@ -547,32 +559,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
         </button>
       )}
     </nav>
-  );
-}
-
-function PlaceRow({ id, icon: Icon, label, current, end, onSelect }: {
-  id: SidebarPlace;
-  icon: typeof House;
-  label: string;
-  current: boolean;
-  end?: ReactNode;
-  onSelect: (place: SidebarPlace) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="rl-sb-place"
-      data-place={id}
-      // Background colour alone is invisible to a screen reader and to
-      // anyone who can't tell the fills apart. `aria-current` says it.
-      aria-current={current ? "page" : undefined}
-      title={PLACE_TITLES[id]}
-      onClick={() => onSelect(id)}
-    >
-      <Icon size={16} aria-hidden />
-      <span className="rl-sb-place-label">{label}</span>
-      {end}
-    </button>
   );
 }
 
@@ -794,6 +780,25 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
 }
 const TerminalRow = memo(TerminalRowBase);
 
+/** Whether a row's ⋯ is out (D37): the pointer is on the row or focus is in
+ *  it. A row at rest has no ⋯; its menu opens on right-click or ⇧F10. What
+ *  nests under a plan row (its terminals, its versions) is its own row. */
+function useHot() {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const own = (row: Element, at: EventTarget | null) => at instanceof Element && at.closest("li") === row;
+  return [hover || focus, {
+    onPointerOver: (e: { currentTarget: Element; target: EventTarget }) => setHover(own(e.currentTarget, e.target)),
+    onPointerLeave: () => setHover(false),
+    onFocus: (e: FocusEvent) => setFocus(own(e.currentTarget, e.target)),
+    // Tab from the row to its ⋯ must not take the ⋯ away on the way.
+    onBlur: (e: FocusEvent) => { if (!own(e.currentTarget, e.relatedTarget)) setFocus(false); },
+  }] as const;
+}
+
+/** The keys that open a row's menu where a mouse would right-click. */
+const menuKey = (e: { key: string; shiftKey: boolean }) => e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+
 function SessionRowBase({
   session,
   active,
@@ -862,6 +867,7 @@ function SessionRowBase({
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
+  const [hot, hotBind] = useHot();
   const rowButton = useRef<HTMLButtonElement>(null);
   const display = computeRevisionDisplay(session.revisions);
   const badgeVersion = latestDisplayVersion(
@@ -880,8 +886,9 @@ function SessionRowBase({
   const needWord = need ? rowStatus({ kind: "plan", need, working: false, session }).word : null;
 
   return (
-    <li className="rl-session-row relative group" data-need={need || termNeeds ? "" : undefined} onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
+    <li className="rl-session-row relative" data-need={need || termNeeds ? "" : undefined} {...hotBind} onContextMenu={e => { if (!combining && !renaming && !confirming) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
       if (!combining && (e.key === "Backspace" || e.key === "Delete") && (e.target as HTMLElement).tagName !== "INPUT") { e.preventDefault(); setConfirming(true); }
+      else if (!combining && !confirming && menuKey(e) && (e.target === rowButton.current || (e.target as HTMLElement).classList.contains("rl-sb-dots"))) { e.preventDefault(); setMenuAt(null); setMenuOpen(true); }
     }}>
       {renaming && <RowRename className="rl-row-rename" label="Session title" value={rowName} onDone={(title, how) => {
         setRenaming(false);
@@ -983,16 +990,7 @@ function SessionRowBase({
             Cancel
           </button>
         </div>
-      ) : combining ? null : (
-        <RowMenu open={menuOpen} onOpenChange={open => { setMenuOpen(open); if (!open) setMenuAt(null); }} at={menuAt} label={rowName}
-          actions={planRowActions(session, {
-            open: () => onClick(session.sessionId),
-            workspace: onOpenWorkspace ? () => onOpenWorkspace(session.sessionId) : undefined,
-            rename: onRename ? () => setRenaming(true) : undefined,
-            archive: onArchive ? () => onArchive(session.sessionId, !session.archivedAt) : undefined,
-            remove: () => setConfirming(true),
-          })} />
-      )}
+      ) : null}
       <button
         ref={rowButton}
         type="button"
@@ -1006,7 +1004,7 @@ function SessionRowBase({
               : `${rowName}, not in the combination`
             : undefined
         }
-        className={`hover-elevated w-full text-left pl-7 pr-10 py-2 border-b${
+        className={`hover-elevated w-full text-left pl-7 pr-9 py-2 border-b${
           combining ? " rl-cmb-row" : ""
         }${combining && picked ? " is-on" : ""}`}
         style={{
@@ -1048,7 +1046,7 @@ function SessionRowBase({
             </span>
           ) : (
             <span
-              className="font-mono shrink-0 rounded-sm px-1.5 py-0.5 transition-opacity group-hover:opacity-0"
+              className="font-mono shrink-0 rounded-sm px-1.5 py-0.5"
               style={{
                 background: "var(--color-anchor-bg)",
                 color: "var(--color-anchor-text)",
@@ -1199,6 +1197,18 @@ function SessionRowBase({
           )}
         </div>
       </button>
+      {/* After the row in the tab order: Tab from a focused row reaches it. */}
+      {!confirming && !combining && !renaming && (
+        <RowMenu open={menuOpen} onOpenChange={open => { setMenuOpen(open); if (!open) setMenuAt(null); }} at={menuAt} label={rowName}
+          trigger={hot} triggerClassName="rl-sb-dots"
+          actions={planRowActions(session, {
+            open: () => onClick(session.sessionId),
+            workspace: onOpenWorkspace ? () => onOpenWorkspace(session.sessionId) : undefined,
+            rename: onRename ? () => setRenaming(true) : undefined,
+            archive: onArchive ? () => onArchive(session.sessionId, !session.archivedAt) : undefined,
+            remove: () => setConfirming(true),
+          })} />
+      )}
       {/* The plan's terminals, always: a terminal blocked on you is news
           whether or not the revision tree is open. */}
       {terminals && terminals.length > 0 && (
@@ -1372,8 +1382,9 @@ function StatusGlyph({ icon, tone, need }: { icon: StatusIcon; tone: StatusTone;
 }
 
 /** A chat, or a launch whose plan has not arrived: a light two-line row
- *  (a launch is one line, italic, tagged "launching"). Every row has a ⋯
- *  (also right-click, and ⌫ to delete a chat). */
+ *  (a launch is one line, italic, tagged "launching"). Its menu opens on
+ *  right-click, ⇧F10 or the ⋯ it shows while hovered or focused; ⌫ deletes
+ *  a chat. */
 function LightRowBase({ item, active, handlers, can }: {
   item: SidebarItem;
   active: boolean;
@@ -1384,6 +1395,7 @@ function LightRowBase({ item, active, handlers, can }: {
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [hot, hotBind] = useHot();
   const rowButton = useRef<HTMLButtonElement>(null);
   const chat = item.kind === "chat";
   const deletable = chat && can.deleteChat;
@@ -1426,6 +1438,7 @@ function LightRowBase({ item, active, handlers, can }: {
       data-active={active || undefined}
       data-menu={menuOpen || undefined}
       data-need={item.need ? "" : undefined}
+      {...hotBind}
       // The row's keys, from the row or its ⋯ (the menu, the rename field and
       // the delete ask keep their own).
       onKeyDown={(e) => {
@@ -1434,7 +1447,7 @@ function LightRowBase({ item, active, handlers, can }: {
         if ((e.key === "Backspace" || e.key === "Delete") && deletable) {
           e.preventDefault();
           setConfirming(true);
-        } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+        } else if (menuKey(e)) {
           e.preventDefault();
           openMenu(null);
         }
@@ -1497,6 +1510,7 @@ function LightRowBase({ item, active, handlers, can }: {
             at={menuAt}
             label={item.title}
             actions={actions}
+            trigger={hot}
             triggerClassName="rl-sb-dots"
           />
         </>

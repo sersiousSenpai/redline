@@ -76,6 +76,12 @@ const rendered = () => rowRenders.mock.calls.map(([revisions]) => revisions[0].r
 const click = (el: Element | null) => act(async () => { (el as HTMLElement).click(); });
 const press = (el: Element, key: string) =>
   act(async () => { el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })); });
+// A row's ⋯ is out only while the row is hovered or focused (D37).
+const focus = (el: Element | null) => act(async () => { (el as HTMLElement).focus(); });
+const dots = async (row: HTMLElement) => {
+  await focus(row.querySelector("button.hover-elevated, .rl-sb-row"));
+  return row.querySelector<HTMLButtonElement>(".rl-sb-dots")!;
+};
 const planRow = (title: string) =>
   [...host.querySelectorAll<HTMLElement>("li.rl-session-row")].find((li) => li.querySelector(".truncate")?.textContent === title)!;
 const lightRow = (title: string) =>
@@ -159,7 +165,7 @@ describe("the classic row's ⋯ menu", () => {
 
   it("lists Open plan · Rename · Archive, then Delete plan below a rule with its ⌫", async () => {
     await renderWith([summary("a", 1)]);
-    await act(async () => host.querySelector<HTMLButtonElement>(".rl-row-menu-trigger")!.click());
+    await click(await dots(planRow("Plan a")));
     const items = [...document.querySelectorAll<HTMLButtonElement>(".rl-row-menu-item")];
     expect(items.map((b) => b.querySelector(".rl-row-menu-label")!.textContent)).toEqual(["Open plan", "Rename", "Archive", "Delete plan"]);
     expect(items.every((b) => b.querySelector("svg"))).toBe(true);
@@ -169,12 +175,12 @@ describe("the classic row's ⋯ menu", () => {
     expect(document.activeElement).toBe(items[0]);
     await act(async () => items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(document.querySelector(".rl-row-menu-item")).toBeNull();
-    expect(document.activeElement).toBe(host.querySelector(".rl-row-menu-trigger"));
+    expect(document.activeElement).toBe(host.querySelector(".rl-sb-dots"));
   });
 
   it("renames over the row's own title: Enter saves and focus returns to the row", async () => {
     await renderWith([summary("a", 1)]);
-    await act(async () => host.querySelector<HTMLButtonElement>(".rl-row-menu-trigger")!.click());
+    await click(await dots(planRow("Plan a")));
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".rl-row-menu-item")][1].click());
     const input = host.querySelector<HTMLInputElement>("li.rl-session-row > input.rl-row-rename")!;
     expect(document.activeElement).toBe(input);
@@ -263,7 +269,7 @@ describe("the grouped sidebar", () => {
   it("a plan row's menu opens it as a workspace (D29)", async () => {
     const onOpenWorkspace = vi.fn();
     await renderWith({ sessions: [summary("a", 1)], onOpenWorkspace });
-    await click(host.querySelector(".rl-row-menu-trigger"));
+    await click(await dots(planRow("Plan a")));
     const item = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Open as workspace"));
     expect(item).toBeDefined();
     await click(item!);
@@ -273,7 +279,7 @@ describe("the grouped sidebar", () => {
 
   it("Home alone without onSelectPlace, calling onNewPlan (else onNewSession); a project's + starts a session there", async () => {
     await renderWith({ sessions: [summary("a", 1)] });
-    expect([...host.querySelectorAll(".rl-sb-place")].map((b) => b.textContent)).toEqual(["Home"]);
+    expect([...host.querySelectorAll(".rl-sb-place")].map((b) => b.getAttribute("aria-label"))).toEqual(["Home"]);
     // Nothing open: Home reads selected.
     expect(host.querySelector(".rl-sb-place")!.getAttribute("aria-current")).toBe("page");
     await click(host.querySelector(".rl-sb-place"));
@@ -295,9 +301,13 @@ describe("the grouped sidebar", () => {
     const places = [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-place")];
     // Home, Browser and Localhost (D30); the Runs place went with the run feature.
     expect(places.map((b) => b.dataset.place)).toEqual(["home", "browser", "servers"]);
-    expect(places.map((b) => b.textContent?.replace(/:.*$/, ""))).toEqual(["Home", "Browser", "Localhost"]);
+    // One row of icons (D39): each a 16px glyph, its name the label and the
+    // tooltip, Localhost's tooltip listing what is live.
+    expect(places.every((b) => b.parentElement === places[0].parentElement && b.textContent === "")).toBe(true);
+    expect(places.map((b) => b.querySelector("svg")?.getAttribute("width"))).toEqual(["16", "16", "16"]);
+    expect(places.map((b) => b.getAttribute("aria-label"))).toEqual(["Home", "Browser", "Localhost"]);
+    expect(places.map((b) => b.title)).toEqual(["Home", "Browser", "Localhost · :5173 · :7676 · :3000 · :8080"]);
     expect(places.map((b) => b.getAttribute("aria-current"))).toEqual([null, null, "page"]);
-    expect(places[2].querySelector(".rl-sb-place-ports")!.textContent).toBe(":5173 · :7676 · :3000 +1");
     // Another Place owns the stage: no session row reads as open.
     expect(host.querySelector("li.rl-session-row button[aria-current]")).toBeNull();
     await click(places[2]);
@@ -307,6 +317,32 @@ describe("the grouped sidebar", () => {
     await click(places[0]);
     expect(onSelectPlace).toHaveBeenCalledWith("home");
     expect(full.onNewSession).not.toHaveBeenCalled();
+  });
+
+  it("the Places row is one tab stop, the current Place, and the arrows walk it (D39)", async () => {
+    const onSelectPlace = vi.fn();
+    await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: "browser", onSelectPlace });
+    const bar = host.querySelector<HTMLElement>(".rl-sb-places [role=toolbar]")!;
+    expect(bar.getAttribute("aria-label")).toBe("Places");
+    const places = [...bar.querySelectorAll<HTMLButtonElement>(".rl-sb-place")];
+    expect(places.map((b) => b.tabIndex)).toEqual([-1, 0, -1]);
+    const key = (k: string) => act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })); });
+    await act(async () => places[1].focus());
+    await key("ArrowRight");
+    expect(document.activeElement).toBe(places[2]);
+    await key("ArrowRight");
+    expect(document.activeElement).toBe(places[0]);
+    await key("ArrowLeft");
+    expect(document.activeElement).toBe(places[2]);
+    await key("Home");
+    expect(document.activeElement).toBe(places[0]);
+    await key("End");
+    expect(document.activeElement).toBe(places[2]);
+    await act(async () => places[2].click());
+    expect(onSelectPlace).toHaveBeenCalledWith("servers");
+    // Nothing current: the row is entered at Home.
+    await renderWith({ sessions: [summary("a", 1)], activeId: "a", place: null, onSelectPlace });
+    expect([...host.querySelectorAll<HTMLButtonElement>(".rl-sb-place")].map((b) => b.tabIndex)).toEqual([0, -1, -1]);
   });
 
   it("a session's own servers wear a ports chip on its status line; a click opens the URL, not the row", async () => {
@@ -409,7 +445,7 @@ describe("the grouped sidebar", () => {
     await renderWith({ sessions: [], chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }] });
     await click(lightRow("Status check").querySelector(".rl-sb-row"));
     expect(full.onSelectChat).toHaveBeenCalledWith("c");
-    await click(lightRow("Status check").querySelector(".rl-sb-dots"));
+    await click(await dots(lightRow("Status check")));
     expect([...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent)).toEqual(["Open chat", "Rename", "Archive", "Delete chat"]);
     await click([...document.querySelectorAll(".rl-row-menu-item")].find((b) => b.textContent === "Archive")!);
     expect(full.onArchiveChat).toHaveBeenCalledWith("c", true);
@@ -431,7 +467,7 @@ describe("the grouped sidebar", () => {
   it("renames a chat in place: Enter saves, Escape writes nothing, an emptied field is a cancel", async () => {
     await renderWith({ sessions: [], chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }] });
     const open = async () => {
-      await click(lightRow("Status check").querySelector(".rl-sb-dots"));
+      await click(await dots(lightRow("Status check")));
       await click([...document.querySelectorAll(".rl-row-menu-item")].find((b) => b.textContent === "Rename")!);
       return host.querySelector<HTMLInputElement>(".rl-sb-item .rl-sb-rename")!;
     };
@@ -473,7 +509,7 @@ describe("the grouped sidebar", () => {
     expect(launch.querySelector(".rl-sb-tag")!.textContent).toBe("launching");
     await click(launch.querySelector(".rl-sb-row"));
     expect(onSelectLaunch).toHaveBeenCalledWith("t");
-    await click(launch.querySelector(".rl-sb-dots"));
+    await click(await dots(launch));
     expect([...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent)).toEqual(["Open session"]);
   });
 
@@ -539,6 +575,129 @@ describe("the grouped sidebar", () => {
     await click(host.querySelector(".rl-cmb-go"));
     expect(onCombine).toHaveBeenCalledWith(["c", "a"]);
     expect(host.querySelector(".rl-cmb-bar")).toBeNull();
+  });
+});
+
+describe("a row's ⋯ (D37)", () => {
+  const props = {
+    ...handlers,
+    onRename: vi.fn(),
+    onArchive: vi.fn(),
+    onSelectChat: vi.fn(),
+    onRenameChat: vi.fn(),
+    onArchiveChat: vi.fn(),
+    onDeleteChat: vi.fn(),
+    activeId: null,
+    pendingCounts: {},
+    viewedVersionNumber: null,
+    sessions: [summary("a", 2)],
+    terminals: { a: [{ id: "t1", title: "claude", status: "idle" as const }] },
+    chats: [{ companionId: "c", title: "Status check", updatedAt: 1, projectPath: "/repo/redline" }],
+    launches: [{ terminalId: "l", title: "Plan the roadmap", startedAt: 1, projectPath: "/repo/redline", working: true }],
+  };
+  const renderAll = () => act(async () => root.render(<SessionSidebar {...props} />));
+  const fire = (el: Element, type: string, init: MouseEventInit = {}) =>
+    act(async () => { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, ...init })); });
+  const key = (el: Element, init: KeyboardEventInit) =>
+    act(async () => { el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init })); });
+  const labels = () => [...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent);
+  const rowButton = () => planRow("Plan a").querySelector<HTMLElement>("button.hover-elevated")!;
+
+  it("a row at rest has none: not a plan, a chat, a launch or a terminal row", async () => {
+    await renderAll();
+    expect(host.querySelectorAll(".rl-session-row, .rl-sb-item, .rl-sb-term")).toHaveLength(4);
+    expect(host.querySelector(".rl-sb-dots, [aria-label^='Actions for']")).toBeNull();
+    // The version chip stands alone, and stays put under the pointer.
+    const chip = [...rowButton().querySelectorAll("span")].find((el) => el.textContent === "v1")!;
+    expect(chip.className).not.toMatch(/opacity|group-hover/);
+  });
+
+  it("hovering the row brings it at the far edge; a nested terminal row or leaving takes it away", async () => {
+    await renderAll();
+    await fire(rowButton().querySelector(".truncate")!, "pointerover");
+    expect(planRow("Plan a").querySelectorAll(".rl-sb-dots")).toHaveLength(1);
+    expect(host.querySelectorAll(".rl-sb-dots")).toHaveLength(1);
+    await fire(planRow("Plan a").querySelector(".rl-sb-term-row")!, "pointerover");
+    expect(host.querySelector(".rl-sb-dots")).toBeNull();
+    await fire(rowButton(), "pointerover");
+    await fire(rowButton(), "pointerout", { relatedTarget: document.body });
+    expect(host.querySelector(".rl-sb-dots")).toBeNull();
+    await fire(lightRow("Status check").querySelector(".rl-sb-title")!, "pointerover");
+    expect(lightRow("Status check").querySelector(".rl-sb-dots")).not.toBeNull();
+  });
+
+  it("focusing the row brings it next in the Tab order, and it stays while focused itself", async () => {
+    await renderAll();
+    await focus(rowButton());
+    const dotsEl = planRow("Plan a").querySelector<HTMLButtonElement>(".rl-sb-dots")!;
+    expect(rowButton().nextElementSibling).toBe(dotsEl);
+    expect(dotsEl.getAttribute("aria-label")).toBe("Actions for Plan a");
+    await focus(dotsEl);
+    expect(document.activeElement).toBe(dotsEl);
+    expect(planRow("Plan a").querySelector(".rl-sb-dots")).toBe(dotsEl);
+    await focus(planRow("Plan a").querySelector(".rl-sb-term-row"));
+    expect(host.querySelector(".rl-sb-dots")).toBeNull();
+    const chatButton = lightRow("Status check").querySelector(".rl-sb-row")!;
+    await focus(chatButton);
+    expect(chatButton.nextElementSibling?.classList.contains("rl-sb-dots")).toBe(true);
+  });
+
+  it("right-click opens the row's menu at the pointer, its items unchanged", async () => {
+    await renderAll();
+    await fire(rowButton(), "contextmenu", { clientX: 120, clientY: 64 });
+    expect(labels()).toEqual(["Open plan", "Rename", "Archive", "Delete plan"]);
+    const layer = document.querySelector<HTMLElement>(".rl-row-menu-layer")!;
+    expect([layer.style.left, layer.style.top]).toEqual(["120px", "64px"]);
+    await key(document.activeElement!, { key: "Escape" });
+    expect(document.querySelector(".rl-row-menu")).toBeNull();
+    await fire(lightRow("Status check").querySelector(".rl-sb-row")!, "contextmenu", { clientX: 40, clientY: 200 });
+    expect(labels()).toEqual(["Open chat", "Rename", "Archive", "Delete chat"]);
+    await key(document.activeElement!, { key: "Escape" });
+    await fire(lightRow("Plan the roadmap").querySelector(".rl-sb-row")!, "contextmenu", { clientX: 40, clientY: 240 });
+    expect(labels()).toEqual(["Open session"]);
+  });
+
+  it("⇧F10 and the menu key open the focused row's menu; Escape hands focus to its ⋯", async () => {
+    await renderAll();
+    await focus(rowButton());
+    await key(rowButton(), { key: "F10", shiftKey: true });
+    expect(labels()).toEqual(["Open plan", "Rename", "Archive", "Delete plan"]);
+    expect(document.activeElement?.classList.contains("rl-row-menu-item")).toBe(true);
+    await key(document.activeElement!, { key: "Escape" });
+    expect(document.querySelector(".rl-row-menu")).toBeNull();
+    expect(document.activeElement).toBe(planRow("Plan a").querySelector(".rl-sb-dots"));
+    // F10 alone is not the menu key.
+    await key(rowButton(), { key: "F10" });
+    expect(document.querySelector(".rl-row-menu")).toBeNull();
+    const chatButton = lightRow("Status check").querySelector<HTMLElement>(".rl-sb-row")!;
+    await focus(chatButton);
+    await key(chatButton, { key: "ContextMenu" });
+    expect(labels()).toEqual(["Open chat", "Rename", "Archive", "Delete chat"]);
+  });
+
+  it("source pin: every sidebar row hands RowMenu its hover state, and RowMenu draws no ⋯ without it", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const tsx = readFileSync("src/components/SessionSidebar.tsx", "utf8");
+    const menus = tsx.split("<RowMenu").slice(1).map((tag) => tag.slice(0, tag.indexOf("/>")));
+    expect(menus).toHaveLength(2);
+    for (const tag of menus) expect(tag).toContain("trigger={hot}");
+    // The plan row's version chip no longer steps aside for a ⋯.
+    const planRowSource = tsx.slice(tsx.indexOf("function SessionRowBase("), tsx.indexOf("const SessionRow = memo("));
+    expect(planRowSource).not.toContain("group-hover");
+    const menu = readFileSync("src/components/RowMenu.tsx", "utf8");
+    expect(menu).toContain("{(shown || open) && <button ref={anchor}");
+    // The boxed chip is gone from every stylesheet and component.
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]));
+    const boxed = walk("src")
+      .filter((p) => /\.(css|tsx?)$/.test(p) && !p.endsWith(".test.tsx"))
+      .filter((p) => readFileSync(p, "utf8").includes("rl-row-menu-trigger"));
+    expect(boxed).toEqual([]);
+    // No opacity trick: at rest the ⋯ is not in the DOM at all.
+    const css = readFileSync("src/components/SessionSidebar.css", "utf8");
+    const rule = css.slice(css.indexOf(".rl-sb-dots {"), css.indexOf("}", css.indexOf(".rl-sb-dots {")));
+    expect(rule).not.toContain("opacity");
   });
 });
 

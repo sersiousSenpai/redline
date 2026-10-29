@@ -94,15 +94,18 @@
     ]
   },
   "sidebar": {
-    "copy": ["Home", "Browser", "Localhost", "Plans", "Chats"],
+    "$comment": "D39: the Places are one row of three 28px icons; their names are labels and tooltips, not copy. D37: a row at rest has no ⋯.",
+    "copy": ["Plans", "Chats"],
     "absent": ["Runs"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "Places", "css": [".rl-sb .rl-sb-places"] },
-      { "name": "Home place", "within": ".rl-sb-places", "text": "Home", "up": "button, [role=button], a" },
+      { "name": "Places row (D39)", "css": [".rl-sb-places .rl-sb-place-row[role=toolbar]"], "expect": { "height": 28 } },
+      { "name": "Home place", "css": [".rl-sb-places .rl-sb-place[data-place=home][aria-label=Home]"], "expect": { "width": 28, "height": 28 } },
       { "name": "project group label", "css": [".rl-sb .rl-sb-section .rl-sb-label"], "expect": { "fontSize": 11 } },
       { "name": "session row title", "within": ".rl-sb", "text": "Din roadmap: next steps", "expect": { "fontSize": 13 } },
-      { "name": "Browser place (D30)", "css": [".rl-sb-places .rl-sb-place[data-place=browser]"] },
+      { "name": "Browser place (D30)", "css": [".rl-sb-places .rl-sb-place[data-place=browser]"], "expect": { "width": 28, "height": 28 } },
+      { "name": "Localhost place (D30)", "css": [".rl-sb-places .rl-sb-place[data-place=servers]"], "expect": { "width": 28, "height": 28 } },
       { "name": "Plans group header (D31)", "css": [".rl-sb .rl-sb-group[data-group=plans] .rl-sb-group-head"], "expect": { "height": 22 } },
       { "name": "Chats group header (D31)", "css": [".rl-sb .rl-sb-group[data-group=chats] .rl-sb-group-head"], "expect": { "height": 22 } },
       { "name": "group count", "css": [".rl-sb .rl-sb-group-count"] }

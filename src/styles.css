@@ -42,9 +42,8 @@ html[data-rl-transparency="reduced"] .rl-glass {
 
 /* A session row's ⋯ menu (RowMenu, board 4d): 190px of rows inside 6px of
    padding and the glass tier's 1px rim, 32px rows with a 14px glyph, Delete
-   tinted below a rule. A plan row keeps its boxed ⋯ chip; a chat row
-   draws its own bare glyph (components/SessionSidebar.css). */
-.rl-row-menu-trigger { position: absolute; right: 10px; top: 7px; z-index: 10; display: grid; place-items: center; width: 26px; height: 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink-muted); cursor: pointer; }
+   tinted below a rule. Each host draws its own trigger: the sidebar rows'
+   bare ⋯ only while hovered or focused (components/SessionSidebar.css). */
 .rl-row-menu-layer { position: fixed; z-index: 1000; width: 204px; }
 .rl-row-menu { display: flex; flex-direction: column; padding: 6px; }
 .rl-row-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 10px; border-radius: var(--rl-radius-menu-row); color: var(--color-ink); font-size: var(--rl-text-row); line-height: normal; text-align: left; cursor: pointer; }
@@ -58,7 +57,7 @@ html[data-rl-transparency="reduced"] .rl-glass {
 .rl-row-menu-key { font: inherit; font-size: var(--rl-text-label); opacity: .7; }
 .rl-row-menu-rule { flex: none; height: 1px; margin: 5px 4px; background: var(--color-rule); }
 /* The classic row's rename, laid over its own title line. */
-.rl-row-rename { position: absolute; z-index: 12; left: 24px; right: 44px; top: 5px; height: 26px; padding: 0 6px; border: 1px solid var(--color-focus-rim); border-radius: 6px; background: var(--color-paper); color: var(--color-ink); font-size: 13px; font-weight: 600; outline: none; }
+.rl-row-rename { position: absolute; z-index: 12; left: 24px; right: 36px; top: 5px; height: 26px; padding: 0 6px; border: 1px solid var(--color-focus-rim); border-radius: 6px; background: var(--color-paper); color: var(--color-ink); font-size: 13px; font-weight: 600; outline: none; }
 
 .rl-integration-dialog { margin: auto; width: min(510px, calc(100vw - 32px)); max-height: 88vh; overflow: auto; padding: 28px; color: var(--color-ink); background: var(--color-bg-elevated); border: 1px solid var(--color-rule); border-radius: 20px; box-shadow: 0 24px 100px #0006; }
 .rl-integration-dialog::backdrop { background: var(--color-overlay); backdrop-filter: blur(5px); }

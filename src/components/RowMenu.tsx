@@ -2,8 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 //! A session row's ⋯ menu (board 4d): Open, Rename, Archive, then Delete on
 //! its own below a rule, tinted so nobody has to hunt for it. The same menu
-//! opens from the ⋯, on right-click (at the pointer, like any context menu)
-//! and from the keyboard; ⌫ on a focused row skips it and asks to delete.
+//! opens on right-click (at the pointer, like any context menu), from the
+//! keyboard (⇧F10, the menu key) and from the ⋯ a row shows only while it is
+//! hovered or focused (D37); ⌫ on a focused row skips it and asks to delete.
 //!
 //! Also the row's inline rename, so a renamed row never leaves its place.
 
@@ -77,7 +78,8 @@ export function RowMenu({
   actions,
   label,
   at,
-  triggerClassName = "rl-row-menu-trigger",
+  trigger: shown = true,
+  triggerClassName,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -85,18 +87,20 @@ export function RowMenu({
   label: string;
   /** Where a right-click opened it. The ⋯ anchors it otherwise. */
   at?: { x: number; y: number } | null;
-  /** The classic row's boxed chip by default; the flow row's bare glyph. */
-  triggerClassName?: string;
+  /** Whether the ⋯ is out. An open menu keeps it, as its anchor and the
+   *  place focus goes back to. */
+  trigger?: boolean;
+  triggerClassName: string;
 }) {
-  const trigger = useRef<HTMLButtonElement>(null);
+  const anchor = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   useMenuOverlay(open);
   // Placed against its own measured size before the first paint, so it never
   // shows at a stale spot or past the window edge for a frame.
   useLayoutEffect(() => {
     const el = panel.current;
-    if (!open || !el || !trigger.current) return;
-    const r = trigger.current.getBoundingClientRect();
+    if (!open || !el || !anchor.current) return;
+    const r = anchor.current.getBoundingClientRect();
     const x = at ? at.x : r.left + ANCHOR_DX;
     const y = at ? at.y : r.top + ANCHOR_DY;
     el.style.left = `${Math.max(EDGE, Math.min(x, window.innerWidth - el.offsetWidth - EDGE))}px`;
@@ -106,7 +110,7 @@ export function RowMenu({
   useEffect(() => {
     if (!open) return;
     const close = (e: Event) => {
-      if (!panel.current?.contains(e.target as Node) && !trigger.current?.contains(e.target as Node)) onOpenChange(false);
+      if (!panel.current?.contains(e.target as Node) && !anchor.current?.contains(e.target as Node)) onOpenChange(false);
     };
     // A resize, or a scroll under an anchored menu, would leave it pointing
     // at nothing.
@@ -124,13 +128,13 @@ export function RowMenu({
   }, [open, onOpenChange]);
   const dismiss = () => {
     onOpenChange(false);
-    trigger.current?.focus();
+    anchor.current?.focus();
   };
   return <>
-    <button ref={trigger} type="button" className={triggerClassName} aria-label={`Actions for ${label}`} aria-haspopup="menu" aria-expanded={open}
+    {(shown || open) && <button ref={anchor} type="button" className={triggerClassName} aria-label={`Actions for ${label}`} aria-haspopup="menu" aria-expanded={open}
       onClick={e => { e.stopPropagation(); onOpenChange(!open); }}>
       <Ellipsis size={14} aria-hidden />
-    </button>
+    </button>}
     {open && createPortal(<div ref={panel} className="rl-row-menu-layer" onKeyDown={e => {
       // The menu is portalled, but React still bubbles its keys to the row
       // that rendered it, whose own ⌫ would act a second time.

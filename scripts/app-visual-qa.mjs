@@ -24,7 +24,7 @@
 //!   agent-cli the Agent tab showing its PTY (the CLI radio)
 //!   browser   the door's "Open in the browser" destination with an address
 //!   browser-newtab  the same, then the pane's own New tab: the new-tab page
-//!   sidebar   Places (Home · Browser · Localhost) + a project's Plans and
+//!   sidebar   Places (Home · Browser · Localhost, one icon row) + a project's Plans and
 //!             Chats groups: at 1440×900 (the whole sidebar) and at 900×640
 //!             (the narrow pose) unless --size is given
 //!   chat      the companion chat from its sidebar row: the compact composer
@@ -389,7 +389,18 @@ const DRIVES = {
   sidebar: [
     ...AT_HOME,
     { do: "waitFor", expr: "!!document.querySelector('.rl-sb .rl-sb-places') && !!document.querySelector('.rl-sb .rl-sb-section .rl-sb-label')", timeout: 8000, why: "the Places and a project section" },
-    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-place')].map(b => b.dataset.place).join() === 'home,browser,servers'", timeout: 8000, why: "the Places are Home · Browser · Localhost (D30)" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-place-row > .rl-sb-place')].map(b => b.dataset.place).join() === 'home,browser,servers'", timeout: 8000, why: "the Places are Home · Browser · Localhost (D30), one row of icons (D39)" },
+    { do: "waitFor", expr: "!document.querySelector('.rl-sb .rl-sb-dots')", timeout: 3000, why: "no row at rest wears a ⋯ (D37)" },
+    { do: "hover", within: ".rl-sb", text: PLAN_ROW, up: "button", why: "the pointer on the roadmap plan's row" },
+    { do: "waitFor", expr: "document.querySelectorAll('.rl-sb .rl-sb-dots').length === 1 && !!document.querySelector('.rl-sb .rl-session-row > .rl-sb-dots')", timeout: 3000, why: "its ⋯ alone is out, at the row's far edge (D37)" },
+    { do: "snapshot", name: "hover", why: "a hovered plan row: the chip, then its ⋯" },
+    { do: "rightClick", within: ".rl-sb .rl-sb-group[data-group=chats]", text: CHAT_ROW, up: "button", why: "right-click the chat's row" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-row-menu .rl-row-menu-label')].map(l => l.textContent).join() === 'Open chat,Rename,Archive,Delete chat'", timeout: 3000, why: "the row's menu at the pointer, its items unchanged" },
+    { do: "snapshot", name: "menu", why: "the chat row's menu from a right-click" },
+    { do: "key", key: "Escape", why: "close the menu" },
+    { do: "hover", css: [".rl-sb-head"], why: "the pointer off the rows" },
+    { do: "eval", expr: "document.activeElement?.blur()", why: "focus off the rows" },
+    { do: "waitFor", expr: "!document.querySelector('.rl-sb .rl-sb-dots, .rl-row-menu')", timeout: 3000, why: "at rest again: no ⋯ on any row" },
     { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-section[data-kind=project]')].some(s => [...s.querySelectorAll('.rl-sb-group-label')].map(l => l.textContent).join() === 'Plans,Chats')", timeout: 8000, why: "a project holds Plans and Chats (D31)" },
   ],
   chat: [
@@ -822,7 +833,7 @@ async function drive(scene) {
       rec.ok = true;
       continue;
     }
-    if (step.do === "click" || step.do === "rightClick") {
+    if (step.do === "click" || step.do === "rightClick" || step.do === "hover") {
       const at = await tools(`window.__qaTools.centre(${JSON.stringify(step)})`);
       if (!at) {
         rec.note = "target not found";
@@ -830,7 +841,9 @@ async function drive(scene) {
         throw new Error(`Drive ${scene}: ${step.why}: target not found`);
       }
       rec.via = at.via;
-      await mouse(at, step.do === "rightClick" ? "right" : "left");
+      // `hover`: the pointer moved onto it, no button.
+      if (step.do === "hover") await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: at.x, y: at.y });
+      else await mouse(at, step.do === "rightClick" ? "right" : "left");
     } else if (step.do === "type") {
       const text = step.text ?? (await cdp.evaluate(`window.__qa.scenario().${step.from}`));
       await cdp.call("Input.insertText", { text });
