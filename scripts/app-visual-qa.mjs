@@ -42,6 +42,8 @@
 //!             right quarter (snapshot of the lit half), let go: merged
 //!   door-min  (D40) Home's door at 1100×720 with both columns open: the
 //!             door at its 560 px minimum, one chip row, a one-line headline
+//!   door-under-browser  (W5 fix 1) split-plan-browser, then ⌘⇧D on the
+//!             page: the new door focused under it, the island on its plate
 //!
 //! Per scene × theme × size it writes `<scene>.png` — `-<theme>` appended
 //! for a theme other than aurora, `-<w>x<h>` when more than one size runs
@@ -74,7 +76,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door", "split-plan-browser", "split-three", "split-two-walls", "merge-drop", "plan-detached", "door-min"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door", "split-plan-browser", "split-three", "split-two-walls", "merge-drop", "plan-detached", "door-min", "door-under-browser"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -131,6 +133,7 @@ const SCENE = {
   "merge-drop": { board: "walls", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   // D41: the detached notice as one 28 px strip under the plan header.
   "plan-detached": { board: "plan-detached", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "door-under-browser": { board: "workbench", sizes: [{ width: 1440, height: 900 }] },
 };
 const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
@@ -455,6 +458,15 @@ const DRIVES = {
     { do: "waitFor", expr: `${STRIP}.length === window.__qaTabsBefore + 2 && ${STRIP}.some(t => t.getAttribute('aria-selected') === 'true' && /Din roadmap/.test(t.title))`, timeout: 8000, why: "its tab comes forward: no second Plan tab" },
   ],
 };
+// W5 fix 1: a door split down under the page (⌘⇧D with the page focused)
+// is FOCUSED and has the island — the composer on its plate — though the
+// tab's surface is the browser's; it was an empty plate.
+DRIVES["door-under-browser"] = [
+  ...DRIVES["split-plan-browser"],
+  { do: "click", css: [`${SHOWN} .rl-wb-pane[data-pane-kind=browser]`], why: "the page has the focus" },
+  { do: "key", key: "d", modifiers: 12, why: "⌘⇧D: split the page down with a door" },
+  { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=door][data-focused] [data-rl-door-plate]") && !!document.querySelector(".rl-frontdoor-focus[data-landed]")`, timeout: 8000, why: "the new door is focused and the island landed on its plate" },
+];
 
 const temporary = await mkdtemp(path.join(tmpdir(), "redline-app-qa-"));
 const report = {
