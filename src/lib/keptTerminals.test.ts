@@ -90,3 +90,16 @@ describe("a relaunch's hidden terminals attach one per idle frame", () => {
     expect(ran[ran.length - 1], "adoption is used up by the first attach").toBe("again");
   });
 });
+
+import { agentLiveness } from "./stillRunning";
+
+describe("is a kept session's CLI still running?", () => {
+  it("only with the agent in front of a live terminal; the shell in front is a CLI that exited; unknown is neither", () => {
+    expect(agentLiveness("t-agent", null, true, "claude 2")).toEqual({ state: "checking" });
+    expect(agentLiveness("t-agent", ["t-agent"], true, "claude 2")).toEqual({ state: "running", label: "claude 2" });
+    expect(agentLiveness("t-shell", ["t-shell"], false, "zsh"), "exited CLI: Restore as before").toBeNull();
+    expect(agentLiveness("t-new", ["t-new"], undefined, undefined), "not sampled yet").toEqual({ state: "checking" });
+    expect(agentLiveness("t-agent", [], true, "claude 2"), "terminal gone: Restore").toBeNull();
+    expect(agentLiveness(undefined, ["x"], undefined, undefined)).toBeNull();
+  });
+});

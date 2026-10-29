@@ -58,9 +58,10 @@ export interface PlanNoticesProps {
     /** Why the last restore failed, when it did. */
     failure: string | null;
     copy: { lede: string; body: string };
-    /** Its CLI is still running, in this terminal (kept through a quit):
-     *  nothing to restore, and resuming would run it twice. */
-    stillRunning?: string | null;
+    /** Its CLI is still running in a terminal kept through a quit (nothing
+     *  to restore: resuming would run it twice), or that is not known yet
+     *  (neither "still running" nor Restore). lib/stillRunning. */
+    still?: { state: "running"; label: string } | { state: "checking" } | null;
     /** Which harness the restore resumes on; a legacy plan asks. */
     decision: { harness: RestoreHarness; legacy: boolean; chosen: boolean; label: string };
     onHarness: (harness: RestoreHarness) => void;
@@ -131,10 +132,12 @@ export function PlanNotices(p: PlanNoticesProps) {
 
 function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTerminal: (() => void) | null }) {
   const blocked = d.blockers.length > 0;
-  if (d.stillRunning && !d.restoring)
+  if (d.still?.state === "checking" && !d.restoring)
+    return <Notice quiet title="Checking whether its session is still running…" tip="Redline is asking the terminals it kept while it was closed." />;
+  if (d.still?.state === "running" && !d.restoring)
     return (
       <Notice
-        title={`Still running in ${d.stillRunning}`}
+        title={`Still running in ${d.still.label}`}
         tip={`Its ${d.decision.label} session kept running while Redline was closed, so there is nothing to restore: resuming it would run the conversation twice. If it is asking something, it asks in its terminal.`}
         onDismiss={d.onDismiss}
       >

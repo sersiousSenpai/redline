@@ -290,6 +290,7 @@ const TombScreen = lazy(() => import("./components/TombScreen").then((m) => ({ d
 // (lib/stageDock).
 import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent, type LaunchProc } from "./lib/sessionTerminals";
 import type { LivePty } from "./lib/terminalWorkspace";
+import { agentLiveness } from "./lib/stillRunning";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path), warmed the moment a
 // selection shows that menu.
@@ -2426,6 +2427,7 @@ function App() {
   const [termStatuses, setTermStatuses] = useState<ReadonlyMap<string, TerminalStatus>>(() => new Map());
   const termStatusesRef = useRef(termStatuses);
   termStatusesRef.current = termStatuses;
+
   // A wall closing with something still running in it: Terminate or Keep
   // running. Nothing is ever hidden on its own — a kept terminal stays under
   // its session in the sidebar until a click puts it back on a wall.
@@ -6549,14 +6551,13 @@ function App() {
   // restore is the one above, so a click and the timer share one slot.
   const autoNoticeHere = useAutoNotice(activeId);
   // A plan session whose CLI kept running in a terminal Redline adopted after
-  // a quit is not detached in any sense that a Restore could fix: resuming
-  // it would run the conversation twice. Live terminal, agent in front (or
-  // not yet sampled) = still running.
-  const agentStillRunning = (sessionId: string): string | null => {
+  // a quit is not detached in any sense a Restore could fix: resuming it
+  // would run the conversation twice (lib/stillRunning: the agent in front
+  // of a live terminal; unknown until the helper and a sample have said).
+  const agentStillRunning = (sessionId: string) => {
     const t = sessionTerminalsRef.current.get(sessionId);
-    if (!t || !liveTermIdsRef.current?.includes(t)) return null;
-    const st = termStatusesRef.current.get(t);
-    return st?.state === "exited" ? null : st?.label ?? "its terminal";
+    const st = t ? termStatusesRef.current.get(t) : undefined;
+    return agentLiveness(t, liveTermIdsRef.current, st?.agent, st?.label);
   };
   const autoResume = useAutoResume({
     summaries,
@@ -6566,8 +6567,11 @@ function App() {
       const d = restoreDecisionFor(s);
       return d.legacy && !d.chosen;
     },
-    start: (sessionId) => {
-      if (agentStillRunning(sessionId)) return Promise.resolve("blocked" as const);
+    start: async (sessionId) => {
+      // Unknown yet (a launch still hearing from the helper): wait for it,
+      // a few seconds at most, rather than resume a CLI that may be live.
+      for (let i = 0; i < 20 && agentStillRunning(sessionId)?.state === "checking"; i++) await new Promise((r) => setTimeout(r, 250));
+      if (agentStillRunning(sessionId)) return "blocked" as const;
       const target = summaries.find((s) => s.sessionId === sessionId);
       return target ? restorePlanSessionWith({ target }) : Promise.resolve("blocked" as const);
     },
@@ -7649,6 +7653,13 @@ function App() {
   // session's row, and only there (D44). Kept by value, so a sample that
   // moved no port renders nothing.
   const [termPorts, setTermPorts] = useState<ReadonlyMap<string, readonly number[]>>(() => new Map());
+  // A detached plan's terminal that is still live (kept through a quit) is
+  // sampled too, so its foreground says whether its CLI still runs.
+  const detachedLiveTerms = useMemo(() => {
+    if (!liveTermIds) return [];
+    return summaries.filter((s) => s.attachState === "detached").map((s) => sessionTerminals.get(s.sessionId)).filter((t): t is string => !!t && liveTermIds.includes(t));
+  }, [summaries, sessionTerminals, liveTermIds]);
+  const fleetWatchIds = useStableValue(useMemo(() => [...waitingLaunchIds, ...detachedLiveTerms], [waitingLaunchIds, detachedLiveTerms]));
   const noteLaunchProcs = useCallback(
     (rows: readonly (LaunchProc & { ports?: readonly number[] })[], at: number) => {
       noteFlowLaunch({ type: "procs", rows, at });
@@ -9359,7 +9370,7 @@ function App() {
           auto: autoNoticeHere,
           onStopAuto: () => { if (activeId) autoResume.cancel(activeId); },
           copy: detachedCopy,
-          stillRunning: activeId ? agentStillRunning(activeId) : null,
+          still: activeId ? agentStillRunning(activeId) : null,
           decision: restoreDecision,
           onHarness: (h: RestoreHarness) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),
           blockers: restoreBlockers,
@@ -10288,7 +10299,7 @@ function App() {
             onSessionAction={terminalSessionAction}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
-            watchIds={waitingLaunchIds}
+            watchIds={fleetWatchIds}
             onProcs={noteLaunchProcs}
             heldTerminalIds={heldTermIds}
             heldPlanTitles={heldPlanTitles}

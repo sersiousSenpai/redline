@@ -929,6 +929,22 @@ describe("terminals that outlive the app (PTY helper)", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("app_quit", { stopTerminals: true });
   });
 
+  it("with terminals ending at quit, a moved terminal still gets the old confirm", async () => {
+    mocks.quitSettings = { helperActive: true, keepOnQuit: false, askOnQuit: true };
+    sessionStorage.setItem(TERMINAL_WORKSPACE_KEY, JSON.stringify({ tabs: [{ id: "busy", cwd: "/repo" }] }));
+    mocks.cwd = "/repo/deeper";
+    await mount();
+    await act(async () => mocks.listeners.get("quit-requested")!({ payload: 9 }));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(document.body.textContent).toContain("Close Redline?");
+    });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "app_quit")).toBe(false);
+    const close = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Close")!;
+    await act(async () => close.click());
+    expect(mocks.invoke).toHaveBeenCalledWith("app_quit", { stopTerminals: true });
+  });
+
   it("a held plan is always said, even with the question turned off", async () => {
     mocks.quitSettings = { helperActive: true, keepOnQuit: true, askOnQuit: false };
     mocks.inventory = [kept("agent")];

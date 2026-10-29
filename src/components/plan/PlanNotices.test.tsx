@@ -88,13 +88,17 @@ describe("PlanNotices: classic's plan-pane notices in flow", () => {
 
   it("a CLI still running in a kept terminal is not offered a Restore: it says where it runs", async () => {
     const show = vi.fn();
-    const d = detached({ stillRunning: "claude 2" });
+    const d = detached({ still: { state: "running", label: "claude 2" } });
     await render({ ...none, detached: d, onShowTerminal: show });
     expect(host.textContent).toContain("Still running in claude 2");
     expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Restore")).toBe(false);
     await press("Open terminal");
     expect(show).toHaveBeenCalledTimes(1);
     expect(d.onRestore).not.toHaveBeenCalled();
+    // Not known yet: neither still running nor Restore.
+    await render({ ...none, detached: detached({ still: { state: "checking" } }), onShowTerminal: show });
+    expect(host.textContent).toContain("Checking whether its session is still running");
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Restore")).toBe(false);
   });
 
   it("restoring shows its progress and the way to its terminal; a failure offers Retry", async () => {

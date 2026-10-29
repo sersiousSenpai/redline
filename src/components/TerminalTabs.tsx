@@ -65,6 +65,7 @@ import {
   attentionText,
   deriveTermState,
   effectiveAttention,
+  isAgentComm,
   isLoud,
   loudOldestFirst,
   mergeAttention,
@@ -104,6 +105,9 @@ import {
   type TileActions,
 } from "./TerminalTileMenu";
 import { TileGutter } from "./TileGutter";
+// When terminals end with a quit and one has moved off its start directory,
+// the old confirm (lazy: only a quit that needs it loads it).
+const CloseConfirmModal = lazy(() => import("./CloseConfirmModal").then((m) => ({ default: m.CloseConfirmModal })));
 // The quit dialog (PTY helper plan §5), loaded on the first quit that asks.
 const QuitDialog = lazy(() => import("./QuitDialog").then((m) => ({ default: m.QuitDialog })));
 // The tile ✕'s Terminate / Keep running ask: the wall close's own dialog,
@@ -136,6 +140,9 @@ interface Tab {
 export interface TerminalStatus {
   state: TermState;
   label: string;
+  /** An agent holds the foreground (the fleet poll's last sample); absent
+   *  until a sample has come in. Whether a kept session's CLI still runs. */
+  agent?: boolean;
 }
 
 interface TerminalTabsProps {
@@ -610,6 +617,8 @@ export const TerminalTabs = memo(
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
   // A quit that has something to say (lib/quitFlow): the dialog's content.
   const [quitting, setQuitting] = useState<QuitAsk | null>(null);
+  // A quit that ends terminals one of which has moved off its start dir.
+  const [confirmEnd, setConfirmEnd] = useState(false);
 
   // Clamp at READ time, not in an effect: an effect would give one render
   // where focusedId is undefined and onActiveTabChange(undefined) would reach
@@ -1250,7 +1259,13 @@ export const TerminalTabs = memo(
   }, [asking, attention, exited, presence, acks]);
   // Keyed on what the host reads, so an OSC title or a cwd tick that moved
   // no state and no label never reaches it.
-  const statusKey = tabs.map((t) => `${t.id}\u0001${termStates.get(t.id) ?? "idle"}\u0001${identity.byId.get(t.id)?.label ?? ""}`).join("\u0002");
+  const agentInFront = (id: string): boolean | undefined => {
+    const proc = procs.get(id);
+    return proc ? !proc.fgIsShell && isAgentComm(proc.fgComm ?? null, attention.has(id)) : undefined;
+  };
+  const agentRef = useRef(agentInFront);
+  agentRef.current = agentInFront;
+  const statusKey = tabs.map((t) => `${t.id}\u0001${termStates.get(t.id) ?? "idle"}\u0001${identity.byId.get(t.id)?.label ?? ""}\u0001${agentInFront(t.id) ?? ""}`).join("\u0002");
   useEffect(() => {
     // Not before the daemon's snapshot has landed: until then a terminal's
     // state is its process sample alone, and a reload would paint every
@@ -1259,7 +1274,8 @@ export const TerminalTabs = memo(
     if (!onStatesChange || !attentionReady) return;
     const out = new Map<string, TerminalStatus>();
     for (const t of tabsRef.current) {
-      out.set(t.id, { state: statesRef.current.get(t.id) ?? "idle", label: identity.byId.get(t.id)?.label ?? "terminal" });
+      const agent = agentRef.current(t.id);
+      out.set(t.id, { state: statesRef.current.get(t.id) ?? "idle", label: identity.byId.get(t.id)?.label ?? "terminal", ...(agent === undefined ? {} : { agent }) });
     }
     onStatesChange(out);
     // `statusKey` is the change; the rest is read fresh.
@@ -1885,10 +1901,39 @@ export const TerminalTabs = memo(
     const offs: (() => void)[] = [];
     let disposed = false;
     const keep = (p: Promise<() => void>) => void p.then((u) => (disposed ? dropListener(u) : offs.push(u))).catch(() => {});
+    // Terminals that end with this quit: confirm, as a real terminal app
+    // does, when one has work in flight. "Moved off the directory it opened
+    // in" is the signal; one still at its start dir is disposable.
+    const norm = (p: string) => p.replace(/\/+$/, "") || "/";
+    const anyTerminalMoved = async (): Promise<boolean> => {
+      let home = "";
+      try {
+        home = await homeDir();
+      } catch {
+        /* compare against explicit cwds only */
+      }
+      let live: Record<string, string> = {};
+      try {
+        live = await invoke<Record<string, string>>("pty_cwds", { ids: tabsRef.current.map((t) => t.id) });
+      } catch {
+        return false;
+      }
+      return tabsRef.current.some((t) => {
+        const initial = t.cwd ?? home;
+        const cur = live[t.id];
+        return !!initial && !!cur && norm(cur) !== norm(initial);
+      });
+    };
     const decide = async () => {
       let ask: QuitAsk | null = null;
       try {
         const [settings, list] = await Promise.all([invoke<QuitSettings>("terminal_settings"), invoke<LivePty[]>("pty_list")]);
+        if (!settings.helperActive || !settings.keepOnQuit) {
+          if (await anyTerminalMoved().catch(() => false)) {
+            if (!disposed) setConfirmEnd(true);
+            return;
+          }
+        }
         const { ids, titles, label } = heldRef.current;
         const alive = new Set(list.filter((p) => p.alive).map((p) => p.id));
         const held = [...(ids ?? [])].filter((id) => alive.has(id)).map((id) => titles?.get(id) || label(id) || "A plan");
@@ -2169,6 +2214,18 @@ export const TerminalTabs = memo(
             }}
             onTerminate={() => { closeTab(closeAsk.id); setCloseAsk(null); }}
             onCancel={() => setCloseAsk(null)}
+          />
+        </Suspense>,
+        document.body,
+      )}
+      {confirmEnd && createPortal(
+        <Suspense fallback={null}>
+          <CloseConfirmModal
+            onConfirm={() => void invoke("app_quit", { stopTerminals: true }).catch(() => {})}
+            onCancel={() => {
+              setConfirmEnd(false);
+              void invoke("quit_cancel").catch(() => {});
+            }}
           />
         </Suspense>,
         document.body,
