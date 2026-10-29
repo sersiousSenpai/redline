@@ -209,19 +209,29 @@
 .rl-sb-item[data-need] .rl-sb-tag { color: var(--color-warning); }
 .rl-sb-row:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 .rl-sb-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--color-ink-4); }
-/* Short of room, the title and a project's pill give way together, each in
-   proportion to its length: the pill never past two fifths of the row, nor
-   under 44px, so it always reads as a name. */
 .rl-sb-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chat's title and its project's pill share one line that wraps, clipped
+   to the row: the title asks for six characters (growing to its whole text,
+   then ellipsizing), the pill for its whole name. Short of room for both,
+   the pill wraps to the clipped second line and is gone (the row's tooltip
+   names the project); it is never cut. */
+.rl-sb-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: flex-start;
+  column-gap: 8px;
+  height: var(--rl-sb-row);
+  overflow: hidden;
+}
+.rl-sb-main > .rl-sb-title { flex: 1 1 6ch; max-width: max-content; line-height: var(--rl-sb-row); }
 .rl-sb-chip {
-  flex: 0 1 auto;
-  min-width: 44px;
-  max-width: 40%;
+  flex: none;
   box-sizing: border-box;
   height: 16px;
   padding: 0 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   border: 1px solid var(--color-rule);
   border-radius: 9999px;

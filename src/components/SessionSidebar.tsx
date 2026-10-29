@@ -1634,10 +1634,13 @@ function LightRowBase({ item, active, handlers, can }: {
             {icon}
             {chat ? (
               <>
-                <span className="rl-sb-title">{item.title}</span>
-                {/* Only a chat with a project wears one: a general chat is
-                    the title and its time, nothing more. */}
-                {item.projectLabel && <span className="rl-sb-chip" title={item.projectPath ?? undefined}>{item.projectLabel}</span>}
+                <span className="rl-sb-main">
+                  <span className="rl-sb-title">{item.title}</span>
+                  {/* Only a chat with a project wears one: a general chat is
+                      the title and its time, nothing more. Whole or not at
+                      all: short of room it wraps out of sight (CSS). */}
+                  {item.projectLabel && <span className="rl-sb-chip" title={item.projectPath ?? undefined}>{item.projectLabel}</span>}
+                </span>
                 <span className="rl-sb-age">{rowAge(item.at)}</span>
               </>
             ) : (

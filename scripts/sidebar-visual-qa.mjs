@@ -87,11 +87,18 @@ try {
     if ((await cdp.evaluate(`${chatsHead}.getAttribute('aria-expanded')`)) !== String(open)) { await cdp.evaluate(`${chatsHead}.click()`); await settle(); }
   };
   const chatRows = "[...document.querySelectorAll('.rl-sb-part[data-part=chats] li.rl-sb-item')]";
-  const chatChecks = async (tag) => {
+  const chatChecks = async (tag, wide = false) => {
     check(`${tag}: Chats open shows eight one-line rows, then Show 2 more`, await cdp.evaluate(`(()=>{const r=${chatRows};const f=document.querySelector('.rl-sb-part[data-part=chats] .rl-sb-fold');return r.length===8&&r.every(li=>Math.round(li.querySelector('.rl-sb-row').getBoundingClientRect().height)===28)&&f&&f.textContent==='Show 2 more'})()`), await cdp.evaluate(`${chatRows}.map(li=>li.querySelector('.rl-sb-row').getBoundingClientRect().height)`));
-    check(`${tag}: a project's chat wears its project's pill, a general chat none`, await cdp.evaluate(`(()=>{const pill=t=>${chatRows}.find(li=>li.querySelector('.rl-sb-title').textContent.startsWith(t))?.querySelector('.rl-sb-chip')?.textContent??null;return pill('Pricing page')==='qwallah'&&pill('Why does the PTY')==='redline'&&pill('Literature')==='research'&&pill('Lunch-and-learn')===null&&pill('Weekend')===null})()`));
     check(`${tag}: the chat that became a plan is not in Chats`, await cdp.evaluate(`!${chatRows}.some(li=>li.textContent.includes('Onboarding checklist'))`));
-    check(`${tag}: each chat row's pieces stay inside the row, the age at its far right`, await cdp.evaluate(`${chatRows}.every(li=>{const r=li.querySelector('.rl-sb-row').getBoundingClientRect();const a=li.querySelector('.rl-sb-age').getBoundingClientRect();const t=li.querySelector('.rl-sb-title').getBoundingClientRect();const c=li.querySelector('.rl-sb-chip')?.getBoundingClientRect();return a.right<=r.right-7&&a.right>=r.right-9&&t.left>=r.left&&(!c||(c.left>=t.right&&c.right<=a.left))})`));
+    check(`${tag}: each chat row's pieces stay inside the row, the age at its far right`, await cdp.evaluate(`${chatRows}.every(li=>{const r=li.querySelector('.rl-sb-row').getBoundingClientRect();const a=li.querySelector('.rl-sb-age').getBoundingClientRect();const t=li.querySelector('.rl-sb-title').getBoundingClientRect();return a.right<=r.right-7&&a.right>=r.right-9&&t.left>=r.left&&t.right<=a.left})`));
+    // A pill is whole or gone: on the row's line, uncut, clear of the title
+    // and the age; or wrapped wholly out of sight. A general chat has none.
+    const pills = await cdp.evaluate(`${chatRows}.map(li=>{const r=li.querySelector('.rl-sb-row').getBoundingClientRect();const m=li.querySelector('.rl-sb-main').getBoundingClientRect();const a=li.querySelector('.rl-sb-age').getBoundingClientRect();const t=li.querySelector('.rl-sb-title');const tr=t.getBoundingClientRect();const c=li.querySelector('.rl-sb-chip');if(!c)return {title:t.textContent,pill:null};const p=c.getBoundingClientRect();const shown=p.top>=r.top-0.5&&p.bottom<=r.bottom+0.5;return {title:t.textContent,pill:c.textContent,shown,whole:c.scrollWidth<=c.clientWidth+0.5,clear:p.left>=tr.right&&p.right<=a.left&&p.right<=m.right+0.5,gone:p.top>=m.bottom-0.5,titleCut:t.scrollWidth>t.clientWidth+0.5}})`);
+    const pillOf = (start) => pills.find((p) => p.title.startsWith(start))?.pill ?? null;
+    check(`${tag}: a general chat wears no pill; a project's chat its project's name`, pillOf("Lunch-and-learn") === null && pillOf("Weekend") === null && pillOf("Pricing page") === "qwallah" && pillOf("Why does the PTY") === "redline" && pillOf("Literature") === "research", pills);
+    check(`${tag}: every pill is whole on the row's line, or wrapped wholly out of sight; never cut`, pills.every((p) => p.pill === null || (p.whole && (p.shown ? p.clear : p.gone))), pills);
+    check(`${tag}: a long title gives way before its pill does`, pills.some((p) => p.pill && p.shown && p.titleCut), pills);
+    if (wide) check(`${tag}: at this width every project pill is shown`, pills.every((p) => p.pill === null || p.shown), pills);
     check(`${tag}: the working chat wears the spinner where its icon was`, await cdp.evaluate(`!!${chatRows}.find(li=>li.textContent.includes('Lunch-and-learn')).querySelector('.rl-sb-icon .rl-sb-spin')`));
   };
   for (const [width, height] of sizes) {
@@ -122,7 +129,7 @@ try {
       await cdp.evaluate(toEnd); await settle();
       await screenshot(`sidebar-${tone}-${width}x${height}-chats-collapsed`);
       await setChats(true); await cdp.evaluate(toChats); await settle();
-      await chatChecks(tag);
+      await chatChecks(tag, width >= 1440);
       check(`${tag}: Chats open: no horizontal page overflow`, await cdp.evaluate("document.documentElement.scrollWidth<=innerWidth"));
       await screenshot(`sidebar-${tone}-${width}x${height}-chats-expanded`);
       await setChats(false);
@@ -146,7 +153,7 @@ try {
         await cdp.evaluate(toEnd); await settle();
         await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}-chats-collapsed`, "[data-qa-sidebar]");
         await setChats(true); await cdp.evaluate(toChats); await settle();
-        await chatChecks(`${tag}, sidebar ${sidebar}px`);
+        await chatChecks(`${tag}, sidebar ${sidebar}px`, sidebar >= 260);
         check(`${tag}, sidebar ${sidebar}px: no chat row runs past the sidebar`, await cdp.evaluate(`(()=>{const a=document.querySelector('[data-qa-sidebar]').getBoundingClientRect();return ${chatRows}.every(li=>li.getBoundingClientRect().right<=a.right+0.5)})()`));
         await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}-chats-expanded`, "[data-qa-sidebar]");
         await setChats(false);

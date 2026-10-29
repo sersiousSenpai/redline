@@ -300,7 +300,10 @@ describe("the grouped sidebar", () => {
     expect(inProject.querySelector(".rl-sb-chip")!.textContent).toBe("redline");
     expect(inProject.querySelector(".rl-sb-age")!.textContent).toBe("2h");
     expect(inProject.querySelector(".rl-sb-icon svg")!.getAttribute("width")).toBe("16");
-    expect([...inProject.querySelector(".rl-sb-row")!.children].map((e) => e.className)).toEqual(["rl-sb-icon", "rl-sb-title", "rl-sb-chip", "rl-sb-age"]);
+    expect([...inProject.querySelector(".rl-sb-row")!.children].map((e) => e.className)).toEqual(["rl-sb-icon", "rl-sb-main", "rl-sb-age"]);
+    expect([...inProject.querySelector(".rl-sb-main")!.children].map((e) => e.className)).toEqual(["rl-sb-title", "rl-sb-chip"]);
+    // The project is in the tooltip too, for when the pill has no room.
+    expect(inProject.querySelector(".rl-sb-row")!.getAttribute("title")).toContain("/repo/redline");
     const general = lightRow("Lunch ideas");
     expect(general.querySelector(".rl-sb-chip")).toBeNull();
     expect(general.querySelector(".rl-sb-age")!.textContent).toBe("5m");
