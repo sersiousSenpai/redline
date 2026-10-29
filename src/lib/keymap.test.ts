@@ -437,11 +437,22 @@ describe("any split tree (W5)", () => {
     expect(isEqualizeKey(combo({ key: "=", code: "Equal", altKey: true, ctrlKey: true }))).toBe(false);
     expect(bindingKeys("equalize")).toEqual(["⌘", "⌥", "="]);
   });
-  it("a focused web page keeps the pane chords (no menu item or signal carries them)", () => {
-    for (const id of ["split-anywhere", "focus-pane", "equalize"]) {
-      expect(PAGE_KEEPS).toContain(id);
-      expect(PAGE_ROUTES[id]).toBeUndefined();
-    }
+  it("a focused web page forwards the pane chords; it keeps none (its own ⌘D only when it took it)", () => {
+    expect(PAGE_KEEPS).toEqual([]);
+    expect(PAGE_ROUTES.split).toEqual([{ signal: "split" }]);
+    expect(PAGE_ROUTES["split-down"]).toEqual([{ signal: "split-down" }]);
+    expect(PAGE_ROUTES["split-anywhere"]).toEqual([{ signal: "split-anywhere" }]);
+    expect(PAGE_ROUTES["zoom-pane"]).toEqual([{ signal: "zoom-pane" }]);
+    expect(PAGE_ROUTES.equalize).toEqual([{ signal: "equalize" }]);
+    expect(PAGE_ROUTES["focus-pane"]).toEqual(["left", "right", "up", "down"].map((d) => ({ signal: `focus-${d}` })));
+  });
+  it("the page side forwards ⌘D only after the page had its turn, and only when it did not take it", () => {
+    const js = readFileSync("src-tauri/src/browser_signals.js", "utf8");
+    const after = js.slice(js.indexOf('window.addEventListener("keydown"'));
+    expect(after).toContain("event.defaultPrevented");
+    expect(after).toContain('"split-down" : "split"');
+    // Bubble phase: no capture flag on that listener.
+    expect(after.slice(0, after.indexOf("});") + 3)).not.toMatch(/},\s*true\)/);
   });
 });
 

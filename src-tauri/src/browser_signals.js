@@ -71,10 +71,30 @@
         else if (event.code === "KeyJ" && event.shiftKey) value = "needs-you";
         else if (event.code === "KeyN" && event.shiftKey) value = "new-plan";
         else if (event.code === "Digit0" && event.shiftKey) value = "snap-back";
+        // The workbench's pane chords (W5): ⌘\ splits right with a door,
+        // ⌘⇧↩ zooms the pane. ⌘D / ⌘⇧D wait for the page (below).
+        else if (event.code === "Backslash" && !event.shiftKey) value = "split-anywhere";
+        else if ((event.code === "Enter" || event.code === "NumpadEnter") && event.shiftKey) value = "zoom-pane";
+      }
+      // ⌘⌥= evens the tab's splits; ⌃⌘ + an arrow focuses the pane that way
+      // (⌘⌥↑ / ⌘⌥↓ stay the page's). On the physical key: ⌥ rewrites key.
+      if (event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && (event.code === "Equal" || event.code === "NumpadEqual")) value = "equalize";
+      if (event.metaKey && event.ctrlKey && !event.altKey && !event.shiftKey) {
+        const focus = { ArrowLeft: "focus-left", ArrowRight: "focus-right", ArrowUp: "focus-up", ArrowDown: "focus-down" }[event.code];
+        if (focus) value = focus;
       }
     }
     if (value) { event.preventDefault(); event.stopImmediatePropagation(); post({ kind: "shortcut", value }); }
   }, true);
+  // ⌘D / ⌘⇧D split the pane right / down — unless the page took the key
+  // itself (a web editor's ⌘D): heard after the page's own handlers, on the
+  // way out, and only when nobody prevented its default.
+  window.addEventListener("keydown", (event) => {
+    if (!event.isTrusted || event.defaultPrevented || event.target?.closest?.("[data-redline-selection]")) return;
+    if (!event.metaKey || event.ctrlKey || event.altKey || event.code !== "KeyD") return;
+    event.preventDefault();
+    post({ kind: "shortcut", value: event.shiftKey ? "split-down" : "split" });
+  });
   let lastInput = 0;
   for (const name of ["pointerdown", "keydown", "wheel", "touchstart"]) document.addEventListener(name, (event) => {
     if (!event.isTrusted) return;

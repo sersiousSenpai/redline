@@ -28,10 +28,14 @@ fn page_url(url: &str) -> bool {
 /// ⌃Tab / ⌃⇧Tab (`next-page` / `previous-page`) were sent but refused here,
 /// so cycling the browser's pages from inside one did nothing; the app's
 /// globals no menu item carries (⌘K, ⌘⇧J, ⌘⇧N, ⌘⇧0) arrive the same way.
-pub const PAGE_SHORTCUTS: [&str; 17] = [
+pub const PAGE_SHORTCUTS: [&str; 26] = [
     "location", "new-tab", "close-tab", "next-tab", "previous-tab", "next-page", "previous-page",
     "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door", "toggle-sidebar",
     "toggle-plan-panel", "palette", "needs-you", "new-plan", "snap-back",
+    // The workbench's pane chords (W5): ⌘D / ⌘⇧D, ⌘\, ⌘⇧↩, ⌘⌥= and
+    // ⌃⌘ + an arrow.
+    "split", "split-down", "split-anywhere", "zoom-pane", "equalize",
+    "focus-left", "focus-right", "focus-up", "focus-down",
 ];
 pub fn parse_signal(raw: &str) -> Option<Value> {
     if raw.len() > 24_000 { return None; }
@@ -237,6 +241,11 @@ mod tests {
         for value in ["next-page", "previous-page", "palette", "needs-you", "new-plan", "snap-back"] {
             assert!(parse_signal(&format!(r#"{{"kind":"shortcut","value":"{value}"}}"#)).is_some(), "{value}");
         }
+        // The workbench's pane chords, pressed in the page (W5).
+        for value in ["split", "split-down", "split-anywhere", "zoom-pane", "equalize", "focus-left", "focus-right", "focus-up", "focus-down"] {
+            assert!(parse_signal(&format!(r#"{{"kind":"shortcut","value":"{value}"}}"#)).is_some(), "{value}");
+        }
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"focus-sideways"}"#).is_none());
         // Only those: a page cannot name another.
         assert!(parse_signal(r#"{"kind":"shortcut","value":"quit"}"#).is_none());
         // And never from a sub-frame: only the main frame's keys are the page's.

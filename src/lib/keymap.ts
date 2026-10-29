@@ -156,15 +156,24 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly PageRoute[]>> = {
   // The page keeps ⌘B (bold in a web editor); forwarded only outside a field.
   sidebar: [{ signal: "toggle-sidebar" }],
   rail: [{ signal: "toggle-plan-panel" }],
+  // W5's pane chords. ⌘D / ⌘⇧D only when the page did not take them (a web
+  // editor's own ⌘D keeps it): the page side listens after the page does.
+  split: [{ signal: "split" }],
+  "split-down": [{ signal: "split-down" }],
+  "split-anywhere": [{ signal: "split-anywhere" }],
+  "zoom-pane": [{ signal: "zoom-pane" }],
+  equalize: [{ signal: "equalize" }],
+  "focus-pane": [{ signal: "focus-left" }, { signal: "focus-right" }, { signal: "focus-up" }, { signal: "focus-down" }],
 };
 
 /** Not the app's chords but the browser's own, forwarded from a page all
  *  the same: ⌃Tab / ⌃⇧Tab cycle its pages. */
 export const PAGE_ONLY_SIGNALS: readonly string[] = ["next-page", "previous-page"];
 
-/** Wired bindings a focused page keeps for itself: splits and the zoom act
- *  on the workbench's panes, which a page is not. */
-export const PAGE_KEEPS: readonly string[] = ["split", "split-down", "split-anywhere", "focus-pane", "equalize", "zoom-pane"];
+/** Wired bindings a focused page keeps for itself. None since W5: the pane
+ *  chords are forwarded too, and a page keeps its own ⌘D only when it took
+ *  it (`defaultPrevented`). */
+export const PAGE_KEEPS: readonly string[] = [];
 
 // ---- The two wired matchers -------------------------------------------------
 
