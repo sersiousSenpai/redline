@@ -18,6 +18,7 @@
 // slots do (`SingletonSlot`).
 
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Columns2, Equal, Maximize2, Minimize2, Rows2, SquareArrowOutUpRight, X } from "lucide-react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -27,7 +28,6 @@ import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
 import { MIN_SPLIT_SHARE, activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
 import { dropTargetAt, paneBoxes, type DropTarget } from "./drop";
 import { beginMeasure, endMeasure } from "./perf";
-import type { PaneRect } from "./reducer";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
 import type { TabStripItem } from "./TabStrip";
@@ -148,7 +148,7 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
   // webviews show their snapshots (a resize session), so the page under the
   // pointer is the DOM's and the drop zone paints over it.
   const tabsRef = useRef<HTMLDivElement | null>(null);
-  const [drop, setDrop] = useState<{ tabId: string; target: DropTarget; box: PaneRect } | null>(null);
+  const [drop, setDrop] = useState<{ tabId: string; target: DropTarget } | null>(null);
   const dragSession = useRef(false);
   const endDragSession = useCallback(() => {
     if (!dragSession.current) return;
@@ -177,15 +177,12 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
         beginResizeSession();
       }
       const target = targetAt(tabId, at);
-      const host = tabsRef.current?.getBoundingClientRect();
-      if (!target || !host) {
+      if (!target) {
         setDrop(null);
         return;
       }
-      const z = target.zone;
-      const box = { left: z.left - host.left, top: z.top - host.top, width: z.width, height: z.height };
       setDrop((prev) =>
-        prev && prev.tabId === tabId && prev.target.paneId === target.paneId && prev.target.edge === target.edge && prev.box.width === box.width && prev.box.height === box.height ? prev : { tabId, target, box },
+        prev && prev.tabId === tabId && prev.target.paneId === target.paneId && prev.target.edge === target.edge && prev.target.zone.width === target.zone.width && prev.target.zone.height === target.zone.height ? prev : { tabId, target },
       );
     },
     [endDragSession, targetAt],
@@ -273,15 +270,19 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
             />
           );
         })}
-        {drop && (
-          <div
-            className="rl-wb-drop-zone"
-            data-drop-edge={drop.target.edge}
-            data-drop-pane={drop.target.paneId}
-            aria-hidden
-            style={{ left: drop.box.left, top: drop.box.top, width: drop.box.width, height: drop.box.height }}
-          />
-        )}
+        {/* On the body, fixed: over the terminal layer and any webview
+            snapshot, whatever stacking context the stage sits in. */}
+        {drop &&
+          createPortal(
+            <div
+              className="rl-wb-drop-zone"
+              data-drop-edge={drop.target.edge}
+              data-drop-pane={drop.target.paneId}
+              aria-hidden
+              style={{ left: drop.target.zone.left, top: drop.target.zone.top, width: drop.target.zone.width, height: drop.target.zone.height }}
+            />,
+            document.body,
+          )}
       </div>
     </div>
   );

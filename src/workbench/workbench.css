@@ -294,11 +294,12 @@
 }
 
 /* Merge by drag (W5): the half of the pane a tab dragged over the stage
-   would take, lit in the drop indicator's colour. Over the terminal layer
-   (z 30), so a wall shows its target too. */
+   would take, lit in the drop indicator's colour. Fixed on the body, under
+   the menus (1000) and over everything in the window, the terminal layer
+   included, so a wall shows its target too. */
 .rl-wb-drop-zone {
-  position: absolute;
-  z-index: 31;
+  position: fixed;
+  z-index: 900;
   pointer-events: none;
   border-radius: 4px;
   background: color-mix(in srgb, var(--color-info) 14%, transparent);

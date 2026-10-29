@@ -31,6 +31,15 @@
 //!             centred under the thread, pinned to the pane's bottom (D27)
 //!   sidebar-click  rows open tabs in the set on screen (D29): a plan row, a
 //!             chat row, the plan row again — the strip never switches
+//!   split-plan-browser  (W5) ⌘D on the plan, the new door's Browser
+//!             destination, the divider dragged to 40 %
+//!   split-three  (W5) ⌘D then ⌘⇧D: the plan | a column of two doors, a
+//!             divider dragged, ⌃⌘← back to the plan (snapshot), ⌘⌥= evens
+//!   split-two-walls  (W5, `walls` seed) a Terminals tab merged into another
+//!             from its tab menu: two walls in the one layer; a press on
+//!             the other wall makes it the one worked on
+//!   merge-drop  (W5, `walls` seed) a Terminals tab dragged onto the wall's
+//!             right quarter (snapshot of the lit half), let go: merged
 //!
 //! Per scene × theme × size it writes `<scene>.png` — `-<theme>` appended
 //! for a theme other than aurora, `-<w>x<h>` when more than one size runs
@@ -63,7 +72,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door", "split-plan-browser", "split-three", "split-two-walls", "merge-drop"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -112,6 +121,11 @@ const SCENE = {
   "file-pane": { board: "workbench" },
   "rail-file-talk": { board: "workbench" },
   "rail-home-talk": { board: "workbench" },
+  // W5: any split tree, at the two sizes the plan names.
+  "split-plan-browser": { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "split-three": { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "split-two-walls": { board: "walls", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "merge-drop": { board: "walls", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
 };
 const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
@@ -142,6 +156,8 @@ const OPEN_AGENT = [
   { do: "click", css: [".rl-sb .rl-session-row .rl-sb-term-row"], why: "the roadmap's agent terminal, under its row: its Agent tab" },
   { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-convo')", timeout: 15000, why: "the session's conversation in the Agent pane" },
 ];
+/** The tab body on screen. */
+const SHOWN = ".rl-wb-tab-body:not([data-hidden])";
 /** The strip's tab titles, in order, and which one is selected. */
 const STRIP = "[...document.querySelectorAll('.rl-wb-strip [role=tab]')]";
 /** The compact composer sits centred in its pane, pinned to its bottom. */
@@ -289,6 +305,73 @@ const DRIVES = {
     { do: "key", key: "d", modifiers: 4, why: "⌘D: split right with a door" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-split .rl-split-divider') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-rl-door-plate]')", timeout: 8000, why: "the tab is the plan beside a door" },
     { do: "waitFor", expr: "(() => { const plate = document.querySelector('[data-rl-door-plate]').getBoundingClientRect(); const box = document.querySelector('.rl-frontdoor-focus[data-landed] .rl-fd-island'); if (!box) return false; const r = box.getBoundingClientRect(); return r.left >= plate.left - 1 && r.right <= plate.right + 1; })()", timeout: 8000, why: "the door's box lands inside its own half" },
+  ],
+  // W5: the plan beside a browser — ⌘D on the plan, the door's Browser
+  // destination in the new half — then the divider dragged.
+  "split-plan-browser": [
+    ...SELECT_PLAN,
+    { do: "viewport", width: 1440, height: 900, why: "the door's Destination menu opens only wide" },
+    { do: "click", css: [".rl-plan-pane h1"], why: "the plan pane has the focus" },
+    { do: "key", key: "d", modifiers: 4, why: "⌘D: split right with a door" },
+    { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=door]")`, timeout: 8000, why: "the door in the new half" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
+    { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
+    { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
+    { do: "type", text: "https://example.com", why: "an address" },
+    { do: "key", key: "Enter", why: "⏎: the door half becomes the browser" },
+    { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=plan]") && !!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=browser]") && document.querySelectorAll("${SHOWN} .rl-split-divider").length === 1`, timeout: 15000, why: "one tab: the plan beside the browser, a divider between" },
+    { do: "viewport", run: true, why: "back to the run's size" },
+    { do: "press", css: `${SHOWN} .rl-split-divider`, why: "take the divider" },
+    { do: "moveTo", css: `${SHOWN} > .rl-wb-split`, fx: 0.4, fy: 0.5, why: "drag it to 40 %" },
+    { do: "release", css: `${SHOWN} > .rl-wb-split`, fx: 0.4, fy: 0.5, why: "let go: the weights land" },
+    { do: "waitFor", expr: `(() => { const c = document.querySelector("${SHOWN} > .rl-wb-split > .rl-wb-split-cell"); return !!c && Math.abs(Number(c.style.flexGrow) - 0.4) < 0.03; })()`, timeout: 5000, why: "the plan's share is about 40 %" },
+  ],
+  // W5: three panes and a direction change — ⌘D, then ⌘⇧D in the new
+  // door — a divider dragged, then ⌃⌘← back to the plan and ⌘⌥= evens all.
+  "split-three": [
+    ...SELECT_PLAN,
+    { do: "click", css: [".rl-plan-pane h1"], why: "the plan pane has the focus" },
+    { do: "key", key: "d", modifiers: 4, why: "⌘D: split right with a door" },
+    { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=door][data-focused]")`, timeout: 8000, why: "the new door has the focus" },
+    { do: "key", key: "d", modifiers: 12, why: "⌘⇧D: split the door down with another" },
+    { do: "waitFor", expr: `document.querySelectorAll("${SHOWN} .rl-wb-pane").length === 3 && document.querySelectorAll("${SHOWN} .rl-split-divider").length === 2 && !!document.querySelector("${SHOWN} .rl-wb-split .rl-wb-split.flex-col")`, timeout: 8000, why: "three panes: the plan | a column of two doors" },
+    { do: "press", css: `${SHOWN} > .rl-wb-split > .rl-split-divider`, why: "take the plan's divider" },
+    { do: "moveTo", css: `${SHOWN} > .rl-wb-split`, fx: 0.62, fy: 0.5, why: "drag it right" },
+    { do: "release", css: `${SHOWN} > .rl-wb-split`, fx: 0.62, fy: 0.5, why: "let go" },
+    { do: "key", key: "ArrowLeft", modifiers: 6, why: "⌃⌘←: the pane to the left on screen" },
+    { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=plan][data-focused]")`, timeout: 5000, why: "the plan has the focus" },
+    { do: "snapshot", name: "dragged", why: "the dragged tree" },
+    { do: "key", key: "Equal", modifiers: 5, why: "⌘⌥=: even out the splits" },
+    { do: "waitFor", expr: `(() => { const c = document.querySelector("${SHOWN} > .rl-wb-split > .rl-wb-split-cell"); return !!c && Math.abs(Number(c.style.flexGrow) - 0.5) < 0.001; })()`, timeout: 5000, why: "the shares are even again" },
+  ],
+  // W5: two walls side by side — the second Terminals tab merged into the
+  // first from its tab menu (the keyboard's merge) — both walls live in the
+  // one layer; a press on the other wall makes it the one worked on.
+  "split-two-walls": [
+    ...AT_HOME,
+    { do: "click", within: ".rl-wb-strip", css: [".rl-wb-strip [role=tab][data-tab-id=tab-dev]"], why: "the first Terminals tab" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-terminal-layer:not([data-offscreen]) .rl-tile-wrap')", timeout: 15000, why: "its wall on screen" },
+    { do: "rightClick", css: [".rl-wb-strip [role=tab][data-tab-id=tab-test]"], why: "the second Terminals tab's menu" },
+    { do: "click", within: ".rl-row-menu", text: "Merge into ⟵", up: "button", why: "Merge into ⟵: beside the first wall" },
+    { do: "waitFor", expr: `document.querySelectorAll("${SHOWN} .rl-wb-pane[data-pane-kind=terminals]").length === 2 && !!document.querySelector('.rl-wb-terminal-layer[data-walls]')`, timeout: 8000, why: "one tab of two walls, the one layer spanning both" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-wb-terminal-layer .rl-tile-wrap')].filter((w) => w.style.display !== 'none').length === 2", timeout: 8000, why: "both walls' terminals show" },
+    { do: "click", css: [".rl-wb-terminal-layer [data-peer-wall] .xterm-screen", ".rl-wb-terminal-layer [data-peer-wall]"], why: "a press on the other wall's terminal" },
+    { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=terminals][data-pane-id=wall-dev][data-focused]") && !document.querySelector('.rl-wb-terminal-layer [data-peer-wall=wall-dev]')`, timeout: 8000, why: "that wall is the focused one, the other its peer" },
+  ],
+  // W5: merge by drag — a Terminals tab dragged down out of the strip onto
+  // the right quarter of the wall on screen lights the half it will take;
+  // let go, it merges.
+  "merge-drop": [
+    ...AT_HOME,
+    { do: "click", css: [".rl-wb-strip [role=tab][data-tab-id=tab-dev]"], why: "the first Terminals tab" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-terminal-layer:not([data-offscreen]) .rl-tile-wrap')", timeout: 15000, why: "its wall on screen" },
+    { do: "press", css: ".rl-wb-strip [role=tab][data-tab-id=tab-test]", why: "take the second Terminals tab" },
+    { do: "moveTo", css: `${SHOWN} .rl-wb-pane[data-pane-id=wall-dev]`, fx: 0.9, fy: 0.5, why: "down over the wall's right quarter" },
+    { do: "waitFor", expr: "document.querySelector('.rl-wb-drop-zone')?.dataset.dropEdge === 'right'", timeout: 5000, why: "the right half is lit" },
+    { do: "snapshot", name: "hover", why: "the drop zone over the wall" },
+    { do: "release", css: `${SHOWN} .rl-wb-pane[data-pane-id=wall-dev]`, fx: 0.9, fy: 0.5, why: "let go: merged" },
+    { do: "waitFor", expr: `!document.querySelector('.rl-wb-drop-zone') && document.querySelectorAll("${SHOWN} .rl-wb-pane[data-pane-kind=terminals]").length === 2 && document.querySelectorAll('.rl-wb-strip [role=tab]').length === 2`, timeout: 8000, why: "one tab of two walls; the dragged tab left the strip" },
   ],
   drafter: [
     ...AT_HOME,
@@ -713,7 +796,7 @@ async function mouse(point, button = "left") {
   await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button, clickCount: 1, x: point.x, y: point.y });
 }
 
-const KEYS = { Enter: { code: "Enter", vk: 13, text: "\r" }, Escape: { code: "Escape", vk: 27 }, Backspace: { code: "Backspace", vk: 8 }, ArrowRight: { code: "ArrowRight", vk: 39 } };
+const KEYS = { Enter: { code: "Enter", vk: 13, text: "\r" }, Escape: { code: "Escape", vk: 27 }, Backspace: { code: "Backspace", vk: 8 }, ArrowRight: { code: "ArrowRight", vk: 39 }, ArrowLeft: { code: "ArrowLeft", vk: 37 }, ArrowUp: { code: "ArrowUp", vk: 38 }, ArrowDown: { code: "ArrowDown", vk: 40 }, Equal: { code: "Equal", vk: 187 }, Backslash: { code: "Backslash", vk: 220 } };
 
 async function key(name, modifiers = 0) {
   const k = KEYS[name] ?? { code: `Key${name.toUpperCase()}`, vk: name.toUpperCase().charCodeAt(0), text: modifiers ? undefined : name };
@@ -800,6 +883,26 @@ async function drive(scene) {
       rec.note = `${run.tour.length} steps, ${run.tour.filter((t) => t.lit).length} lit`;
       if (step.expectSteps && run.tour.length !== step.expectSteps) throw new Error(`Drive ${scene}: the tour has ${run.tour.length} steps, expected ${step.expectSteps}`);
       if (dark.length) throw new Error(`Drive ${scene}: ${step.why}: not lit: ${dark.map((t) => `${t.step} → [data-tour=${t.anchor}]${t.found ? "" : " (absent)"}`).join(", ")}`);
+    } else if (step.do === "press" || step.do === "moveTo" || step.do === "release") {
+      // A held drag, step by step (W5's dividers and merge by drag): the
+      // point is a fraction of an element's box (`css`, `fx`, `fy`).
+      const at = await cdp.evaluate(`(() => { const el = ${JSON.stringify(step.css ?? "")} && document.querySelector(${JSON.stringify(step.css ?? "")}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width * ${step.fx ?? 0.5}), y: Math.round(r.top + r.height * ${step.fy ?? 0.5}) }; })()`);
+      if (!at) throw new Error(`Drive ${scene}: ${step.why}: target not found`);
+      if (step.do === "press") {
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: at.x, y: at.y });
+        await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, x: at.x, y: at.y });
+      } else if (step.do === "moveTo") {
+        // In a few steps, as a hand moves: a drag starts past its slop.
+        const from = run.pointer ?? at;
+        for (let i = 1; i <= 6; i++) {
+          await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, x: Math.round(from.x + ((at.x - from.x) * i) / 6), y: Math.round(from.y + ((at.y - from.y) * i) / 6) });
+          await delay(16);
+        }
+      } else {
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", buttons: 0, clickCount: 1, x: at.x, y: at.y });
+      }
+      run.pointer = at;
+      rec.note = `${at.x},${at.y}`;
     } else if (step.do === "eval") {
       await cdp.evaluate(step.expr);
     } else if (step.do === "snapshot") {

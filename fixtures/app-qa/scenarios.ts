@@ -39,7 +39,7 @@ export const DIALCROWN = `${HOME}/projects/dialcrown`;
 export const MACHINE_OS = `${HOME}/projects/machine-os`;
 export const REDLINE = `${HOME}/projects/redline`;
 
-export type BoardId = "workbench" | "4a" | "4b" | "4c" | "4d" | "5a";
+export type BoardId = "workbench" | "walls" | "4a" | "4b" | "4c" | "4d" | "5a";
 
 /** A comment as `get_session` returns it; `provenance` is an extra field the
  *  Comment type doesn't carry yet (5a's "🎙 voice note" tag). */
@@ -617,8 +617,59 @@ function workbenchScenario(): Scenario {
   return { ...dinScenario("workbench", "Workbench walk", true), viewport: { width: 1440, height: 900 }, heldSessionId: null, openSessionId: null };
 }
 
+/** W5's two walls: the workbench world plus two shells, each the only tile
+ *  of its own Terminals tab in Home's strip (behind Home's door), so a
+ *  drive can merge one into the other — by drag, or the tab menu. */
+function wallsScenario(): Scenario {
+  const base = workbenchScenario();
+  const shell = (id: string, cwd: string, lines: string[]): SeedTerminal => ({
+    id,
+    cwd,
+    screen: `\u001b[2m${cwd.replace(HOME, "~")}\u001b[0m ❯ ${lines.join("\r\n")}\r\n\u001b[2m${cwd.replace(HOME, "~")}\u001b[0m ❯ `,
+  });
+  const terminals = [
+    ...base.terminals,
+    shell("t-shell-dev", DIN, ["npm run dev", "", "  VITE v6.3.5  ready in 412 ms", "", "  ➜  Local:   http://localhost:5173/"]),
+    shell("t-shell-test", DIN, ["npx vitest --watch", "", " ✓ src/jobs/queue.test.ts (12 tests) 38ms", " ✓ src/jobs/lease.test.ts (7 tests) 21ms", "", " Test Files  2 passed (2)"]),
+  ];
+  const wall = (tile: string) => ({ tiles: [tile], focus: 0, zoomed: null, pinned: [] });
+  const workbench = {
+    v: 1,
+    activeKey: "home",
+    mru: ["home"],
+    owners: { "t-shell-dev": "home", "t-shell-test": "home" },
+    stowed: [],
+    sets: {
+      home: {
+        order: ["tab-door", "tab-dev", "tab-test"],
+        activeTabId: "tab-door",
+        tabs: {
+          "tab-door": { id: "tab-door", root: { pane: "pane-door" }, focusedPaneId: "pane-door" },
+          "tab-dev": { id: "tab-dev", root: { pane: "wall-dev" }, focusedPaneId: "wall-dev" },
+          "tab-test": { id: "tab-test", root: { pane: "wall-test" }, focusedPaneId: "wall-test" },
+        },
+        panes: {
+          "pane-door": { id: "pane-door", kind: "door", data: { draftKey: "redline.frontDoor.text" } },
+          "wall-dev": { id: "wall-dev", kind: "terminals", data: wall("t-shell-dev") },
+          "wall-test": { id: "wall-test", kind: "terminals", data: wall("t-shell-test") },
+        },
+        closed: [],
+      },
+    },
+  };
+  return {
+    ...base,
+    id: "walls",
+    title: "Two walls",
+    terminals,
+    storage: { ...base.storage, "redline.workbench.v1": workbench },
+    session: dock(terminals.map((t) => ({ id: t.id, cwd: t.cwd }))),
+  };
+}
+
 export const SCENARIOS: Record<BoardId, () => Scenario> = {
   workbench: workbenchScenario,
+  walls: wallsScenario,
   "4a": () => dinScenario("4a", "1 · Start", false),
   "4b": () => dinScenario("4b", "2 · Claude plans", false),
   "4c": () => dinScenario("4c", "3 · You redline", true),

@@ -284,15 +284,16 @@ describe("merge by drag and the pane menu (W5)", () => {
     const t2 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t2"]')!;
     await act(async () => { t2.dispatchEvent(at("pointerdown", 150, 17)); });
     await act(async () => { window.dispatchEvent(at("pointermove", 760, 300)); });
-    const zone = host.querySelector<HTMLElement>(".rl-wb-drop-zone")!;
+    const zone = document.body.querySelector<HTMLElement>(".rl-wb-drop-zone")!;
     expect(zone.dataset.dropEdge).toBe("right");
     expect(zone.dataset.dropPane).toBe("p1");
-    expect([zone.style.left, zone.style.top, zone.style.width, zone.style.height]).toEqual(["400px", "0px", "400px", "600px"]);
+    // Fixed on the body, in the window's coordinates.
+    expect([zone.style.left, zone.style.top, zone.style.width, zone.style.height]).toEqual(["400px", "34px", "400px", "600px"]);
     // The webviews show their snapshots while a tab hangs over the stage.
     expect(isResizing()).toBe(true);
     await act(async () => { window.dispatchEvent(at("pointerup", 760, 300)); });
     expect(isResizing()).toBe(false);
-    expect(host.querySelector(".rl-wb-drop-zone")).toBeNull();
+    expect(document.body.querySelector(".rl-wb-drop-zone")).toBeNull();
     const s = store.getState().sets.home!;
     expect(s.order).toEqual(["t1"]);
     expect(s.tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
@@ -307,7 +308,7 @@ describe("merge by drag and the pane menu (W5)", () => {
     const t1 = host.querySelector<HTMLElement>('[role="tab"][data-tab-id="t1"]')!;
     await act(async () => { t1.dispatchEvent(at("pointerdown", 50, 17)); });
     await act(async () => { window.dispatchEvent(at("pointermove", 60, 300)); });
-    expect(host.querySelector(".rl-wb-drop-zone")).toBeNull();
+    expect(document.body.querySelector(".rl-wb-drop-zone")).toBeNull();
     await act(async () => { window.dispatchEvent(at("pointerup", 60, 300)); });
     expect(store.getState()).toBe(before);
     expect(isResizing()).toBe(false);
