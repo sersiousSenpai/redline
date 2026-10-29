@@ -628,19 +628,24 @@ fn attention_guard() -> String {
 pub const SPOOL_DIR: &str = "$HOME/.redline/attention-spool";
 
 /// The spooling command's head: the guard, then the payload read once, so
-/// it can be both POSTed and, should that fail, kept.
+/// it can be both POSTed and, should that fail, kept. `umask 077`: the
+/// spool holds prompts and replies, so it is owner-only (0700 / 0600).
 fn spool_guard() -> String {
-    format!("{}p=$(cat) && {{ printf '%s' \"$p\" | ", attention_guard())
+    format!("{}p=$(cat) && {{ umask 077; d=\"{SPOOL_DIR}\"; printf '%s' \"$p\" | ", attention_guard())
 }
 
-/// The spooling command's tail. A POST that can't connect (Redline is
-/// closed, its terminals kept by the helper) writes the payload to the
-/// spool, unless a nested `claude -p` sent it (`sdk-cli`, never this
-/// terminal's agent) or the terminal id is anything but a plain name.
+/// The spooling command's tail. Only a POST that could not **connect**
+/// (curl's exit 7: Redline is closed, its terminals kept by the helper)
+/// writes the payload to the spool; a slow reply (a timeout) is a Redline
+/// that is up and writes nothing. A POST that lands clears the terminal's
+/// entry, so nothing older than the newest delivered event is ever replayed.
+/// Never for a nested `claude -p` (`sdk-cli`, not this terminal's agent),
+/// nor a terminal id that is anything but a plain name.
 fn spool_tail() -> String {
     format!(
-        " >/dev/null 2>&1 || {{ [ \"${{CLAUDE_CODE_ENTRYPOINT:-}}\" = sdk-cli ] || case \"${env}\" in *[!A-Za-z0-9_-]*) ;; \
-         *) d=\"{SPOOL_DIR}\"; mkdir -p \"$d\" && printf '%s' \"$p\" > \"$d/${env}.json\";; esac; }}; }}; true",
+        " >/dev/null 2>&1; rc=$?; case \"${env}\" in *[!A-Za-z0-9_-]*) ;; *) if [ \"$rc\" = 7 ]; then \
+         [ \"${{CLAUDE_CODE_ENTRYPOINT:-}}\" = sdk-cli ] || {{ mkdir -p \"$d\" && printf '%s' \"$p\" > \"$d/${env}.json\"; }}; \
+         elif [ \"$rc\" = 0 ]; then rm -f \"$d/${env}.json\"; fi;; esac; }}; true",
         env = crate::term_attention::ENV_TERMINAL_ID,
     )
 }
@@ -1147,12 +1152,13 @@ mod tests {
         // the next boot.
         assert_eq!(
             attention_command(),
-            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && p=$(cat) && { printf '%s' \"$p\" | curl -s --max-time 1 -X POST \
-             -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
+            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && p=$(cat) && { umask 077; d=\"$HOME/.redline/attention-spool\"; printf '%s' \"$p\" | \
+             curl -s --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
              -H \"X-Redline-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}\" \
-             --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1 || { [ \"${CLAUDE_CODE_ENTRYPOINT:-}\" = sdk-cli ] || \
-             case \"$REDLINE_TERMINAL_ID\" in *[!A-Za-z0-9_-]*) ;; *) d=\"$HOME/.redline/attention-spool\"; mkdir -p \"$d\" && \
-             printf '%s' \"$p\" > \"$d/$REDLINE_TERMINAL_ID.json\";; esac; }; }; true"
+             --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1; rc=$?; \
+             case \"$REDLINE_TERMINAL_ID\" in *[!A-Za-z0-9_-]*) ;; *) if [ \"$rc\" = 7 ]; then \
+             [ \"${CLAUDE_CODE_ENTRYPOINT:-}\" = sdk-cli ] || { mkdir -p \"$d\" && printf '%s' \"$p\" > \"$d/$REDLINE_TERMINAL_ID.json\"; }; \
+             elif [ \"$rc\" = 0 ]; then rm -f \"$d/$REDLINE_TERMINAL_ID.json\"; fi;; esac; }; true"
         );
         // The plain vintage before it is still ours, so an upgrade replaces
         // it rather than adding a second handler.
@@ -1213,6 +1219,33 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.contains("X-Redline-Terminal: t-open"), "{request}");
         assert_eq!(spooled("t-open"), None);
+        // Owner-only: the spool holds prompts and replies.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(home.join(".redline/attention-spool")).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(home.join(".redline/attention-spool/t-closed.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        // A later POST that lands clears the terminal's entry.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/term/event", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        });
+        run(&url, "t-closed", "cli");
+        server.join().unwrap();
+        assert_eq!(spooled("t-closed"), None, "delivered now: the stale entry is gone");
+        // A slow Redline (a reply past --max-time) is up: nothing is spooled.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/term/event", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            drop(s);
+        });
+        run(&url, "t-slow", "cli");
+        server.join().unwrap();
+        assert_eq!(spooled("t-slow"), None, "a timeout is not a closed Redline");
         let _ = std::fs::remove_dir_all(&home);
     }
 
