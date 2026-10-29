@@ -420,6 +420,21 @@ describe("the grouped sidebar", () => {
     expect(onSelectTerminal).toHaveBeenCalledWith("", "h1");
   });
 
+  it("a terminal kept through a quit says since when it has run, and one that exited meanwhile says so", async () => {
+    const onSelectTerminal = vi.fn();
+    const at = new Date(2026, 9, 29, 15, 4).getTime();
+    await renderWith({
+      sessions: [summary("a", 1)],
+      terminals: { a: [{ id: "k1", title: "claude", status: "idle", since: at }, { id: "d1", title: "web", status: "exited", tomb: true }] },
+      onSelectTerminal,
+    });
+    const rows = [...planRow("Plan a").querySelectorAll<HTMLElement>(".rl-sb-term")];
+    expect(rows[0].querySelector(".rl-sb-term-state")!.textContent).toMatch(/^running since 3:04/);
+    expect(rows[1].querySelector(".rl-sb-term-state")!.textContent).toBe("exited while Redline was closed");
+    await click(rows[1].querySelector(".rl-sb-term-row"));
+    expect(onSelectTerminal).toHaveBeenCalledWith("a", "d1");
+  });
+
   it("nests a plan's terminals under its row, always, in the shared status vocabulary", async () => {
     const onSelectTerminal = vi.fn();
     await renderWith({

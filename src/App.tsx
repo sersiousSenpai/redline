@@ -283,6 +283,7 @@ const loadTerminalLayer = () => import("./workbench/TerminalLayer");
 const TerminalLayer = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalLayer })));
 import type { TerminalStatus, TerminalTabsHandle } from "./components/TerminalTabs";
 const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m) => ({ default: m.CloseWallDialog })));
+const TombScreen = lazy(() => import("./components/TombScreen").then((m) => ({ default: m.TombScreen })));
 // Which terminal a session runs in, and what its CLI is doing
 // (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
 // spinners read it. The dock pins itself over an Agent pane's CLI view
@@ -9045,8 +9046,21 @@ function App() {
   // Terminals the helper kept while Redline was closed (lib/keptMeta): when
   // each started, for the sidebar's "running since" until it reports again.
   const [adoptedSince, setAdoptedSince] = useState<ReadonlyMap<string, number>>(() => new Map());
+  // ...and the ones that exited meanwhile (tombstones): a row each, whose
+  // last screen opens read-only until Dismiss forgets it.
+  const [keptTombs, setKeptTombs] = useState<readonly LivePty[]>([]);
+  const [tombOpen, setTombOpen] = useState<{ id: string; title: string } | null>(null);
+  /** A tombstone's row opens its last screen; false for any other id. */
+  const openTomb = (id: string): boolean => {
+    const tomb = keptTombs.find((t) => t.id === id);
+    if (!tomb) return false;
+    const title = (tomb.meta as { title?: string } | undefined)?.title;
+    setTombOpen({ id, title: typeof title === "string" && title ? title : "Terminal" });
+    return true;
+  };
   const handleAdopted = useCallback((list: readonly LivePty[]) => {
     setAdoptedSince(new Map(list.filter((p) => p.kept && p.alive && p.startedAt).map((p) => [p.id, p.startedAt!])));
+    setKeptTombs(list.filter((p) => p.kept && p.exit !== undefined));
     void import("./lib/keptMeta").then(({ adoptedBinds }) => {
       const binds = adoptedBinds(list);
       bindSessionTerminals(binds);
@@ -9064,7 +9078,7 @@ function App() {
     if (keptMetaKey) void import("./lib/keptMeta").then((m) => m.syncKeptMeta(JSON.parse(keptMetaKey))).catch(() => {});
   }, [keptMetaKey]);
   const sidebarTerminals = useMemo(() => {
-    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean; ports?: readonly number[]; since?: number }[]> = {};
+    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited"; kept?: boolean; ports?: readonly number[]; since?: number; tomb?: boolean }[]> = {};
     const listed = new Set<string>();
     // The rows a terminal can nest under: a current plan's (an archived or
     // deleted one has no row on screen) and a pending launch's own row,
@@ -9100,8 +9114,16 @@ function App() {
     for (const terminalId of wbStowed) {
       if (!listed.has(terminalId) && (!liveTermIds || liveTermIds.includes(terminalId))) push("", terminalId, "terminal");
     }
+    // Exited while Redline was closed: under the session it belonged to.
+    for (const t of keptTombs) {
+      if (listed.has(t.id)) continue;
+      listed.add(t.id);
+      const meta = (t.meta ?? {}) as { owner?: string; title?: string };
+      const owner = typeof meta.owner === "string" ? sessionIdOf(meta.owner as SessionKey) : null;
+      (out[owner && rows.has(owner) ? owner : ""] ??= []).push({ id: t.id, title: (typeof meta.title === "string" && meta.title) || "terminal", status: "exited", tomb: true });
+    }
     return out;
-  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches, termPorts, adoptedSince]);
+  }, [sessionTerminals, terminalKinds, terminalTitles, liveTermIds, termStatuses, wbOwners, wbStowed, heldTermIds, summaries, flowSidebarLaunches, termPorts, adoptedSince, keptTombs]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -9143,6 +9165,7 @@ function App() {
     // forward on its wall — its session, its wall, its tile, hailed — and a
     // kept terminal (no wall) back onto one.
     onSelectTerminal: (sessionId: string, terminalId: string) => {
+      if (openTomb(terminalId)) return;
       if (sessionTerminals.get(sessionId) === terminalId) {
         openSessionPane({ kind: "chat", data: { source: "agent", terminalId, sessionId } });
         return;
@@ -10599,6 +10622,20 @@ function App() {
           </Suspense>
         )}
       {setupReviewInTerminal && <div className="rl-setup-return" role="status"><span>Sign in if Codex asks, then open <code>/hooks</code> to review Redline’s hooks. Your work stays here.</span><button type="button" onClick={() => { setSetupReviewInTerminal(false); void installIntegration(true, "codex"); }}>Verify and continue</button><button type="button" onClick={() => { setSetupReviewInTerminal(false); dismissSetup(); }}>Later</button></div>}
+      {tombOpen && (
+        <Suspense fallback={null}>
+          <TombScreen
+            id={tombOpen.id}
+            title={tombOpen.title}
+            onClose={() => setTombOpen(null)}
+            onDismiss={() => {
+              void invoke("pty_reap", { id: tombOpen.id }).catch(() => {});
+              setKeptTombs((prev) => prev.filter((t) => t.id !== tombOpen.id));
+              setTombOpen(null);
+            }}
+          />
+        </Suspense>
+      )}
       {wallClose && (
         <Suspense fallback={null}>
           <CloseWallDialog

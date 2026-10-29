@@ -76,6 +76,8 @@ export interface SidebarTerminal {
   ports?: readonly number[];
   /** Kept through a quit and quiet since the relaunch: when it started. */
   since?: number;
+  /** Exited while Redline was closed: a click shows its last screen. */
+  tomb?: boolean;
 }
 
 export interface SessionSidebarProps {
@@ -767,13 +769,13 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
   terminal: SidebarTerminal;
   onSelect?: (sessionId: string, terminalId: string) => void;
 }) {
-  const { id, title, status, kept, since } = terminal;
+  const { id, title, status, kept, since, tomb } = terminal;
   const sinceText = since && status !== "needs" && status !== "exited" ? `running since ${new Date(since).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : null;
   // Its own menu on right-click, never WebKit's (LAST2), and never the plan
   // row's around it.
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const actions: RowAction[] = [
-    { label: "Show terminal", icon: <Terminal size={14} aria-hidden />, onSelect: () => onSelect?.(sessionId, id) },
+    { label: tomb ? "Show last screen" : "Show terminal", icon: <Terminal size={14} aria-hidden />, onSelect: () => onSelect?.(sessionId, id) },
   ];
   return (
     <li className="rl-sb-term" data-status={status} data-kept={kept ? "" : undefined}
@@ -802,7 +804,7 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
             <span className="rl-sb-term-state">working</span>
           </>
         )}
-        {status === "exited" && <span className="rl-sb-term-state">exited</span>}
+        {status === "exited" && <span className="rl-sb-term-state">{tomb ? "exited while Redline was closed" : "exited"}</span>}
         {sinceText && status !== "working" && <span className="rl-sb-term-state">{sinceText}</span>}
         {kept && status === "idle" && !sinceText && <span className="rl-sb-term-state">kept</span>}
       </button>
