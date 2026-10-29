@@ -22,14 +22,29 @@ import { stageInsets, useStageDock } from "../lib/stageDock";
 import { releaseHiddenCaret } from "./caret";
 import type { WallData, WorkbenchState } from "./model";
 import { primaryWall, selectVisibleWalls, wallFrames, type WallFrame } from "./wall";
+import { selectLayoutKey } from "./view";
 import { useWorkbench, type WorkbenchStore } from "./store";
 
 // ── Slots ──────────────────────────────────────────────────────────────────
 
 const slots = new Map<string, HTMLElement>();
 const slotListeners = new Set<() => void>();
+/** Bumped on every registration change. A tree change (⌘\ in a wall, a
+ *  closed pane) remounts a wall's slot as a NEW element under the same pane
+ *  id: the ids on screen read the same, the element does not, and the layer
+ *  must re-measure against the new one. */
+let slotsRevision = 0;
 function publishSlots(): void {
+  slotsRevision += 1;
   for (const listener of Array.from(slotListeners)) listener();
+}
+function readSlotsRevision(): number {
+  return slotsRevision;
+}
+/** The slots' revision, for a reader that must re-measure whenever any
+ *  slot registers, unregisters or is replaced. */
+export function useSlotsRevision(): number {
+  return useSyncExternalStore(subscribeSlots, readSlotsRevision);
 }
 function subscribeSlots(listener: () => void): () => void {
   slotListeners.add(listener);
@@ -105,11 +120,20 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
   const multi = !cli && slotKey.includes(" ");
   const target = cli?.el ?? slot;
   const onScreen = target !== null;
+  // Every layout commit re-places the layer: a slot remounted as a new
+  // element (the revision) or moved by the tree around it without changing
+  // size (the tab's layout key), which no ResizeObserver reports.
+  const slotsRev = useSlotsRevision();
+  const layoutKey = useWorkbench(store, selectLayoutKey);
+  const placement = `${slotsRev}|${layoutKey}`;
 
   const layerRef = useRef<HTMLDivElement | null>(null);
-  const targetRef = useMemo(() => ({ current: target }), [target]);
+  // A new ref object per placement re-runs the dock's effect: it measures
+  // afresh and observes the slot that is in the DOM now.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const targetRef = useMemo(() => ({ current: target }), [target, placement]);
   useStageDock(layerRef, targetRef, onScreen && !multi);
-  const frames = useWallsDock(layerRef, multi ? slotKey : "");
+  const frames = useWallsDock(layerRef, multi ? slotKey : "", placement);
   const frame = multi && paneId ? (frames?.get(paneId) ?? null) : null;
   const peers = useMemo<PeerWall[] | undefined>(() => {
     if (!multi || !frames) return undefined;
@@ -175,8 +199,13 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
 /** While `ids` (space-separated wall pane ids, two or more) are on screen,
  *  keep `layer` over the union of their slots and report each wall's frame
  *  of it, following every resize of any of them — a divider between two
- *  walls moves both frames, the union stays. Null while off. */
-function useWallsDock(layer: RefObject<HTMLElement | null>, ids: string): Map<string, WallFrame> | null {
+ *  walls moves both frames, the union stays. `placement` changes on every
+ *  layout commit that can move or replace a slot (a slot re-registered, the
+ *  tab's tree): the slots are looked up, measured and observed afresh, so
+ *  a wall whose slot was remounted is never laid out against a detached
+ *  element (W5 walk: the second wall blank after ⌘\ or a closed pane).
+ *  Null while off. */
+export function useWallsDock(layer: RefObject<HTMLElement | null>, ids: string, placement = ""): Map<string, WallFrame> | null {
   const [frames, setFrames] = useState<Map<string, WallFrame> | null>(null);
   useLayoutEffect(() => {
     const el = layer.current;
@@ -215,7 +244,7 @@ function useWallsDock(layer: RefObject<HTMLElement | null>, ids: string): Map<st
       window.removeEventListener("resize", coalesced);
       for (const side of ["top", "left", "right", "bottom"] as const) el.style[side] = "";
     };
-  }, [layer, ids]);
+  }, [layer, ids, placement]);
   return ids ? frames : null;
 }
 
