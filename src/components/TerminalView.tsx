@@ -69,6 +69,21 @@ interface TerminalViewProps {
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
+/** The viewport sits on the newest line (xterm's `viewportY` at `baseY`). */
+export function viewportAtBottom(term: { buffer: { active: { viewportY: number; baseY: number } } }): boolean {
+  const { viewportY, baseY } = term.buffer.active;
+  return viewportY >= baseY;
+}
+
+/** After a refit, put a viewport that sat at the bottom (`wasAtBottom`) back
+ *  there. A reflow — a column change, or a box squeezed and grown again by
+ *  a divider drag — could leave xterm scrolled up with the newest output
+ *  off screen, so a running command looked frozen (W5 walk). A viewport the
+ *  user scrolled up stays where it is. */
+export function keepBottom(term: { buffer: { active: { viewportY: number; baseY: number } }; scrollToBottom(): void }, wasAtBottom: boolean): void {
+  if (wasAtBottom && !viewportAtBottom(term)) term.scrollToBottom();
+}
+
 function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
@@ -308,10 +323,13 @@ export const TerminalView = memo(function TerminalView({
   //   reflowing as you drag, just not every frame, and the settle fit at the
   //   end of the drag always lands the exact final size.
   const applyFit = useCallback(
-    (opts: { immediate: boolean; live?: boolean }) => {
+    (opts: { immediate: boolean; live?: boolean; stick?: boolean }) => {
       const term = termRef.current;
       const fit = fitRef.current;
       if (!term || !fit) return;
+      // At the bottom before this fit (or before the drag it settles): kept
+      // at the bottom after it.
+      const wasAtBottom = !!opts.stick || viewportAtBottom(term);
       let dims: { cols: number; rows: number } | undefined;
       try {
         dims = fit.proposeDimensions();
@@ -342,6 +360,7 @@ export const TerminalView = memo(function TerminalView({
           colFitAtRef.current = performance.now();
         }
       }
+      keepBottom(term, wasAtBottom);
       schedulerRef.current?.schedule(
         { cols: term.cols, rows: term.rows },
         opts.immediate,
@@ -800,7 +819,11 @@ export const TerminalView = memo(function TerminalView({
       term.options.fontFamily = terminalFamily(prefs);
       term.options.fontSize = prefs.size;
       term.options.lineHeight = prefs.lineHeight;
-      if (visibleRef.current) fitRef.current?.fit();
+      if (visibleRef.current && fitRef.current) {
+        const wasAtBottom = viewportAtBottom(term);
+        fitRef.current.fit();
+        keepBottom(term, wasAtBottom);
+      }
     };
     window.addEventListener(TERMINAL_PREFS_EVENT, apply);
     return () => window.removeEventListener(TERMINAL_PREFS_EVENT, apply);
@@ -817,15 +840,24 @@ export const TerminalView = memo(function TerminalView({
   // rest, instead of once per frame.
   useEffect(() => {
     let raf = 0;
+    // Where the viewport was when the drag began: the frames in between can
+    // move it (a squeezed box), the settle puts it back at the bottom.
+    let stick = false;
     const off = onResizeSession((active) => {
-      if (active) return;
+      if (active) {
+        const term = termRef.current;
+        stick = !!term && visibleRef.current && viewportAtBottom(term);
+        return;
+      }
+      const atBottom = stick;
+      stick = false;
       // Next frame, so the release's React commit and the browser's layout
       // have both landed and we fit against the real resting size.
       if (raf) cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         raf = 0;
         if (!visibleRef.current) return;
-        applyFit({ immediate: true });
+        applyFit({ immediate: true, stick: atBottom });
       });
     });
     return () => {

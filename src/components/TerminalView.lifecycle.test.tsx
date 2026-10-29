@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   // The renderer and geometry seams the swap-cost tests read.
   webgl: { created: 0, disposed: 0 },
   fits: 0,
+  fitScrollsUp: false,
   dims: { cols: 80, rows: 24 },
   resizeObservers: [] as (() => void)[],
 }));
@@ -57,7 +58,8 @@ vi.mock("../lib/xtermLoader", () => {
     onTitleChange() { return { dispose() {} }; }
     links: FakeLinkProvider | null = null;
     lines: string[] = [];
-    buffer = { active: { getLine: (i: number) => ({ translateToString: () => this.lines[i] ?? "" }) } };
+    buffer = { active: { viewportY: 0, baseY: 0, getLine: (i: number) => ({ translateToString: () => this.lines[i] ?? "" }) } };
+    scrollToBottom() { this.buffer.active.viewportY = this.buffer.active.baseY; }
     registerLinkProvider(p: FakeLinkProvider) { this.links = p; return { dispose: () => { this.links = null; } }; }
     onData(fn: (text: string) => void) { this.data = fn; return { dispose: () => { this.data = () => {}; } }; }
     onKey(fn: () => void) { this.key = fn; return { dispose: () => { this.key = () => {}; } }; }
@@ -74,7 +76,9 @@ vi.mock("../lib/xtermLoader", () => {
     focus() { this.focused++; }
     dispose() { this.disposed = true; }
   }
-  class FitAddon { fit() { mocks.fits++; const t = mocks.terminals[mocks.terminals.length - 1] as unknown as { cols: number; rows: number }; t.cols = mocks.dims.cols; t.rows = mocks.dims.rows; } proposeDimensions() { return { ...mocks.dims }; } }
+  // `fitScrollsUp`: the reflow leaves the viewport at the top of the
+  // scrollback, as xterm did after a wall's divider drag (W5 walk).
+  class FitAddon { fit() { mocks.fits++; const t = mocks.terminals[mocks.terminals.length - 1] as unknown as { cols: number; rows: number; buffer: { active: { viewportY: number } } }; t.cols = mocks.dims.cols; t.rows = mocks.dims.rows; if (mocks.fitScrollsUp) t.buffer.active.viewportY = 0; } proposeDimensions() { return { ...mocks.dims }; } }
   class WebglAddon { constructor() { mocks.webgl.created++; } onContextLoss() {} dispose() { mocks.webgl.disposed++; } }
   class Unicode11Addon {}
   const mods = { Terminal, FitAddon, WebglAddon, Unicode11Addon };
@@ -122,6 +126,7 @@ beforeEach(() => {
   mocks.webgl.created = 0;
   mocks.webgl.disposed = 0;
   mocks.fits = 0;
+  mocks.fitScrollsUp = false;
   mocks.dims = { cols: 80, rows: 24 };
   mocks.resizeObservers.length = 0;
   __resetTerminalSwapForTest();
@@ -430,6 +435,43 @@ describe("a wall swap's per-tile costs stay off the swap's frame", () => {
     expect(pendingTerminalWork()).toBeGreaterThan(0);
     await frame();
     expect(currentTerm().output).toBe("streamed while hidden");
+  });
+});
+
+// W5 walk: after a wall's divider drag the refit left xterm scrolled to the
+// top of its scrollback, so a running command's output looked frozen.
+describe("a refit keeps a viewport that was at the bottom at the bottom", () => {
+  const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+  const buffer = () => (currentTerm() as unknown as { buffer: { active: { viewportY: number; baseY: number } } }).buffer.active;
+  async function drag(cols: number) {
+    const { beginResizeSession, endResizeSession } = await import("../lib/resizeSession");
+    act(() => beginResizeSession());
+    mocks.dims = { cols, rows: 24 };
+    // Frames of the drag: the box changes, the observer fits live.
+    const resized = mocks.resizeObservers[mocks.resizeObservers.length - 1];
+    act(() => { resized(); });
+    act(() => endResizeSession());
+    await frame(); // the settle fit
+  }
+
+  it("at the bottom before the drag: at the bottom after it, whatever the reflow did meanwhile", async () => {
+    await mount(true);
+    await frame();
+    Object.assign(buffer(), { baseY: 120, viewportY: 120 });
+    mocks.fitScrollsUp = true;
+    await drag(100);
+    expect(buffer().viewportY).toBe(120);
+    // A refit with no column change keeps it there too.
+    await drag(100);
+    expect(buffer().viewportY).toBe(120);
+  });
+
+  it("scrolled up by the user: the refit leaves the viewport where it was read", async () => {
+    await mount(true);
+    await frame();
+    Object.assign(buffer(), { baseY: 120, viewportY: 40 });
+    await drag(100);
+    expect(buffer().viewportY).toBe(40);
   });
 });
 
