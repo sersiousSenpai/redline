@@ -18,13 +18,20 @@
 //! - **Comments live on an earlier version** (the clean slate): the pointer
 //!   to them.
 //!
-//! Each is one row on the redlining amber (the mode tokens, so every theme
-//! holds its contrast), dismissable where classic's was.
+//! Each is ONE 28 px strip on the redlining amber (the mode tokens, so every
+//! theme holds its contrast): a status mark in the one vocabulary (the amber
+//! pulse when it needs you, the shared Spinner while a restore runs), one
+//! short sentence, and compact text actions at the right — the explanation
+//! rides the strip's tooltip, never a paragraph under it. Dismissable where
+//! classic's was.
 
-import { X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
+import { useRef } from "react";
 import "./plan.css";
 
+import { Panel, useClickPopover } from "../popover";
 import { FixControl } from "../ReadinessStrip";
+import { TermStateBadge } from "../TermStateBadge";
 import type { ReadinessItem } from "../../lib/readiness";
 import type { RestoreHarness } from "../../lib/restoreHarness";
 import type { AutoNotice } from "../../lib/autoResume";
@@ -80,29 +87,36 @@ export function hasNotices(p: PlanNoticesProps): boolean {
 
 export function PlanNotices(p: PlanNoticesProps) {
   if (!hasNotices(p)) return null;
+  const w = p.warning;
   return (
     <div className="rl-plan-notices" role="region" aria-label="About this plan">
       {p.detached && <Detached {...p.detached} onShowTerminal={p.onShowTerminal} />}
       {p.askModeViolation && (
-        <Notice title="Plan modified during Ask" onDismiss={p.onDismissAskMode}>
-          You asked only questions, but it returned a revised plan anyway. This was processed as a normal revision — review
-          the diff.
-        </Notice>
+        <Notice
+          title="Plan modified during Ask"
+          detail="review the diff"
+          tip="You asked only questions, but it returned a revised plan anyway. This was processed as a normal revision — review the diff."
+          onDismiss={p.onDismissAskMode}
+        />
       )}
-      {p.warning && (
-        <Notice title="Resolution block issue" onDismiss={p.onDismissWarning}>
-          {p.warning.parseError && <span className="rl-plan-notice-line">The resolution block could not be parsed: {p.warning.parseError}</span>}
-          {p.warning.unmatchedIds.length > 0 && (
-            <span className="rl-plan-notice-line">Resolutions for unknown comments: {p.warning.unmatchedIds.join(", ")}</span>
-          )}
-          {p.warning.unresolvedSubmittedIds.length > 0 && (
-            <span className="rl-plan-notice-line">Sent comments without a resolution: {p.warning.unresolvedSubmittedIds.join(", ")}</span>
-          )}
-        </Notice>
+      {w && (
+        <Notice
+          title="Resolution block issue"
+          detail={[
+            w.parseError && `could not be parsed: ${w.parseError}`,
+            w.unmatchedIds.length > 0 && `unknown comments: ${w.unmatchedIds.join(", ")}`,
+            w.unresolvedSubmittedIds.length > 0 && `sent without a resolution: ${w.unresolvedSubmittedIds.join(", ")}`,
+          ].filter(Boolean).join(" · ")}
+          tip={[
+            w.parseError && `The resolution block could not be parsed: ${w.parseError}`,
+            w.unmatchedIds.length > 0 && `Resolutions for unknown comments: ${w.unmatchedIds.join(", ")}`,
+            w.unresolvedSubmittedIds.length > 0 && `Sent comments without a resolution: ${w.unresolvedSubmittedIds.join(", ")}`,
+          ].filter(Boolean).join("\n")}
+          onDismiss={p.onDismissWarning}
+        />
       )}
       {p.prior !== null && (
-        <Notice quiet>
-          Comments and resolutions from v{p.prior} live on that version.
+        <Notice quiet title={`Comments and resolutions from v${p.prior} live on that version.`}>
           <button type="button" className="rl-plan-notice-btn" onClick={() => p.onViewPrior(p.prior!)}>
             Review them
           </button>
@@ -112,26 +126,43 @@ export function PlanNotices(p: PlanNoticesProps) {
   );
 }
 
+/** One strip: the mark, ONE text element (the sentence and its faint
+ *  detail, ellipsized), the actions, the ×. Never a second line. */
 function Notice({
   title,
+  detail,
+  tip,
+  mark = "needs",
   quiet = false,
   onDismiss,
   children,
 }: {
-  title?: string;
+  /** The one short sentence. */
+  title: string;
+  /** A faint tail on the same line: the live progress, the failure. */
+  detail?: string | null;
+  /** The explanation, on hover. */
+  tip?: string;
+  mark?: "needs" | "working";
   quiet?: boolean;
   onDismiss?: () => void;
-  children: React.ReactNode;
+  children?: React.ReactNode;
 }) {
   return (
-    <div className="rl-plan-notice" data-tone={quiet ? "quiet" : "redline"} role={quiet ? undefined : "status"}>
-      <div className="rl-plan-notice-text">
-        {title && <strong className="rl-plan-notice-title">{title}</strong>}
-        {children}
-      </div>
+    <div className="rl-plan-notice" data-tone={quiet ? "quiet" : "redline"} role={quiet ? undefined : "status"} title={tip}>
+      {!quiet && (
+        <span className="rl-plan-notice-mark">
+          <TermStateBadge state={mark === "working" ? "working" : "needs-you"} size={8} />
+        </span>
+      )}
+      <span className="rl-plan-notice-text">
+        {title}
+        {detail && <span className="rl-plan-notice-faint"> {detail}</span>}
+      </span>
+      {children && <span className="rl-plan-notice-actions">{children}</span>}
       {onDismiss && (
-        <button type="button" className="rl-plan-notice-x" onClick={onDismiss} aria-label={`Dismiss: ${title ?? "notice"}`} title="Dismiss">
-          <X size={13} aria-hidden />
+        <button type="button" className="rl-plan-notice-x" onClick={onDismiss} aria-label={`Dismiss: ${title}`} title="Dismiss">
+          <X size={16} aria-hidden />
         </button>
       )}
     </div>
@@ -142,110 +173,79 @@ function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTermina
   const blocked = d.blockers.length > 0;
   const tried = d.auto?.phase === "stopped" ? d.auto.attempts : 0;
   // Coming back on its own. Running: the progress, like a click's. Waiting
-  // out the backoff: why, when, and Retry now / Copy resume command — either
-  // of which (and Dismiss) takes it out of the timer's hands.
+  // out the backoff: when, and Retry / Copy command — either of which (and
+  // Dismiss) takes it out of the timer's hands. Why the last try failed is
+  // the tooltip.
   if (d.auto && d.auto.phase !== "stopped") {
     const a = d.auto;
     const stop = () => d.onStopAuto?.();
+    const tip = [
+      `The ${d.decision.label} session behind this plan stopped, so Redline is reopening it.`,
+      a.phase === "scheduled" && d.failure && `The last try didn't take: ${d.failure}`,
+      "The conversation and your comments are kept — this re-presents the plan it was holding, it doesn't revise it.",
+    ].filter(Boolean).join("\n");
     return (
       <Notice
         title={`Resuming… attempt ${a.attempt} of ${a.of}`}
+        detail={a.phase === "resuming" ? (d.restoring ? d.status : null) : `Trying again in ${a.inSeconds} seconds.`}
+        tip={tip}
+        mark="working"
         onDismiss={a.phase === "scheduled" ? () => { stop(); d.onDismiss(); } : undefined}
       >
-        {a.phase === "resuming" ? (
+        {a.phase === "scheduled" && (
           <>
-            <span className="rl-plan-notice-line">
-              The {d.decision.label} session behind this plan stopped, so Redline is reopening it.
-            </span>
-            {d.restoring && d.status && <span className="rl-plan-notice-line">{d.status}</span>}
-          </>
-        ) : (
-          <>
-            {d.failure && <span className="rl-plan-notice-line">The last try didn't take: {d.failure}</span>}
-            <span className="rl-plan-notice-line">
-              Trying again in {a.inSeconds} seconds.
-            </span>
+            <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore} disabled={blocked}>
+              Retry
+            </button>
+            <CopyCommand onCopy={() => { stop(); d.onCopyResume(); }} disabled={blocked} />
           </>
         )}
-        <span className="rl-plan-notice-line rl-plan-notice-faint">
-          The conversation and your comments are kept — this re-presents the plan it was holding.
-        </span>
-        <span className="rl-plan-notice-actions">
-          {a.phase === "scheduled" && (
-            <>
-              <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore} disabled={blocked}>
-                Retry now
-              </button>
-              <button type="button" className="rl-plan-notice-btn" onClick={() => { stop(); d.onCopyResume(); }} disabled={blocked}>
-                Copy resume command
-              </button>
-            </>
-          )}
-          {d.onShowTerminal && (
-            <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
-              Show the terminal
-            </button>
-          )}
-        </span>
+        {d.onShowTerminal && (
+          <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
+            Show terminal
+          </button>
+        )}
       </Notice>
     );
   }
   if (d.restoring)
     return (
-      <Notice title="Reopening this plan…">
-        {d.status && <span className="rl-plan-notice-line">{d.status}</span>}
-        <span className="rl-plan-notice-line rl-plan-notice-faint">
-          The original {d.decision.label} conversation and your comments are kept — this re-presents the plan it was
-          holding, it doesn't revise it.
-        </span>
+      <Notice title="Reopening this plan…" detail={d.status} tip={`The original ${d.decision.label} conversation and your comments are kept — this re-presents the plan it was holding, it doesn't revise it.`} mark="working">
         {d.onShowTerminal && (
-          <span className="rl-plan-notice-actions">
-            <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
-              Show the terminal
-            </button>
-          </span>
+          <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
+            Show terminal
+          </button>
         )}
       </Notice>
     );
   if (d.failure)
     return (
-      <Notice title="Couldn't reopen this plan." onDismiss={d.onDismiss}>
-        <span className="rl-plan-notice-line">{d.failure}</span>
-        {tried > 0 && (
-          <span className="rl-plan-notice-line rl-plan-notice-faint">
-            Redline tried {tried === 1 ? "once" : `${tried} times`} on its own and stopped there.
-          </span>
+      <Notice
+        title="Couldn't reopen this plan."
+        detail={d.failure}
+        tip={[d.failure, tried > 0 && `Redline tried ${tried === 1 ? "once" : `${tried} times`} on its own and stopped there.`].filter(Boolean).join("\n")}
+        onDismiss={d.onDismiss}
+      >
+        <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore}>
+          Retry
+        </button>
+        {d.onShowTerminal && (
+          <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
+            Show terminal
+          </button>
         )}
-        <span className="rl-plan-notice-actions">
-          <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore}>
-            Retry
-          </button>
-          {d.onShowTerminal && (
-            <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
-              Show the terminal
-            </button>
-          )}
-          <button type="button" className="rl-plan-notice-btn" onClick={d.onCopyResume}>
-            Copy resume command
-          </button>
-        </span>
+        <CopyCommand onCopy={d.onCopyResume} />
       </Notice>
     );
+  // The plain detached strip. The lede is the one sentence; the body (what
+  // ended, that nothing is lost, what Restore does) is the tooltip, on the
+  // strip and on Restore.
+  const tip = [d.copy.body, tried > 0 && "Redline tried to reopen it on its own and stopped — fix what's flagged, then restore."].filter(Boolean).join("\n");
   return (
-    <Notice title={d.copy.lede} onDismiss={d.onDismiss}>
-      <span className="rl-plan-notice-line">{d.copy.body}</span>
-      {tried > 0 && (
-        <span className="rl-plan-notice-line rl-plan-notice-faint">
-          Redline tried to reopen it on its own and stopped — fix what's below, then restore.
-        </span>
-      )}
-      <span className="rl-plan-notice-line rl-plan-notice-faint">
-        Restore plan session reopens the same conversation and re-presents the plan for review, in the background —
-        nothing is retyped and nothing is lost.
-      </span>
+    <Notice title={d.copy.lede} detail={blocked ? d.blockers.map((b) => b.label).join(" · ") : null} tip={tip} onDismiss={d.onDismiss}>
       {d.decision.legacy && (
-        <span className="rl-plan-notice-actions" role="radiogroup" aria-label="Written in">
-          <span className="rl-plan-notice-faint">Written in:</span>
+        <span className="rl-plan-notice-group" role="radiogroup" aria-label="Written in">
+          <span className="rl-plan-notice-faint">Written in</span>
           {HARNESSES.map(([value, label]) => (
             <button
               key={value}
@@ -261,32 +261,69 @@ function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTermina
         </span>
       )}
       {d.blockers.map((item) => (
-        <span key={item.id} className="rl-plan-notice-actions">
-          <span className="rl-plan-notice-line">{item.label}</span>
-          <FixControl item={item} onFix={d.onFix} />
-        </span>
+        <FixControl key={item.id} item={item} onFix={d.onFix} />
       ))}
-      <span className="rl-plan-notice-actions">
-        <button
-          type="button"
-          className="rl-plan-notice-btn"
-          data-primary=""
-          onClick={d.onRestore}
-          disabled={blocked}
-          title={blocked ? `${d.blockers[0].label} — restore can't bring the plan back until that's fixed.` : undefined}
-        >
-          Restore plan session
-        </button>
-        <button
-          type="button"
-          className="rl-plan-notice-btn"
-          onClick={d.onCopyResume}
-          disabled={blocked}
-          title={`For a ${d.decision.label} running in a terminal Redline doesn't own — copy the resume command to paste yourself.`}
-        >
-          Copy resume command
-        </button>
-      </span>
+      <button
+        type="button"
+        className="rl-plan-notice-btn"
+        data-primary=""
+        onClick={d.onRestore}
+        disabled={blocked}
+        title={blocked ? `${d.blockers[0].label} — restore can't bring the plan back until that's fixed.` : tip}
+      >
+        Restore
+      </button>
+      <CopyCommand
+        onCopy={d.onCopyResume}
+        disabled={blocked}
+        title={`For a ${d.decision.label} running in a terminal Redline doesn't own — copy the resume command to paste yourself.`}
+      />
     </Notice>
+  );
+}
+
+/** Copy command, in both of its places: a text action while the strip has
+ *  room, and — under 480 px of strip (plan.css's container query) — the one
+ *  row of a ▾ menu beside Restore, so Restore and × always fit. */
+function CopyCommand({ onCopy, disabled = false, title }: { onCopy: () => void; disabled?: boolean; title?: string }) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const { open, close, toggle, panelProps } = useClickPopover(anchor, "right", "below", 220);
+  return (
+    <>
+      <button type="button" className="rl-plan-notice-btn rl-plan-notice-wide" onClick={onCopy} disabled={disabled} title={title}>
+        Copy command
+      </button>
+      <button
+        ref={anchor}
+        type="button"
+        className="rl-plan-notice-x rl-plan-notice-more"
+        aria-label="More restore actions"
+        title="More restore actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <ChevronDown size={16} aria-hidden />
+      </button>
+      {open && (
+        <Panel label="Restore actions" className="rl-plan-menu-panel" {...panelProps}>
+          <div className="rl-plan-menu-list">
+            <button
+              type="button"
+              role="menuitem"
+              className="rl-plan-menu-item"
+              disabled={disabled}
+              title={title}
+              onClick={() => {
+                close();
+                onCopy();
+              }}
+            >
+              Copy resume command
+            </button>
+          </div>
+        </Panel>
+      )}
+    </>
   );
 }

@@ -363,9 +363,10 @@
 
 /* ── The plan's notices (PlanNotices) ────────────────────────────────── */
 
-/* Slim rows above the plan body on the redlining amber, which the mode
-   tokens hold to contrast in every theme: the detached plan's Restore /
-   Retry / Copy resume, the stale-version and readiness lines. */
+/* Each notice is ONE 28 px strip under the plan header, on the redlining
+   amber the mode tokens hold to contrast in every theme: the status mark,
+   one sentence (its faint tail ellipsized, never wrapped), compact 13 px
+   text actions at the right, a 16 px ×. The explanation is the tooltip. */
 .rl-plan-notices {
   flex: none;
   display: flex;
@@ -376,16 +377,22 @@
      left edge from under its header. */
   padding-left: var(--rl-toc-docked, 0px);
   transition: padding-left 160ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* The strip's width, for the fold below. */
+  container-type: inline-size;
 }
 .rl-plan-notice {
+  box-sizing: border-box;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 9px 14px 9px 22px;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 6px 0 22px;
+  overflow: hidden;
+  white-space: nowrap;
   background: var(--color-mode-redline-bg);
   color: var(--color-ink);
-  font-size: var(--rl-text-chrome);
-  line-height: 1.5;
+  font-size: var(--rl-text-row);
+  line-height: 20px;
 }
 .rl-plan-notice + .rl-plan-notice {
   border-top: 1px solid var(--color-rule);
@@ -394,54 +401,58 @@
   background: var(--color-fill-1);
   color: var(--color-ink-3);
 }
+.rl-plan-notice-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+}
 .rl-plan-notice-text {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 8px;
-  row-gap: 4px;
-}
-.rl-plan-notice-title {
-  color: var(--color-mode-redline-fg);
-  font-weight: 600;
-}
-.rl-plan-notice-line {
-  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rl-plan-notice-faint {
   color: var(--color-ink-3);
 }
-.rl-plan-notice-actions {
-  flex-basis: 100%;
+.rl-plan-notice-actions,
+.rl-plan-notice-group {
+  flex: none;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
 }
-.rl-plan-notice-btn {
+.rl-plan-notice-group {
+  gap: 0;
+  margin-right: 4px;
+}
+.rl-plan-notice-group > .rl-plan-notice-faint {
+  margin-right: 4px;
+}
+.rl-plan-notice-btn,
+.rl-plan-notice-actions .rl-fd-fix {
   display: inline-flex;
   align-items: center;
-  height: 24px;
-  padding: 0 9px;
-  border: 1px solid var(--color-rule-strong);
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
   border-radius: var(--rl-radius-chip);
   background: transparent;
   color: var(--color-ink-2);
   font: inherit;
-  font-size: var(--rl-text-chip);
+  font-size: var(--rl-text-row);
   cursor: pointer;
 }
 .rl-plan-notice-btn[data-primary] {
-  border-color: transparent;
-  background: var(--color-ink);
-  color: var(--color-paper);
+  color: var(--color-mode-redline-fg);
   font-weight: 600;
 }
 .rl-plan-notice-btn[aria-checked="true"] {
-  border-color: var(--color-mode-redline-fg);
   color: var(--color-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .rl-plan-notice-btn:disabled {
   cursor: default;
@@ -451,8 +462,9 @@
   flex: none;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 0;
   border-radius: var(--rl-radius-chip);
   background: transparent;
@@ -460,12 +472,30 @@
   cursor: pointer;
 }
 .rl-plan-notice-x:hover,
-.rl-plan-notice-btn:hover:not(:disabled):not([data-primary]) {
+.rl-plan-notice-btn:hover:not(:disabled),
+.rl-plan-notice-actions .rl-fd-fix:hover:not(:disabled) {
   background: var(--color-fill-2);
   color: var(--color-ink);
 }
+/* Copy command folds into a ▾ menu beside Restore under 480 px of strip
+   (PlanNotices `CopyCommand`), so Restore and × always fit. */
+.rl-plan-notice-x.rl-plan-notice-more {
+  display: none;
+}
+@container (max-width: 480px) {
+  .rl-plan-notice-wide {
+    display: none;
+  }
+  .rl-plan-notice-x.rl-plan-notice-more {
+    display: grid;
+  }
+}
+/* Inset: the strip clips anything outside its 28 px. */
 .rl-plan-notice-btn:focus-visible,
-.rl-plan-notice-x:focus-visible,
+.rl-plan-notice-x:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: -2px;
+}
 .rl-plan-menu-item:focus-visible {
   outline: 2px solid var(--color-focus-rim);
   outline-offset: 2px;

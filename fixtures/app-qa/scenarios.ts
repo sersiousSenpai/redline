@@ -39,7 +39,7 @@ export const DIALCROWN = `${HOME}/projects/dialcrown`;
 export const MACHINE_OS = `${HOME}/projects/machine-os`;
 export const REDLINE = `${HOME}/projects/redline`;
 
-export type BoardId = "workbench" | "walls" | "4a" | "4b" | "4c" | "4d" | "5a";
+export type BoardId = "workbench" | "walls" | "plan-detached" | "4a" | "4b" | "4c" | "4d" | "5a";
 
 /** A comment as `get_session` returns it; `provenance` is an extra field the
  *  Comment type doesn't carry yet (5a's "🎙 voice note" tag). */
@@ -667,9 +667,25 @@ function wallsScenario(): Scenario {
   };
 }
 
+/** D41's detached notice: the workbench world with the roadmap plan's
+ *  Claude gone — the session reconciled to Detached at boot (the startup
+ *  sweep's state, so nothing resumes on its own), its plan still in review
+ *  and its comment kept. The walk selects the row and the Plan tab shows
+ *  the one 28 px strip under its header. */
+function planDetachedScenario(): Scenario {
+  const base = workbenchScenario();
+  return {
+    ...base,
+    id: "plan-detached",
+    title: "Detached plan",
+    sessions: base.sessions.map((s) => (s.sessionId === DIN_ROADMAP.sessionId ? { ...s, attachState: "detached" as const } : s)),
+  };
+}
+
 export const SCENARIOS: Record<BoardId, () => Scenario> = {
   workbench: workbenchScenario,
   walls: wallsScenario,
+  "plan-detached": planDetachedScenario,
   "4a": () => dinScenario("4a", "1 · Start", false),
   "4b": () => dinScenario("4b", "2 · Claude plans", false),
   "4c": () => dinScenario("4c", "3 · You redline", true),

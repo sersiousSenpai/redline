@@ -86,7 +86,7 @@ describe("Show raw terminal", () => {
     expect(app).toContain("void showRawTerminal(restoreTerminalId ?? planChromeTerminalId);");
     const detached = notices.slice(notices.indexOf("function Detached("));
     const running = detached.slice(detached.indexOf("if (d.restoring)"), detached.indexOf("if (d.failure)"));
-    const failed = detached.slice(detached.indexOf("if (d.failure)"), detached.indexOf("return (\n    <Notice title={d.copy.lede}"));
+    const failed = detached.slice(detached.indexOf("if (d.failure)"), detached.indexOf("<Notice title={d.copy.lede}"));
     expect(running).toContain("onClick={d.onShowTerminal}");
     expect(failed).toContain("onClick={d.onShowTerminal}");
   });
@@ -118,7 +118,7 @@ describe("a failed restore stays actionable", () => {
     expect(branch).toContain("onClick={d.onRestore}");
     expect(branch).toContain("Retry");
     // …and a way out that doesn't need Redline's terminal at all.
-    expect(branch).toContain("onClick={d.onCopyResume}");
+    expect(branch).toContain("onCopy={d.onCopyResume}");
     // App wires the notice to the real restore and its failure.
     const bundle = app.slice(app.indexOf("const planNotices = {"), app.indexOf("onViewPrior: setViewedVersionNumber,"));
     expect(bundle).toContain("failure: restoreFailure?.error ?? null,");
@@ -130,7 +130,7 @@ describe("a failed restore stays actionable", () => {
     // The running notice IS the progress: it has no dismiss.
     const detached = notices.slice(notices.indexOf("function Detached("));
     const running = detached.slice(detached.indexOf("if (d.restoring)"), detached.indexOf("if (d.failure)"));
-    expect(running).toContain('<Notice title="Reopening this plan…">');
+    expect(running).toContain('<Notice title="Reopening this plan…"');
     expect(running).not.toContain("onDismiss");
   });
 });

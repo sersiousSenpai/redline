@@ -176,29 +176,35 @@ export function restoreCopiedNote(
   };
 }
 
-/** The detached banner's lede and body. The banner is the first thing a
- *  reviewer reads when their plan goes quiet; naming the wrong harness there
- *  turns a recoverable state into an apparent bug in Redline. */
+/** The detached notice's few words (`lede`, short enough for a narrow
+ *  strip) and its tooltip (`body`, the whole sentence and what Restore does).
+ *  The notice is the first thing a reviewer reads when their plan goes
+ *  quiet; naming the wrong harness there turns a recoverable state into an
+ *  apparent bug in Redline. */
 export function detachedBannerCopy(d: HarnessDecision): {
   lede: string;
   body: string;
 } {
+  const restore =
+    "Restore reopens the same conversation and re-presents the plan for " +
+    "review, in the background — nothing is retyped and nothing is lost.";
   if (d.legacy && !d.chosen) {
     // Nothing stored and nothing picked. Claim neither harness — say the true
     // thing, which is that the hold is gone.
     return {
-      lede: "This plan is no longer being held for review.",
+      lede: "No longer held for review",
       body:
-        "The session that wrote it ended (or the hold timed out). Your " +
-        "comments are preserved — pick the harness it was written in, then ",
+        "This plan is no longer held for review. The session that wrote it " +
+        "ended (or the hold timed out). Your " +
+        `comments are preserved — pick the harness it was written in. ${restore}`,
     };
   }
   const who = harnessShortLabel(d.harness);
   return {
-    lede: `${who} is no longer waiting for this plan.`,
+    lede: `${who} stopped waiting`,
     body:
-      `The ${d.label} session ended (or the hold timed out). Your comments ` +
-      "are preserved — ",
+      `${who} stopped waiting on this plan. The ${d.label} session ended (or the hold timed out). Your comments ` +
+      `are preserved. ${restore}`,
   };
 }
 
@@ -207,5 +213,5 @@ export function detachedPillTitle(backend?: string | null): string {
   const d = resolveRestoreHarness({ backend });
   const who = d.legacy ? "The session that wrote this plan" : `${d.label}`;
   const verb = d.legacy ? "is gone" : "is no longer waiting on this plan";
-  return `${who} ${verb} — open the session and use “Restore plan session” before sending.`;
+  return `${who} ${verb} — open the session and use “Restore” before sending.`;
 }

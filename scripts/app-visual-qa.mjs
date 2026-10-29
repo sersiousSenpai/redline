@@ -72,7 +72,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door", "split-plan-browser", "split-three", "split-two-walls", "merge-drop"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door", "split-plan-browser", "split-three", "split-two-walls", "merge-drop", "plan-detached"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -126,6 +126,8 @@ const SCENE = {
   "split-three": { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   "split-two-walls": { board: "walls", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   "merge-drop": { board: "walls", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  // D41: the detached notice as one 28 px strip under the plan header.
+  "plan-detached": { board: "plan-detached", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
 };
 const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
@@ -227,6 +229,7 @@ const DRIVES = {
     { do: "waitFor", expr: "document.querySelectorAll('.rl-wb-strip [role=tab]').length >= 2", timeout: 8000, why: "a second tab in the strip" },
   ],
   plan: SELECT_PLAN,
+  "plan-detached": [...SELECT_PLAN, { do: "waitFor", expr: "!!document.querySelector('.rl-plan-notice')", timeout: 8000, why: "the detached strip under the plan header" }],
   agent: [...OPEN_AGENT, { do: "waitFor", expr: COMPOSER_PLACED(".rl-agent-pane"), timeout: 8000, why: "the compact composer, centred and pinned (D27)" }],
   "agent-cli": [
     ...OPEN_AGENT,

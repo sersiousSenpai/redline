@@ -146,7 +146,7 @@ describe("restore notes — the two paths cannot diverge", () => {
 describe("detached copy", () => {
   it("names the harness that actually left", () => {
     const codex = detachedBannerCopy(resolveRestoreHarness({ backend: "codex" }));
-    expect(codex.lede).toBe("Codex is no longer waiting for this plan.");
+    expect(codex.lede).toBe("Codex stopped waiting");
     // A Codex reviewer told "the Claude Code session ended" is being pointed
     // at a process they never started.
     expect(codex.lede + codex.body).not.toContain("Claude");
@@ -154,7 +154,8 @@ describe("detached copy", () => {
     const claude = detachedBannerCopy(
       resolveRestoreHarness({ backend: "claude-code" }),
     );
-    expect(claude.lede).toBe("Claude is no longer waiting for this plan.");
+    expect(claude.lede).toBe("Claude stopped waiting");
+    expect(claude.body).toContain("Claude stopped waiting on this plan.");
     expect(claude.body).toContain("Claude Code session ended");
   });
 
@@ -181,7 +182,7 @@ describe("detached copy", () => {
     const legacy = detachedPillTitle(null);
     expect(legacy).not.toContain("Claude");
     expect(legacy).not.toContain("Codex");
-    expect(legacy).toContain("Restore plan session");
+    expect(legacy).toContain("“Restore”");
   });
 
   it("labels both harnesses the way the reviewer would say them", () => {
