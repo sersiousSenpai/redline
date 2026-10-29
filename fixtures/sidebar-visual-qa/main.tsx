@@ -10,6 +10,10 @@ import "../../src/styles.css";
 // plan's terminal — D44), a plan in every state the status line colours, the
 // longest status line there is (approved · not built, detached, codex and a
 // count), a revision tree open on the active plan, and a row that needs you.
+// qwallah holds eight plans (five, then "Show 3 more"); Chats holds ten chats,
+// in and out of projects (eight, then "Show 2 more"), one of them working;
+// research is a folder only a chat names ("No plans"); and one chat that
+// became qwallah's onboarding plan, which leaves Chats.
 // `__qa.setWidth(px)` pins the sidebar to a width (200 is its minimum).
 const noop = () => {};
 const now = Date.now();
@@ -43,6 +47,21 @@ const sessions: SessionSummary[] = [
   plan("r1", "Sidebar row anatomy (D44)", "redline", { held: true }),
   plan("r2", "PTY helper daemon", "redline", { status: "aborted" }),
 ];
+const hour = 3_600_000;
+const chats = [
+  { companionId: "c1", title: "Pricing page copy", updatedAt: now - 2 * hour, projectPath: "/Users/dev/qwallah" },
+  { companionId: "c2", title: "Lunch-and-learn outline for the team", updatedAt: now - 0.3 * hour },
+  { companionId: "c3", title: "Why does the PTY helper respawn on every relaunch?", updatedAt: now - 4 * hour, projectPath: "/Users/dev/redline" },
+  { companionId: "c4", title: "Weekend reading list", updatedAt: now - 50 * hour },
+  { companionId: "c5", title: "Qwallah billing questions", updatedAt: now - 26 * hour, projectPath: "/Users/dev/qwallah" },
+  { companionId: "c6", title: "Onboarding checklist brainstorm", updatedAt: now - 1 * hour, projectPath: "/Users/dev/qwallah" },
+  { companionId: "c7", title: "Literature on retrieval evals", updatedAt: now - 30 * hour, projectPath: "/Users/dev/research" },
+  { companionId: "c8", title: "Tax paperwork", updatedAt: now - 80 * hour },
+  { companionId: "c9", title: "Release notes draft", updatedAt: now - 100 * hour, projectPath: "/Users/dev/redline" },
+  { companionId: "c10", title: "Gift ideas", updatedAt: now - 120 * hour },
+  { companionId: "c11", title: "Old standup notes", updatedAt: now - 200 * hour },
+];
+const chatPlans = { c6: "q1" };
 const pendingCounts = Object.fromEntries(sessions.map((s) => [s.sessionId, s.pendingCount]));
 const servers: PortServer[] = [
   { port: 3000, url: "http://localhost:3000", projectPath: "/Users/dev/qwallah", projectName: "qwallah", runCommand: "npm run dev" },
@@ -86,12 +105,13 @@ function Fixture() {
           onSelectPlace={noop}
           place="home"
           needs={{ "plan:r1": "Permission" }}
-          working={new Set(["plan:q2"])}
           servers={servers}
           onOpenPort={noop}
           terminals={terminals}
           onSelectTerminal={noop}
-          chats={[{ companionId: "c1", title: "Pricing page copy", updatedAt: now - 7_200_000, projectPath: "/Users/dev/qwallah" }]}
+          chats={chats}
+          chatPlans={chatPlans}
+          working={new Set(["plan:q2", "chat:c2"])}
           onSelectChat={noop}
           onNewTab={noop}
         />
