@@ -400,6 +400,30 @@ describe("merge by drag and the pane menu (W5)", () => {
   });
 });
 
+// W5 walk: the pane ⋯ did not open on the two-wall tab. It opened, and the
+// first line a streaming terminal printed scrolled that terminal's viewport:
+// any scroll outside the menu closed it.
+describe("the pane menu beside streaming terminals (W5 fix)", () => {
+  it("stays open while a terminal's viewport scrolls, and closes when its own header scrolls away", async () => {
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "terminals", data: { tiles: [], focus: 0, zoomed: null, pinned: [] } }, newPaneId: "w1" }));
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} onSplit={() => {}} />));
+    for (let i = 0; i < 20 && !host.querySelector(".rl-wb-pane-menu"); i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    const items = () => document.body.querySelectorAll('[role="menuitem"]').length;
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-wb-pane-menu")!.click());
+    expect(items()).toBeGreaterThan(0);
+    // An xterm viewport elsewhere in the window scrolls as output lands.
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    document.body.append(viewport);
+    await act(async () => { viewport.dispatchEvent(new Event("scroll")); viewport.dispatchEvent(new Event("scroll")); });
+    expect(items()).toBeGreaterThan(0);
+    // A scroll that carries the ⋯ away closes it.
+    await act(async () => { host.dispatchEvent(new Event("scroll")); });
+    expect(items()).toBe(0);
+    viewport.remove();
+  });
+});
+
 describe("the stage's pane keys (W5)", () => {
   const rect = (left: number, top: number, width: number, height: number) => () => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
   const press = (code: string, over: KeyboardEventInit) => {

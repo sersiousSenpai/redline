@@ -112,10 +112,21 @@ export function RowMenu({
     const close = (e: Event) => {
       if (!panel.current?.contains(e.target as Node) && !anchor.current?.contains(e.target as Node)) onOpenChange(false);
     };
-    // A resize, or a scroll under an anchored menu, would leave it pointing
-    // at nothing.
+    // A resize, or a scroll that carries what the menu points at away, would
+    // leave it pointing at nothing. Only such a scroll: one of something
+    // holding its ⋯, or, for a menu opened at a point (a right-click), of
+    // something under that point. A terminal streaming beside the menu
+    // scrolls its own viewport every line, and closed the pane menu before
+    // it could be read (W5 walk, the two-wall tab).
     const moved = (e: Event) => {
-      if (!(e.target instanceof Node) || !panel.current?.contains(e.target)) onOpenChange(false);
+      if (e.type === "resize") return onOpenChange(false);
+      const target = e.target;
+      if (target instanceof Node && panel.current?.contains(target)) return;
+      if (!(target instanceof Element) || target === document.documentElement || target === document.body) return onOpenChange(false);
+      if (at) {
+        const r = target.getBoundingClientRect();
+        if (at.x >= r.left && at.x <= r.right && at.y >= r.top && at.y <= r.bottom) onOpenChange(false);
+      } else if (!anchor.current || target.contains(anchor.current)) onOpenChange(false);
     };
     document.addEventListener("pointerdown", close);
     window.addEventListener("resize", moved);
@@ -125,7 +136,7 @@ export function RowMenu({
       window.removeEventListener("resize", moved);
       window.removeEventListener("scroll", moved, true);
     };
-  }, [open, onOpenChange]);
+  }, [open, onOpenChange, at]);
   const dismiss = () => {
     onOpenChange(false);
     anchor.current?.focus();
