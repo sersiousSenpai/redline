@@ -117,6 +117,7 @@ mod promised_drop;
 mod pty;
 mod pty_local;
 mod ptyd;
+mod quit;
 mod push;
 mod guided;
 mod git_gui;
@@ -11665,6 +11666,12 @@ pub fn run() {
             pty::pty_interrupt,
             pty::pty_set_meta,
             pty::pty_reap,
+            pty::terminal_settings,
+            pty::set_terminal_setting,
+            quit::quit_ack,
+            quit::app_quit,
+            quit::quit_cancel,
+            quit::request_quit,
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
@@ -12471,9 +12478,10 @@ pub fn run() {
             )?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Redline", true, None::<&str>)?;
+            let quit_stop = MenuItem::with_id(app, "quit_stop", "Quit and Stop Terminals", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
-                &[&mi_active, &mi_ambient, &mi_paused, &sep, &quit],
+                &[&mi_active, &mi_ambient, &mi_paused, &sep, &quit, &quit_stop],
             )?;
 
             // Keep the three check items consistent with whatever mode is active,
@@ -12504,7 +12512,11 @@ pub fn run() {
                         "mode_ambient" => Some(InterceptionMode::Ambient),
                         "mode_paused" => Some(InterceptionMode::Paused),
                         "quit" => {
-                            app.exit(0);
+                            quit::request(app, false);
+                            return;
+                        }
+                        "quit_stop" => {
+                            quit::request(app, true);
                             return;
                         }
                         _ => None,
@@ -12550,6 +12562,19 @@ pub fn run() {
             )?;
             let top_items = app_menu.items()?;
             if let Some(MenuItemKind::Submenu(app_submenu)) = top_items.first() {
+                // Our own ⌘Q, not the predefined one: AppKit's terminate:
+                // can't wait while the page asks whether terminals keep
+                // running (quit.rs). ⌥⌘Q, beside it, stops them all.
+                for item in app_submenu.items()? {
+                    if let MenuItemKind::Predefined(p) = &item {
+                        if p.text().map(|t| t.starts_with("Quit")).unwrap_or(false) {
+                            app_submenu.remove(p)?;
+                        }
+                    }
+                }
+                let app_quit = MenuItemBuilder::with_id("app_quit", "Quit Redline").accelerator("CmdOrCtrl+Q").build(app)?;
+                let app_quit_stop = MenuItemBuilder::with_id("app_quit_stop", "Quit and Stop Terminals").accelerator("Alt+CmdOrCtrl+Q").build(app)?;
+                app_submenu.append_items(&[&app_quit, &app_quit_stop])?;
                 app_submenu.insert_items(
                     &[
                         &PredefinedMenuItem::separator(app)?,
@@ -12630,6 +12655,8 @@ pub fn run() {
                     let _ = app.emit(event, ());
                 }
                 "remove_hook" => remove_hook_via_menu(app),
+                "app_quit" => quit::request(app, false),
+                "app_quit_stop" => quit::request(app, true),
                 // Cmd+W → App closes from the inside out: browser page →
                 // pane → tab. Never the window (that is ⌘⇧W, below).
                 "close_tab" => {
@@ -12695,10 +12722,11 @@ pub fn run() {
             // Kill any headless `claude` discussion forks on teardown so no
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {
-                // Terminals in the helper: P1 proves the plumbing, so a quit
-                // still ends every one of them, as it always did.
+                // Terminals in the helper: a quit keeps the ones marked to
+                // persist, unless it was ⌥⌘Q or keeping them is off. A crash
+                // never gets here, and so kills nothing.
                 if let Some(ptys) = app_handle.try_state::<pty::PtyState>() {
-                    ptys.on_quit(true);
+                    ptys.on_quit(quit::stop_all() || !pty::keep_on_quit(app_handle));
                 }
                 // Polis: a final crown-jewels snapshot of the ledger DB on quit.
                 if let Some(store) = app_handle.try_state::<SessionStore>() {

@@ -225,7 +225,7 @@ fn a_relaunched_app_adopts_the_running_helper_its_terminals_and_its_token() {
     // The adopted helper is the same process: no second one started.
     assert_eq!(client.welcome.pid, rig.helper_pid());
     // Its terminal metadata can be rewritten (a wall closed with "Keep running").
-    pty_set_meta_inner(&relaunched.state, "kept", serde_json::json!({"owner": "home"}), Some(false));
+    set_meta(&relaunched.state, "kept", Some(serde_json::json!({"owner": "home"})), Some(false)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         client.refresh().unwrap();
@@ -239,12 +239,6 @@ fn a_relaunched_app_adopts_the_running_helper_its_terminals_and_its_token() {
     }
     // The relaunched rig must not kill the helper the first rig owns.
     lock(&relaunched.state.helpers.active).take();
-}
-
-/// `pty_set_meta`'s body, without the tauri::State wrapper.
-fn pty_set_meta_inner(state: &PtyState, id: &str, meta: serde_json::Value, persist: Option<bool>) {
-    let client = state.helpers.client_for(id).unwrap();
-    client.set_meta(id, persist.unwrap_or(true), serde_json::to_vec(&meta).unwrap()).unwrap();
 }
 
 #[test]
@@ -294,4 +288,57 @@ fn a_missing_terminal_is_an_error_for_checked_writes_and_soft_for_keystrokes() {
     assert!(err.contains("nope") && err.contains("not running"), "{err}");
     assert!(submit_text(&rig.state, "nope", "hi").is_err());
     assert!(input_state(&rig.state, "nope").is_none());
+}
+
+#[test]
+fn meta_written_before_the_shell_exists_waits_for_its_spawn() {
+    let Some(rig) = Rig::new("pending") else { return };
+    set_meta(&rig.state, "soon", Some(serde_json::json!({"owner": "plan:abc", "sessionId": "abc"})), None).unwrap();
+    set_meta(&rig.state, "soon", None, Some(false)).unwrap();
+    let (persist, meta) = lock(&rig.state.helpers.pending_meta).get("soon").cloned().unwrap();
+    assert_eq!(persist, Some(false));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&meta.unwrap()).unwrap(), serde_json::json!({"owner": "plan:abc", "sessionId": "abc"}));
+    assert!(set_meta(&rig.state, "big", Some(serde_json::json!({"x": "y".repeat(3000)})), None).is_err(), "over 2 KB");
+}
+
+#[test]
+fn a_quit_keeps_what_persists_and_stop_all_ends_everything() {
+    let Some(rig) = Rig::new("quit") else { return };
+    let (a, fa) = recording_channel();
+    rig.spawn("keep", CAT, a);
+    let (b, fb) = recording_channel();
+    rig.spawn("end", CAT, b);
+    wait_for(&fa, |x| x.ends_with(b"ready"));
+    wait_for(&fb, |x| x.ends_with(b"ready"));
+    // The close dialog's "Also after Redline quits" left unchecked.
+    set_meta(&rig.state, "end", None, Some(false)).unwrap();
+    rig.state.on_quit(false);
+    // Another app's view of the helper after the quit: the next launch.
+    let cfg = rig.state.helpers.cfg.clone().unwrap();
+    let next = Rig::with_cfg(cfg.clone(), rig.dir.join("unused"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let token = next.state.adopt_running("x");
+        assert!(token.is_some());
+        let live: Vec<String> = next.state.entries().into_iter().filter(|r| r.alive).map(|r| r.id).collect();
+        if live == ["keep"] {
+            break;
+        }
+        assert!(Instant::now() < deadline, "only the persisting terminal survives a quit: {live:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // ⌥⌘Q: everything.
+    next.state.on_quit(true);
+    let last = Rig::with_cfg(cfg, rig.dir.join("unused2"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        last.state.adopt_running("x");
+        if last.state.entries().iter().all(|r| !r.alive) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Quit and Stop Terminals ends every one");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lock(&next.state.helpers.active).take();
+    lock(&last.state.helpers.active).take();
 }

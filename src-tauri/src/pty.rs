@@ -39,8 +39,14 @@ pub(crate) use crate::pty_local::sanitize;
 /// The settings row that turns the helper on (`"on"` / `"off"`), read once at
 /// boot, before any spawn.
 pub const HELPER_SETTING: &str = "redline.terminals.helper";
-/// Off by default until the quit menu and adoption land (plan P2).
-pub const HELPER_DEFAULT: bool = false;
+/// On since P2 (the quit menu and adoption); "off" is the escape hatch.
+pub const HELPER_DEFAULT: bool = true;
+/// Kept terminals outlive a quit ("Keep terminals running after Redline
+/// quits"). Off: a quit ends every terminal, as it always did.
+pub const KEEP_SETTING: &str = "redline.terminals.keepOnQuit";
+/// The first ⌘Q with terminals running asks; "Don't ask again" turns it off.
+/// A held plan review is said whatever this says.
+pub const ASK_SETTING: &str = "redline.terminals.askOnQuit";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -69,6 +75,9 @@ struct Helpers {
     retiring: Mutex<Vec<Arc<Client>>>,
     sink: Mutex<Option<ptyd::Sink>>,
     typing: Mutex<HashMap<String, Arc<Typing>>>,
+    /// Placement written before the terminal's shell exists (the frontend
+    /// names a terminal before its view mounts): used by its spawn.
+    pending_meta: Mutex<HashMap<String, (Option<bool>, Option<Vec<u8>>)>>,
 }
 
 impl Helpers {
@@ -82,6 +91,7 @@ impl Helpers {
             retiring: Mutex::new(Vec::new()),
             sink: Mutex::new(None),
             typing: Mutex::new(HashMap::new()),
+            pending_meta: Mutex::new(HashMap::new()),
         }
     }
 
@@ -332,19 +342,62 @@ pub fn pty_spawn(
     // An explicit cwd wins; otherwise $HOME, so a terminal never inherits
     // wherever the app happened to be launched from.
     let start_dir = cwd.filter(|d| !d.is_empty()).or_else(|| std::env::var("HOME").ok()).filter(|d| !d.is_empty());
-    let persist = keep_on_quit(&app);
+    let (persist, meta) = lock(&state.helpers.pending_meta).remove(&id).unwrap_or_default();
+    let persist = persist.unwrap_or(true);
     client
-        .spawn(&id, start_dir, cols.max(1), rows.max(1), vec![shell.clone(), "-l".into()], shell_env(&id), persist, Vec::new(), attachment_id.as_deref(), on_output)
+        .spawn(&id, start_dir, cols.max(1), rows.max(1), vec![shell.clone(), "-l".into()], shell_env(&id), persist, meta.unwrap_or_default(), attachment_id.as_deref(), on_output)
         .map_err(|e| {
             crate::db::note_friction("pty_spawn_failed", Some("terminal"), None, Some(&format!("{shell}: {e}")));
             e
         })
 }
 
-/// Whether a new terminal is kept running after Redline quits (P2's
-/// setting). Until then every terminal ends at quit regardless (`on_quit`).
-fn keep_on_quit(_app: &AppHandle) -> bool {
-    true
+fn setting_on(app: &AppHandle, key: &str, default: bool) -> bool {
+    app.try_state::<crate::Settings>()
+        .and_then(|s| s.db.get_setting(key))
+        .map(|v| v == "on")
+        .unwrap_or(default)
+}
+
+/// Whether a quit keeps the terminals marked to persist (the setting).
+pub fn keep_on_quit(app: &AppHandle) -> bool {
+    setting_on(app, KEEP_SETTING, true)
+}
+
+/// Settings ▸ Terminal: what the helper does for this app.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSettings {
+    /// Terminals live in the helper (takes effect at the next launch).
+    helper: bool,
+    /// The helper is actually in use this launch.
+    helper_active: bool,
+    keep_on_quit: bool,
+    ask_on_quit: bool,
+}
+
+#[tauri::command]
+pub fn terminal_settings(app: AppHandle, state: tauri::State<'_, PtyState>) -> TerminalSettings {
+    TerminalSettings {
+        helper: setting_on(&app, HELPER_SETTING, HELPER_DEFAULT),
+        helper_active: state.helpers.wanted(),
+        keep_on_quit: keep_on_quit(&app),
+        ask_on_quit: setting_on(&app, ASK_SETTING, true),
+    }
+}
+
+/// `key` is one of `helper`, `keepOnQuit`, `askOnQuit`: an allowlist, so this
+/// is never a general settings write.
+#[tauri::command]
+pub fn set_terminal_setting(app: AppHandle, key: String, on: bool) -> Result<(), String> {
+    let row = match key.as_str() {
+        "helper" => HELPER_SETTING,
+        "keepOnQuit" => KEEP_SETTING,
+        "askOnQuit" => ASK_SETTING,
+        _ => return Err(format!("unknown terminal setting: {key}")),
+    };
+    let settings = app.try_state::<crate::Settings>().ok_or("settings are not loaded")?;
+    settings.db.set_setting(row, if on { "on" } else { "off" }).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -612,6 +665,7 @@ pub fn pty_ack(state: tauri::State<'_, PtyState>, id: String, n: usize, attachme
 
 #[tauri::command]
 pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), String> {
+    lock(&state.helpers.pending_meta).remove(&id);
     if let Some(client) = state.helpers.client_for(&id) {
         client.kill(&id);
         lock(&state.helpers.typing).remove(&id);
@@ -631,12 +685,37 @@ pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
 
 /// Store what a relaunched app needs to put a kept terminal back where it
 /// was (`{owner, title, sessionId, harness}`, at most 2 KB), and whether it
-/// outlives a quit. In-process terminals end with the app: nothing to store.
+/// outlives a quit (`persist`; the close dialog's "Also after Redline
+/// quits"). Either may be left out to keep what is there. A terminal whose
+/// shell doesn't exist yet gets it at its spawn. In-process terminals end
+/// with the app: nothing to store.
 #[tauri::command]
-pub fn pty_set_meta(state: tauri::State<'_, PtyState>, id: String, meta: serde_json::Value, persist: Option<bool>) -> Result<(), String> {
-    let Some(client) = state.helpers.client_for(&id) else { return Ok(()) };
-    let persist = persist.or_else(|| client.info(&id).map(|t| t.persist)).unwrap_or(true);
-    client.set_meta(&id, persist, serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
+pub fn pty_set_meta(state: tauri::State<'_, PtyState>, id: String, meta: Option<serde_json::Value>, persist: Option<bool>) -> Result<(), String> {
+    set_meta(&state, &id, meta, persist)
+}
+
+fn set_meta(state: &PtyState, id: &str, meta: Option<serde_json::Value>, persist: Option<bool>) -> Result<(), String> {
+    let bytes = meta.map(|m| serde_json::to_vec(&m)).transpose().map_err(|e| e.to_string())?;
+    if bytes.as_ref().is_some_and(|b| b.len() > redline_pty_proto::MAX_META) {
+        return Err(format!("terminal metadata is over {} bytes", redline_pty_proto::MAX_META));
+    }
+    let Some(client) = state.helpers.client_for(id) else {
+        if state.helpers.wanted() && !state.local.is_live(id) {
+            let mut pending = lock(&state.helpers.pending_meta);
+            let entry = pending.entry(id.to_string()).or_default();
+            if persist.is_some() {
+                entry.0 = persist;
+            }
+            if bytes.is_some() {
+                entry.1 = bytes;
+            }
+        }
+        return Ok(());
+    };
+    let info = client.info(id);
+    let persist = persist.or_else(|| info.as_ref().map(|t| t.persist)).unwrap_or(true);
+    let meta = bytes.or_else(|| info.map(|t| t.meta)).unwrap_or_default();
+    client.set_meta(id, persist, meta)
 }
 
 /// Forget a tombstone (the sidebar's Dismiss).
