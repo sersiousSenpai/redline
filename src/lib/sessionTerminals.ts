@@ -45,6 +45,28 @@ export interface FlowLaunch {
   /** The dock has reported this terminal live at least once. Until then an
    *  absent id is ignorance rather than news (the `launchLiveness` rule). */
   confirmed: boolean;
+  /** What was typed to start it: Retry types it again. */
+  command?: string;
+  /** A process sample has seen its agent in front of the shell. */
+  agentSeen?: boolean;
+  /** Its agent is gone with no plan: killed, crashed or quit before the plan
+   *  arrived (a sample found the shell back in front). Its row and Agent
+   *  pane read stopped, with Retry and Remove — never "launching" forever. */
+  stopped?: boolean;
+}
+
+/** How long a launch's shell may stay in front before its agent counts as
+ *  gone when no sample ever saw the agent (killed before the first one). */
+export const LAUNCH_START_GRACE_MS = 10_000;
+
+/** How often a waiting launch's terminal is sampled. */
+export const LAUNCH_SAMPLE_MS = 2_000;
+
+/** One `pty_procs` row, as much as the launch list reads. */
+export interface LaunchProc {
+  id: string;
+  fgIsShell: boolean;
+  fgComm?: string | null;
 }
 
 export type SessionTerminals = ReadonlyMap<string, string>;
@@ -56,7 +78,13 @@ export type LaunchEvent =
   /** Its plan arrived: from here on it is a plan session row. */
   | { type: "arrived"; launchId: string }
   /** The dock's live terminals; null while it has not reported. */
-  | { type: "terminals"; live: readonly string[] | null };
+  | { type: "terminals"; live: readonly string[] | null }
+  /** A process sample of the terminals, taken at `at`. */
+  | { type: "procs"; rows: readonly LaunchProc[]; at: number }
+  /** Retry: its command was typed again at `at`. */
+  | { type: "retried"; terminalId: string; at: number }
+  /** "Remove launch": the row goes, whatever its terminal does. */
+  | { type: "removed"; terminalId: string };
 
 /** The launches still waiting on a plan (or, for a run, still running).
  *  Returns `prev` by identity when nothing changed. */
@@ -94,6 +122,38 @@ export function reduceLaunches(
       }
       return changed ? next : prev;
     }
+    case "procs": {
+      // An agent in front is the launch running; the shell back in front
+      // after it (or, if no sample ever saw it, once the start's grace is
+      // over) is the launch stopped. A shell in front during the grace is
+      // the CLI still starting.
+      const rows = new Map(event.rows.map((r) => [r.id, r]));
+      let changed = false;
+      const next = prev.map((l) => {
+        const row = rows.get(l.terminalId);
+        if (!row) return l;
+        if (!row.fgIsShell) {
+          if (l.agentSeen && !l.stopped) return l;
+          changed = true;
+          return { ...l, agentSeen: true, stopped: false };
+        }
+        if (l.stopped || (!l.agentSeen && event.at - l.startedAt < LAUNCH_START_GRACE_MS)) return l;
+        changed = true;
+        return { ...l, stopped: true };
+      });
+      return changed ? next : prev;
+    }
+    case "retried": {
+      const i = prev.findIndex((l) => l.terminalId === event.terminalId);
+      if (i < 0) return prev;
+      const next = [...prev];
+      next[i] = { ...prev[i], startedAt: event.at, agentSeen: false, stopped: false };
+      return next;
+    }
+    case "removed": {
+      const next = prev.filter((l) => l.terminalId !== event.terminalId);
+      return next.length === prev.length ? prev : next;
+    }
   }
 }
 
@@ -106,6 +166,8 @@ export interface SidebarLaunch {
   startedAt: number;
   projectPath: string | null;
   working: boolean;
+  /** Its agent is gone with no plan (`FlowLaunch.stopped`). */
+  stopped?: boolean;
 }
 
 export function sidebarLaunches(
@@ -121,8 +183,10 @@ export function sidebarLaunches(
       title: titles.get(l.terminalId) || launchTitle(l.prompt),
       startedAt: l.startedAt,
       projectPath: l.projectPath,
-      // Nothing heard yet is a CLI still starting, which is work.
-      working: kind === undefined || kind === "working",
+      // Nothing heard yet is a CLI still starting, which is work; a
+      // stopped one works on nothing.
+      working: !l.stopped && (kind === undefined || kind === "working"),
+      stopped: !!l.stopped,
     };
   });
 }

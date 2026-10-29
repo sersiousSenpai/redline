@@ -54,7 +54,31 @@ export interface AgentPaneViewProps {
   planOpen: boolean;
   talking: boolean;
   onCliView: AgentPaneProps["onCliView"];
-  handlers: { onFork: NonNullable<AgentPaneProps["onFork"]>; onOpenPlan: AgentPaneProps["onOpenPlan"]; onTalk: AgentPaneProps["onTalk"]; onRetryBuild?: () => void };
+  handlers: {
+    onFork: NonNullable<AgentPaneProps["onFork"]>;
+    onOpenPlan: AgentPaneProps["onOpenPlan"];
+    onTalk: AgentPaneProps["onTalk"];
+    onRetryBuild?: () => void;
+    onRetryReview?: () => void;
+    onRetryLaunch?: (terminalId: string) => void;
+  };
+}
+
+/** The Stopped strip's Retry: every stopped strip has one (LAST2). A launch
+ *  stopped before its plan types its command again; a plan's own agent
+ *  resumes its build, or, in review, takes the plan's Restore. Null for an
+ *  agent tab that is not the session's (nothing of its own to retry). */
+export function stoppedRetry({ launch, own, building, terminalId, handlers }: {
+  launch: Pick<FlowLaunch, "stopped"> | null;
+  own: boolean;
+  building: boolean;
+  terminalId: string;
+  handlers: Pick<AgentPaneViewProps["handlers"], "onRetryBuild" | "onRetryReview" | "onRetryLaunch">;
+}): (() => void) | null {
+  const relaunch = handlers.onRetryLaunch;
+  if (launch?.stopped && relaunch) return () => relaunch(terminalId);
+  if (!own) return null;
+  return (building ? handlers.onRetryBuild : handlers.onRetryReview) ?? null;
 }
 
 export function AgentPaneView({ data, ctx, facts, launches, liveTermIds, termState, planOpen, talking, onCliView, handlers }: AgentPaneViewProps) {
@@ -65,6 +89,7 @@ export function AgentPaneView({ data, ctx, facts, launches, liveTermIds, termSta
   const ownSummary = own ? facts.summary : null;
   const harness: "claude" | "codex" = launch?.harness ?? ((own ? facts.backend : ownSummary?.backend) === "codex" ? "codex" : "claude");
   const projectPath = launch?.projectPath ?? (own ? facts.projectPath : null);
+  const onRetry = stoppedRetry({ launch, own, building: facts.planState?.kind === "build", terminalId: agentTerminal, handlers });
   return (
     <Suspense fallback={null}>
       <AgentPane
@@ -88,7 +113,7 @@ export function AgentPaneView({ data, ctx, facts, launches, liveTermIds, termSta
         talking={talking}
         onTalk={handlers.onTalk}
         planState={own ? facts.planState : null}
-        onRetryBuild={own ? handlers.onRetryBuild ?? null : null}
+        onRetry={onRetry}
         fallbackModel={own ? facts.fallbackModel : null}
         fallbackMode={ownSummary?.status === "in_review" ? "plan" : null}
       />

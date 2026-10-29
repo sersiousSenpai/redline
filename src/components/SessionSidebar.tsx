@@ -19,7 +19,7 @@
 //! so only the rows that changed render.
 
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, FileText, Globe, House, MessageSquare, Plus, Server, Terminal } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Globe, House, MessageSquare, Plus, Server, Terminal, X } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
@@ -135,6 +135,9 @@ export interface SessionSidebarProps {
   launches?: readonly FlowLaunch[];
   activeLaunchId?: string | null;
   onSelectLaunch?: (terminalId: string) => void;
+  /** A launch row's "Remove launch": the row goes (a launch stopped before
+   *  its plan, or one nobody wants any more). */
+  onRemoveLaunch?: (terminalId: string) => void;
   /** Why a row needs you, by row key (`plan:<id>`, `chat:<id>`,
    *  `launch:<terminalId>`), from the engine's open asks. A run waiting on
    *  its code review (Review) or stalled is read off the session without it. */
@@ -205,6 +208,7 @@ interface LightHandlers {
   rename: (item: SidebarItem, title: string) => void;
   archive: (item: SidebarItem) => void;
   remove: (item: SidebarItem) => void;
+  removeLaunch: (item: SidebarItem) => void;
 }
 
 interface LightCan {
@@ -221,7 +225,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow,
     onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
-    onSelectLaunch, needs, working, place, onSelectPlace, localhostPorts,
+    onSelectLaunch, onRemoveLaunch, needs, working, place, onSelectPlace, localhostPorts,
     terminals, homeTerminals, onSelectTerminal, onNewTab, servers, onOpenPort,
   } = props;
 
@@ -352,7 +356,8 @@ function SessionSidebarBase(props: SessionSidebarProps) {
     rename: (item, title) => { if (item.kind === "chat" && title) onRenameChat?.(item.id, title); },
     archive: (item) => { if (item.kind === "chat") onArchiveChat?.(item.id, item.archivedAt === null); },
     remove: (item) => { if (item.kind === "chat") onDeleteChat?.(item.id); },
-  }), [onSelectChat, onSelectLaunch, onRenameChat, onArchiveChat, onDeleteChat]);
+    removeLaunch: (item) => { if (item.kind === "launch") onRemoveLaunch?.(item.id); },
+  }), [onSelectChat, onSelectLaunch, onRemoveLaunch, onRenameChat, onArchiveChat, onDeleteChat]);
   const can = useMemo<LightCan>(() => ({
     renameChat: !!onRenameChat, archiveChat: !!onArchiveChat, deleteChat: !!onDeleteChat,
   }), [onRenameChat, onArchiveChat, onDeleteChat]);
@@ -1405,11 +1410,15 @@ function LightRowBase({ item, active, handlers, can }: {
     archive: chat && can.archiveChat ? () => handlers.archive(item) : undefined,
     remove: deletable ? () => setConfirming(true) : undefined,
   };
-  // A launch has no record yet, so nothing to rename, archive or delete: its
-  // menu only opens it.
+  // A launch has no record yet, so nothing to rename or archive: its menu
+  // opens it, or removes the row (one stopped before its plan otherwise
+  // stayed for good, LAST2).
   const actions: RowAction[] = chat
     ? chatRowActions(item, acts)
-    : [{ label: "Open session", icon: <FileText size={14} aria-hidden />, onSelect: acts.open }];
+    : [
+        { label: "Open session", icon: <FileText size={14} aria-hidden />, onSelect: acts.open },
+        { label: "Remove launch", icon: <X size={14} aria-hidden />, onSelect: () => handlers.removeLaunch(item) },
+      ];
   const openMenu = (at: { x: number; y: number } | null) => {
     setMenuAt(at);
     setMenuOpen(true);
@@ -1500,7 +1509,7 @@ function LightRowBase({ item, active, handlers, can }: {
             ) : (
               <>
                 <span className="rl-sb-title">{item.title}</span>
-                <span className="rl-sb-tag">{item.need ? status.word : "launching"}</span>
+                <span className="rl-sb-tag">{item.need || item.stopped ? status.word : "launching"}</span>
               </>
             )}
           </button>
@@ -1531,6 +1540,7 @@ const LightRow = memo(LightRowBase, (a, b) =>
   a.item.mode === b.item.mode &&
   a.item.need === b.item.need &&
   a.item.working === b.item.working &&
+  a.item.stopped === b.item.stopped &&
   a.item.archivedAt === b.item.archivedAt,
 );
 

@@ -142,6 +142,10 @@ export interface SessionConversationProps {
    *  (App's `buildApproved("same")`): the Stopped card's Retry when the
    *  agent died mid-build. */
   onRetryBuild?: (() => void) | null;
+  /** The Stopped strip's Retry, whatever stopped: a building plan resumes
+   *  its build, a plan in review is restored, a launch stopped before its
+   *  plan starts again. Wins over `onRetryBuild`. */
+  onRetry?: (() => void) | null;
   /** The voice panel is open on this conversation. */
   talking?: boolean;
   /** Open or close the voice panel; without it, Talk raises
@@ -654,7 +658,7 @@ function SessionConversation(props: SessionConversationProps) {
           <StoppedCard
             harness={harnessName}
             building={building}
-            onRetry={building ? props.onRetryBuild ?? null : null}
+            onRetry={props.onRetry ?? (building ? props.onRetryBuild ?? null : null)}
             onShowTerminal={onShowTerminal}
           />
         )}

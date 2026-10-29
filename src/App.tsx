@@ -287,7 +287,7 @@ const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m
 // (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
 // spinners read it. The dock pins itself over an Agent pane's CLI view
 // (lib/stageDock).
-import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/sessionTerminals";
+import { LAUNCH_SAMPLE_MS, attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent, type LaunchProc } from "./lib/sessionTerminals";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path), warmed the moment a
 // selection shows that menu.
@@ -6851,7 +6851,7 @@ function App() {
     // registry feeds the sidebar's pending rows.
     noteFlowLaunch({
       type: "launched",
-      launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
+      launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude", command: cmd },
     });
     // The workbench: the launch is a session from here — a `launch:` set
     // holding its Agent tab, behind the strip, rekeyed to the plan when it
@@ -7621,6 +7621,55 @@ function App() {
   useEffect(() => {
     noteFlowLaunch({ type: "terminals", live: liveTermIds });
   }, [liveTermIds, noteFlowLaunch]);
+  // A launch whose agent dies before its plan (killed, crashed, quit) leaves
+  // its shell alive, so the rule above never fires: it read "launching"
+  // forever, the flight pill kept counting, and its row could not go
+  // (LAST2). While any launch is waiting, its terminals' foreground is
+  // sampled; the shell back in front is the launch stopped (`procs`).
+  const launchesWaiting = flowLaunches.some((l) => !l.stopped);
+  useEffect(() => {
+    if (!launchesWaiting) return;
+    let alive = true;
+    const sample = () =>
+      void invoke<LaunchProc[]>("pty_procs")
+        .then((rows) => {
+          if (alive && Array.isArray(rows)) noteFlowLaunch({ type: "procs", rows, at: Date.now() });
+        })
+        .catch(() => {});
+    sample();
+    const timer = window.setInterval(sample, LAUNCH_SAMPLE_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [launchesWaiting, noteFlowLaunch]);
+  // The door's flight pill follows it: a launch stopped before its plan is
+  // over, and the sentence comes back as for a closed terminal.
+  useEffect(() => {
+    if (!pendingLaunch) return;
+    if (!flowLaunches.some((l) => l.terminalId === pendingLaunch.terminalId && l.stopped)) return;
+    setPendingLaunch(null);
+    repayPending(pendingLaunch, "Claude stopped before its plan arrived");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowLaunches, pendingLaunch]);
+  // Retry on a launch stopped before its plan: its own command, typed again
+  // into the same terminal (the same launch, so the plan still finds its
+  // set and its row).
+  const retryLaunch = async (terminalId: string) => {
+    const launch = flowLaunchesRef.current.find((l) => l.terminalId === terminalId);
+    if (!launch?.command) return;
+    noteFlowLaunch({ type: "retried", terminalId, at: Date.now() });
+    const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId, [{ stage: "launch", data: launch.command }]);
+    if (!delivery.ok) setToast({ message: `Couldn't start it again: ${delivery.reason}`, tone: "warning" });
+  };
+  // "Remove launch": the row goes, and its set stops being the one on
+  // screen. Its terminal stays, a plain shell, for whoever wants it.
+  const removeLaunch = (terminalId: string) => {
+    const launch = flowLaunchesRef.current.find((l) => l.terminalId === terminalId);
+    noteFlowLaunch({ type: "removed", terminalId });
+    if (pendingLaunchRef.current?.terminalId === terminalId) setPendingLaunch(null);
+    if (launch && wb.getState().activeKey === launchKey(launch.launchId)) wb.dispatch({ type: "selectSession", key: HOME_KEY });
+  };
 
   // The `/hooks` nudge is the only time-based item: it appears once a launch
   // has waited HOOK_SILENCE_MS for its plan. One timer for that moment — not
@@ -9079,6 +9128,7 @@ function App() {
       }
       showTerminal(terminalId);
     },
+    onRemoveLaunch: (terminalId: string) => removeLaunch(terminalId),
     // A row's "Open as workspace" (D29): the session's own set, the switch.
     onOpenWorkspace: (sessionId: string) => openWorkspace(sessionId),
     onNewTab: openDoorTab,
@@ -9170,6 +9220,10 @@ function App() {
     // The Stopped card's Retry on an agent that died mid-build: resume the
     // same conversation to carry on the approved plan.
     onRetryBuild: () => void buildApproved("same"),
+    // Its Retry on a plan in review whose agent died: the plan's Restore.
+    onRetryReview: () => void restorePlanSession(),
+    // On a launch stopped before its plan: its command again.
+    onRetryLaunch: (terminalId: string) => void retryLaunch(terminalId),
   });
   const activeAgentSummary = activeId ? summaries.find((s) => s.sessionId === activeId) ?? null : null;
   const activeAgentMode = activeAgentSummary
@@ -9396,7 +9450,10 @@ function App() {
         // exited there, never its last hook's needs-you); a PTY gone from the
         // live list exited; else the hooks.
         const derived = termStatuses.get(pane.data.terminalId)?.state ?? null;
-        const ptyGone = !!liveTermIds && !liveTermIds.includes(pane.data.terminalId);
+        const agentTerm = pane.data.terminalId;
+        // A launch stopped before its plan reads exited too: its Agent pane
+        // shows the stopped strip with Retry.
+        const ptyGone = (!!liveTermIds && !liveTermIds.includes(agentTerm)) || flowLaunches.some((l) => l.terminalId === agentTerm && l.stopped);
         return (
           <AgentPaneView
             data={pane.data}

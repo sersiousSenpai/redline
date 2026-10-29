@@ -490,7 +490,7 @@ describe("the grouped sidebar", () => {
     expect(full.onRenameChat).toHaveBeenCalledWith("c", "Renamed");
   });
 
-  it("a launch row lands under its project: spinning, italic, tagged launching, offering only Open", async () => {
+  it("a launch row lands under its project: spinning, italic, tagged launching, offering Open and Remove", async () => {
     const onSelectLaunch = vi.fn();
     await renderWith({
       sessions: [summary("a", 2)],
@@ -510,7 +510,25 @@ describe("the grouped sidebar", () => {
     await click(launch.querySelector(".rl-sb-row"));
     expect(onSelectLaunch).toHaveBeenCalledWith("t");
     await click(await dots(launch));
-    expect([...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent)).toEqual(["Open session"]);
+    expect([...document.querySelectorAll(".rl-row-menu-label")].map((l) => l.textContent)).toEqual(["Open session", "Remove launch"]);
+  });
+
+  // LAST2 walk: a launch whose agent was killed before its plan read
+  // "launching" for good and its row could not be removed.
+  it("a launch stopped before its plan reads stopped, not launching, and its menu removes it", async () => {
+    const onRemoveLaunch = vi.fn();
+    await renderWith({
+      sessions: [summary("a", 2)],
+      launches: [{ terminalId: "t", title: "wb-last2-stop", startedAt: 1, projectPath: "/repo/redline", working: false, stopped: true }],
+      onRemoveLaunch,
+    });
+    const launch = lightRow("wb-last2-stop");
+    expect(launch.querySelector(".rl-sb-tag")!.textContent).toBe("Stopped");
+    expect(launch.querySelector(".rl-sb-spin")).toBeNull();
+    await click(await dots(launch));
+    const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => el.textContent?.includes("Remove launch"))!;
+    await click(remove);
+    expect(onRemoveLaunch).toHaveBeenCalledWith("t");
   });
 
   it("the open launch hands its row to the plan that arrives from its terminal", async () => {
@@ -654,7 +672,7 @@ describe("a row's ⋯ (D37)", () => {
     expect(labels()).toEqual(["Open chat", "Rename", "Archive", "Delete chat"]);
     await key(document.activeElement!, { key: "Escape" });
     await fire(lightRow("Plan the roadmap").querySelector(".rl-sb-row")!, "contextmenu", { clientX: 40, clientY: 240 });
-    expect(labels()).toEqual(["Open session"]);
+    expect(labels()).toEqual(["Open session", "Remove launch"]);
   });
 
   it("⇧F10 and the menu key open the focused row's menu; Escape hands focus to its ⋯", async () => {

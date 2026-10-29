@@ -11,6 +11,7 @@ import {
   sidebarActivity,
   launchTitle,
   reduceLaunches,
+  LAUNCH_START_GRACE_MS,
   sidebarLaunches,
   type FlowLaunch,
 } from "./sessionTerminals";
@@ -27,6 +28,43 @@ const launch = (terminalId: string, over: Partial<FlowLaunch> = {}): FlowLaunch 
   ...over,
 });
 
+
+// LAST2 walk: a launch whose agent was killed before its plan stayed
+// "launching" forever (its shell lived on, so its terminal never closed).
+describe("a launch whose agent dies before its plan", () => {
+  const shell = (id: string) => ({ id, fgIsShell: true, fgComm: "zsh" });
+  const agent = (id: string) => ({ id, fgIsShell: false, fgComm: "claude" });
+
+  it("seen running, then the shell back in front: stopped", () => {
+    let list = reduceLaunches([], { type: "launched", launch: launch("T1") });
+    list = reduceLaunches(list, { type: "procs", rows: [agent("T1")], at: 1_000 });
+    expect(list[0].stopped).toBe(false);
+    list = reduceLaunches(list, { type: "procs", rows: [shell("T1")], at: 3_000 });
+    expect(list[0].stopped).toBe(true);
+    // A second sample changes nothing.
+    expect(reduceLaunches(list, { type: "procs", rows: [shell("T1")], at: 5_000 })).toBe(list);
+  });
+
+  it("killed before any sample saw it: stopped once the start's grace is over, never during it", () => {
+    const list = reduceLaunches([], { type: "launched", launch: launch("T1", { startedAt: 0 }) });
+    expect(reduceLaunches(list, { type: "procs", rows: [shell("T1")], at: LAUNCH_START_GRACE_MS - 1 })).toBe(list);
+    expect(reduceLaunches(list, { type: "procs", rows: [shell("T1")], at: LAUNCH_START_GRACE_MS })[0].stopped).toBe(true);
+  });
+
+  it("Retry starts its grace again; Remove drops the row", () => {
+    let list = reduceLaunches([launch("T1", { stopped: true, agentSeen: true }), launch("T2")], { type: "retried", terminalId: "T1", at: 50_000 });
+    expect(list[0]).toMatchObject({ stopped: false, agentSeen: false, startedAt: 50_000 });
+    expect(reduceLaunches(list, { type: "procs", rows: [shell("T1")], at: 51_000 })[0].stopped).toBe(false);
+    list = reduceLaunches(list, { type: "removed", terminalId: "T1" });
+    expect(list.map((l) => l.terminalId)).toEqual(["T2"]);
+    expect(reduceLaunches(list, { type: "removed", terminalId: "nope" })).toBe(list);
+  });
+
+  it("a stopped launch's sidebar row neither spins nor reads launching", () => {
+    const [row] = sidebarLaunches([launch("T1", { stopped: true })], new Map());
+    expect(row).toMatchObject({ working: false, stopped: true });
+  });
+});
 
 describe("reduceLaunches", () => {
   it("records a launch first, replacing an older record on the same terminal", () => {

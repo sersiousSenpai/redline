@@ -40,6 +40,8 @@ export interface FlowLaunch {
   startedAt: number;
   projectPath: string | null;
   working: boolean;
+  /** Its agent is gone with no plan: the row reads stopped. */
+  stopped?: boolean;
 }
 
 /** A chat (companion conversation), as much of it as the sidebar reads. */
@@ -66,6 +68,8 @@ export interface SidebarItem {
   need: NeedReason | null;
   working: boolean;
   archivedAt: number | null;
+  /** Launch rows only: its agent is gone with no plan. */
+  stopped?: boolean;
   /** Plan rows only. */
   session?: SessionSummary;
 }
@@ -238,8 +242,9 @@ export function sidebarItems(input: SidebarInput): SidebarItem[] {
       // Before its plan exists a terminal session is Claude planning.
       mode: "plan",
       need: needs[key] ?? null,
-      working: l.working || working.has(key),
+      working: !l.stopped && (l.working || working.has(key)),
       archivedAt: null,
+      stopped: !!l.stopped,
     });
   }
   return items;
@@ -367,7 +372,8 @@ const NEED_STATUS: Record<NeedReason, RowStatus> = {
  *  running right now: a terminal mid-turn. A build handed to an agent in its terminal is
  *  "Approved" with a hammer, never a spinner: nothing tells Redline when that
  *  agent finishes, so a spinner there would spin forever. */
-export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | "session">): RowStatus {
+export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | "session" | "stopped">): RowStatus {
+  if (item.kind === "launch" && item.stopped) return { word: "Stopped", tone: "quiet", icon: "dot", detail: "Claude stopped before its plan arrived: Retry or Remove from the row's menu or its Agent tab" };
   if (item.need) return NEED_STATUS[item.need];
   if (item.kind === "chat") return item.working ? { word: "Replying", tone: "plan", icon: "spin" } : { word: "Chat", tone: "quiet", icon: "chat" };
   if (item.kind === "launch") return item.working ? { word: "Planning", tone: "plan", icon: "spin" } : { word: "Waiting", tone: "quiet", icon: "file", detail: "Claude is idle in its terminal, with no plan yet" };
