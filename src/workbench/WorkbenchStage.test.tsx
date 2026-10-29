@@ -402,6 +402,80 @@ describe("a door at rest in a split (W5)", () => {
   });
 });
 
+// W5 walk: a door FOCUSED in a split was an empty plate. The island (the
+// one composer) landed only while the tab's surface was the document, so a
+// door beside or under a browser never got it; at rest the pane showed its
+// box, focused it showed nothing.
+describe("a focused door in a split has the composer (W5 fix)", () => {
+  const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+  const mountWithIsland = async () => {
+    const { DoorPane } = await import("./panes/door");
+    const { MonochatIsland } = await import("../components/MonochatIsland");
+    const { doorLands, selectStageView } = await import("./view");
+    const { useWorkbench } = await import("./store");
+    const render = (pane: AnyPane, ctx: { visible: boolean; focused: boolean; active: boolean }) =>
+      pane.kind === "door"
+        ? <DoorPane ctx={ctx} draftKey={pane.data.draftKey} onWake={() => store.dispatch({ type: "focusPane", paneId: pane.id })} />
+        : <div data-body={pane.kind} />;
+    // App's wiring: the island lands where `doorLands` says, measured to the
+    // focused plate.
+    function Island() {
+      const view = useWorkbench(store, selectStageView);
+      return (
+        <MonochatIsland landing={doorLands(view)} open={false} onOpenChange={() => {}} context="Front door" plateKey={JSON.stringify(view)}>
+          <textarea aria-label="Main reply" />
+        </MonochatIsland>
+      );
+    }
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.matches("[data-rl-door-plate]") ? rect(600, 40, 600, 700) : rect(0, 0, 0, 0);
+    });
+    await act(async () => root.render(<><WorkbenchStage store={store} renderPane={render} onNewTab={() => {}} /><Island /></>));
+  };
+  const layer = () => document.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+  const plates = () => [...host.querySelectorAll<HTMLElement>(".rl-wb-tab-body:not([data-hidden]) [data-rl-door-plate]")];
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("plan | door, the door focused: the island lands on its plate, with its composer", async () => {
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, newPaneId: "pl", before: true }));
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "p1" }));
+    await mountWithIsland();
+    expect(plates().map((p) => p.closest<HTMLElement>(".rl-wb-pane")!.dataset.paneId)).toEqual(["p1"]);
+    expect(layer().dataset.landed).toBe("true");
+    expect(layer().getAttribute("aria-hidden")).not.toBe("true");
+    expect(layer().querySelector('[aria-label="Main reply"]')).not.toBeNull();
+    expect(layer().style.getPropertyValue("--fd-rest-left")).toBe("600px");
+  });
+
+  it("a door split down under a browser (⌘⇧D), and one beside it: focused, each gets the island; at rest, its box", async () => {
+    await act(async () => {
+      store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "browser", data: { workspace: "regular" } }, newPaneId: "br", before: true });
+      store.dispatch({ type: "splitPane", paneId: "br", direction: "column", pane: { kind: "door", data: { draftKey: "d2" } }, newPaneId: "d2" });
+    });
+    await mountWithIsland();
+    // The new door below the browser has the focus: the tab's surface is the
+    // browser's, and the door still lands.
+    expect(store.getState().sets.home!.tabs.t1.focusedPaneId).toBe("d2");
+    expect(plates().map((p) => p.closest<HTMLElement>(".rl-wb-pane")!.dataset.paneId)).toEqual(["d2"]);
+    expect(layer().dataset.landed).toBe("true");
+    // The browser focused: no door has the plate, the island goes, each door
+    // rests with its box.
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "br" }));
+    expect(plates()).toEqual([]);
+    expect(layer().dataset.landed).toBeUndefined();
+    for (let i = 0; i < 20 && host.querySelectorAll("[data-door-rest]").length < 2; i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    expect(host.querySelectorAll(".rl-wb-tab-body:not([data-hidden]) [data-door-rest]")).toHaveLength(2);
+    // The door beside the browser focused: it lands there.
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "p1" }));
+    expect(plates().map((p) => p.closest<HTMLElement>(".rl-wb-pane")!.dataset.paneId)).toEqual(["p1"]);
+    expect(layer().dataset.landed).toBe("true");
+  });
+});
+
 // D40: a split never draws a pane below its kind's minimum — each cell
 // carries it as `min-width`, which flex honours over the weight — and a
 // divider dragged toward a pane stops at its minimum.

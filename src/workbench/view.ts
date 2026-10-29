@@ -155,6 +155,16 @@ export function plateFace(view: Pick<StageView, "focusedKind">, activeId: string
   return activeId ? "plan" : "door";
 }
 
+/** The Front Door island lands on the focused door pane: a door alone, a
+ *  door beside a plan, under a wall, beside a browser, nested at any depth.
+ *  The tab's surface is no gate (a door focused beside a browser was left
+ *  as an empty plate, W5 walk): the island is a fixed layer measured to the
+ *  focused plate (`data-rl-door-plate`), and the browser hides while the
+ *  door is open (App's `browserOverlayActive`). */
+export function doorLands(view: Pick<StageView, "focusedKind">): boolean {
+  return view.focusedKind === "door";
+}
+
 /** The geometry the browser's native webview re-reads its rect on: the
  *  set, the tab, its layout tree — every split's path and weights, so the
  *  webview follows each divider — and the zoom. */

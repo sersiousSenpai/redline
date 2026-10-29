@@ -367,7 +367,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 // beyond perf: App reads what the active tab shows straight off the state.
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, retireLegacyKeys } from "./workbench/persist";
-import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
+import { activePanes, doorLands, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
 import { needsYouTerminals, terminalStatus, wallStatus } from "./workbench/status";
 import type { NeedReason } from "./lib/sessionGroups";
 import { HOME_KEY, activeSessionOf, activeTabOf, layoutMinWidth, tabMinWidth, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
@@ -2850,9 +2850,6 @@ function App() {
       <Columns2 size={16} aria-hidden />
     </button>
   ) : null;
-  // The Front Door is the plate at REST — no document, no draft, nothing of
-  // its own to cover — and that is where the door rests.
-  const plateAtRest = stageSurface === "document" && plateMode === "door";
 
 
   // ---- The shell's shape ----------------------------------------------------
@@ -10363,8 +10360,9 @@ function App() {
       )}
       <MonochatIsland
         clearanceKey={`${bootAnimating}`}
-        // The door rests on a door pane that is on screen and focused.
-        landing={plateAtRest && shellReady && !joinedActive && view.focusedKind === "door"}
+        // The door rests on the focused door pane, wherever it sits in the
+        // tab's tree and whatever else the tab shows (`doorLands`).
+        landing={doorLands(view) && shellReady && !joinedActive}
         surfaceKey={doorNavKey}
         plateKey={wbLayoutKey}
         onVisibilityChange={setDoorVisible}
