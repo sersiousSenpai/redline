@@ -191,3 +191,4 @@
 .rb-agent-status>span { flex:none; white-space:nowrap; }
 .rb-agent-status .rb-agent-status-note { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--color-ink-quiet); }
 .rb-agent-status button { flex:none; padding:0; border:0; background:none; color:var(--color-info-text); font:inherit; cursor:pointer; }
+.rb-owner-title { cursor: default; }

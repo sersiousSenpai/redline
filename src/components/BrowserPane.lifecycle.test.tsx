@@ -918,3 +918,27 @@ it("a page that never commits (a host that does not resolve) needs you: the ambe
   await event("browser-page-event", { label: "browser-t-one", kind: "state", url: "https://one.test/", title: "one" });
   expect(host.querySelector('[data-tab-id="t-one"]')?.getAttribute("data-status")).not.toBe("needs");
 });
+
+describe("one workspace, filtered by owner (W5)", () => {
+  it("a page opened in a session is that session's, stored with it; a session switch never swaps the workspace", async () => {
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed, ownerKey: "plan:s1" });
+    await settle();
+    await mount({ onOpenRequestConsumed, ownerKey: "plan:s1", openRequest: { url: "https://s1.test", nonce: 1 } });
+    await settle();
+    // A door in another session asks: the request's owner wins.
+    await mount({ onOpenRequestConsumed, ownerKey: "plan:s1", openRequest: { url: "https://s2.test", nonce: 2, owner: "plan:s2" } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    const stored = JSON.parse(localStorage.getItem("redline.browser.tabs")!) as { url: string; owner?: string }[];
+    expect(stored.map((t) => [t.url, t.owner ?? null])).toEqual([["https://one.test", null], ["https://two.test", null], ["https://s1.test", "plan:s1"], ["https://s2.test", "plan:s2"]]);
+    const created = mocks.invoke.mock.calls.filter(([c]) => c === "browser_create_tab").length;
+    const closed = mocks.invoke.mock.calls.filter(([c]) => c === "browser_close").length;
+    // Another session on screen: the same pages, re-read in its order — no
+    // webview closed or made.
+    await mount({ onOpenRequestConsumed, ownerKey: "plan:s2" });
+    await settle();
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "browser_close").length).toBe(closed);
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "browser_create_tab").length).toBe(created);
+    expect(mocks.load.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});

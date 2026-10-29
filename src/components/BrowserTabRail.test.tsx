@@ -72,3 +72,27 @@ it("closes a page from the ✕ on its icon in the icon strip", () => {
   expect(handlers.onCloseTab).toHaveBeenCalledWith("tab-1");
   expect(handlers.onSelect).not.toHaveBeenCalled();
 });
+it("a session's pane lists its own pages first under This session, the rest under Other sessions; Home lists all in order (W5)", () => {
+  const owned = [{ ...tabs[0], owner: "plan:s2" }, { ...tabs[1], owner: "plan:s1" }, tabs[2]];
+  localStorage.setItem("redline.browser.railWidth", "220");
+  const handlers = mount({ tabs: owned, owner: "plan:s1" });
+  const order = () => [...host.querySelectorAll<HTMLElement>("[data-tab-id]")].map((el) => el.dataset.tabId);
+  expect(order()).toEqual(["tab-1", "tab-0", "tab-2"]);
+  expect([...host.querySelectorAll(".rb-owner-title")].map((el) => el.textContent)).toEqual(["This session1", "Other sessions2"]);
+  // The tooltip keeps the page's own place in the strip.
+  expect(host.querySelector('[data-tab-id="tab-1"]')!.getAttribute("title")).toBe("2 · Second\nhttps://page1.test");
+  // The keyboard walks the rail as shown.
+  const first = host.querySelector<HTMLElement>('[data-tab-id="tab-1"]')!;
+  act(() => { first.focus(); first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
+  expect(handlers.onSelect).toHaveBeenLastCalledWith("tab-0");
+  mount({ tabs: owned, owner: "home" });
+  expect(order()).toEqual(["tab-0", "tab-1", "tab-2"]);
+  expect(host.querySelector(".rb-owner-title")).toBeNull();
+  // The icon strip parts the groups with a rule, not a heading.
+  localStorage.setItem("redline.browser.railWidth", "40");
+  act(() => root.unmount()); root = createRoot(host);
+  mount({ tabs: owned, owner: "plan:s1" });
+  expect(order()).toEqual(["tab-1", "tab-0", "tab-2"]);
+  expect(host.querySelector(".rb-owner-title")).toBeNull();
+  expect(host.querySelector('[data-owner-group="others"] .rb-rail-rule')).not.toBeNull();
+});

@@ -23,6 +23,7 @@ import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog }
 import { BrowserDialog } from "./BrowserSurfaces";
 import "./BrowserWorkspace.css";
 import { BrowserTileStage } from "./BrowserTileStage";
+import { ownerFor } from "../lib/browserOwner";
 import { arrangementTiles, swapVisibleTiles, tileBadges, assignTile, canonicalTabId, restoreBrowserTabs, focusedWorkspaceTab, assignVisibleTile, DEFAULT_BROWSER_LAYOUT, MAX_MOSAIC_TILES, normalizeBrowserLayout, visibleGrid, visibleTileIds, type BrowserLayout } from "../lib/browserLayout";
 import { deleteMosaic, gridFor, isMosaicWorkspace, listMosaics, loadMosaic, mosaicFromWorkspace, mosaicLayout, mosaicTabs, mosaicWorkspaceId, saveMosaic, STARTUP_MOSAIC_KEY, type Mosaic, type MosaicSummary } from "../lib/browserMosaics";
 import { MosaicEditDialog, MosaicManagerDialog, type MosaicDraft } from "./MosaicDialogs";
@@ -184,6 +185,9 @@ interface Tab {
    *  (persisted with the tab list) and the recreated native webview, so a tab's
    *  conversation reattaches to it. */
   browseId: string;
+  /** The session the page was opened in (`lib/browserOwner`): a session's
+   *  pane lists its own pages first. Absent for a page opened on Home. */
+  owner?: string;
 }
 
 // Persisted tab list — so a tab's browse-agent thread (keyed by `browseId`)
@@ -274,6 +278,9 @@ interface BrowserPaneProps {
     /** Just bring the tab back — don't open its chat (the Front Door's
      *  recent-tab pill). */
     quiet?: boolean;
+    /** The session the request came from (a door or a plan in that session):
+     *  the page it opens is that session's. Absent, the pane's `ownerKey`. */
+    owner?: string | null;
   } | null;
   /** Called once the pane has acted on `openRequest`, so the owner clears it.
    *  Without this the request outlives its click: `lastOpenNonceRef` resets on
@@ -316,6 +323,11 @@ interface BrowserPaneProps {
   /** How many pages could not load (they need you): the pane's tab wears the
    *  amber dot while any does. */
   onNeedsChange?: (count: number) => void;
+  /** The session on screen (a workbench session key; W5): a page opened now
+   *  is tagged with it, and the rail lists that session's pages first. Home
+   *  (or none) tags nothing and lists every page in order. One workspace
+   *  serves every session: this never swaps it (spike 2). */
+  ownerKey?: string | null;
 }
 
 const hostnameOf = (u: string): string => {
@@ -340,6 +352,7 @@ function BrowserPaneBase({
   openRequest = null,
   onOpenRequestConsumed,
   layoutKey,
+  ownerKey = null,
   dockSlot = null,
   dockPill = null,
   onOpenDockPill,
@@ -916,6 +929,7 @@ function BrowserPaneBase({
   const dockBrowseId = dock?.browseId ?? null;
   const dockTitle = dock?.title ?? null;
   const workspaceKeyRef = useRef(workspaceKey); workspaceKeyRef.current = workspaceKey;
+  const ownerKeyRef = useRef(ownerKey); ownerKeyRef.current = ownerKey;
   const dockCartId = cartKey(workspaceKey);
   const dockMissionId = mission.activeMission?.missionId ?? null;
   const dockMissionTitle = mission.activeMission?.title ?? null;
@@ -991,6 +1005,7 @@ function BrowserPaneBase({
         url: t.url,
         title: t.title,
         browseId: t.browseId, favicon: t.favicon,
+        ...(t.owner ? { owner: t.owner } : {}),
       }));
       const mid = activeMissionIdRef.current;
       if (mid) {
@@ -1030,7 +1045,7 @@ function BrowserPaneBase({
 
   useEffect(() => {
     if (missionRestorePendingRef.current || swappingRef.current) return;
-    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url, favicon: tab.favicon })), layout: tileLayout, groups, organized } };
+    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url, favicon: tab.favicon, ...(tab.owner ? { owner: tab.owner } : {}) })), layout: tileLayout, groups, organized } };
     pendingWorkspaceSaveRef.current = pending;
     const timer = window.setTimeout(() => {
       if (pendingWorkspaceSaveRef.current === pending) pendingWorkspaceSaveRef.current = null;
@@ -1787,7 +1802,7 @@ function BrowserPaneBase({
    *  a plan Search opens a fresh tab with its own chat (BC-5, BC-6). */
   const openTab = (
     url: string = HOME,
-    { via = "user" }: { via?: "user" | "agent" | "source" | "plan-search" } = {},
+    { via = "user", owner }: { via?: "user" | "agent" | "source" | "plan-search"; owner?: string | null } = {},
   ): string | null => {
     const opened = (tab: Tab, existing: boolean): ChatEvent =>
       via === "agent" ? { type: "agent-open-tab", tab }
@@ -1816,12 +1831,16 @@ function BrowserPaneBase({
     if (tabsRef.current.length >= MAX_TABS) return null;
     const browseId = newBrowseId();
     const id = canonicalTabId(browseId);
+    // The page is the session's that opened it: the request's, else the
+    // session on screen (Home owns nothing).
+    const tagged = ownerFor(owner === undefined ? ownerKeyRef.current : owner);
     const tab: Tab = {
       id,
       label: `browser-${id}`,
       url,
       title: initialBrowserTitle(url),
       browseId,
+      ...(tagged ? { owner: tagged } : {}),
     };
     markLive(id);
     touchMru(id);
@@ -1870,11 +1889,12 @@ function BrowserPaneBase({
     url: t.url,
     title: t.title,
     browseId: t.browseId,
+    ...(t.owner ? { owner: t.owner } : {}),
   });
 
   // Stable native labels derive from the durable conversation ID, so separate
   // workspaces cannot collide on t0/t1 or change identity after a restart.
-  const rebuildTabs = (descs: { id?: string | null; url: string; title?: string; browseId?: string | null }[]): Tab[] => {
+  const rebuildTabs = (descs: { id?: string | null; url: string; title?: string; browseId?: string | null; owner?: string }[]): Tab[] => {
     const built = restoreBrowserTabs(descs, newBrowseId, initialBrowserTitle);
     return built.length ? built : [freshHomeTab()];
   };
@@ -2319,7 +2339,7 @@ function BrowserPaneBase({
       browseId = existing.browseId;
     } else {
       // A plan Search opens a fresh tab whose own chat takes its turn.
-      browseId = openTabRef.current(openRequest.url, { via: openRequest.chat ? "plan-search" : "user" });
+      browseId = openTabRef.current(openRequest.url, { via: openRequest.chat ? "plan-search" : "user", owner: openRequest.owner });
       if (browseId && openRequest.focusBrowseId && !openRequest.quiet) dispatchChat(reopen(canonicalTabId(browseId)));
     }
     if (browseId && (openRequest.chat || (openRequest.focusBrowseId && !openRequest.quiet))) {
@@ -2523,7 +2543,7 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
-      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} failed={pageErrors} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} owner={ownerKey} activeId={activeId} acting={actingTabs} loading={loadingTabs} suspended={suspendedTabs} failed={pageErrors} closed={closedPages} onReopen={reopenClosed} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome devServerPorts={devServerPorts} tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}

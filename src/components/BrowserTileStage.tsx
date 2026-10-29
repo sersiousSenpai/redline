@@ -7,7 +7,7 @@ import { crossedDragThreshold } from "../lib/browserTabDrag";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { clampDivider, tileRects, type BrowserLayout } from "../lib/browserLayout";
 
-export interface TilePage { id: string; browseId: string; title: string; url: string; favicon?: string }
+export interface TilePage { id: string; browseId: string; title: string; url: string; favicon?: string; owner?: string }
 interface Props {
   renderHome?: (page: TilePage) => ReactNode;
   stageRef: RefObject<HTMLDivElement | null>;

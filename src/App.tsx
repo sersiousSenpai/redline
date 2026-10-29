@@ -601,6 +601,7 @@ persistWorkbench(wb, localStorage);
 void loadWorkbenchStage().catch(() => {});
 void loadPlanPane().catch(() => {});
 let doorCounter = 0;
+const selectActiveKey = (s: WorkbenchState) => s.activeKey;
 const newDoorPaneId = () => `door-${Date.now().toString(36)}-${(doorCounter++).toString(36)}`;
 
 interface ComposingState {
@@ -727,6 +728,14 @@ function App() {
   const activeId: string | null = joinedId ?? view.activeId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  // The browser's owner filter (W5, lib/browserOwner): the session on screen
+  // — its plan's, else the launch whose set is in front — tags the pages it
+  // opens, and its browser pane lists them first. Home is no owner. One
+  // workspace serves every session; this never swaps it.
+  const wbActiveKey = useWorkbench(wb, selectActiveKey);
+  const browserOwner: string | null = view.activeId ? planKey(view.activeId) : launchIdOf(wbActiveKey) ? wbActiveKey : null;
+  const browserOwnerRef = useRef(browserOwner);
+  browserOwnerRef.current = browserOwner;
   // The one writer, in both forms (`leaveJoined` passes an updater). D29: a
   // session is OPENED, never switched to — its Plan tab opens in the set on
   // screen, or comes forward if that set has it (`openInActive`); the strip
@@ -1544,7 +1553,6 @@ function App() {
     return true;
   }, []);
   doorSentenceKey = doorDraftKeyNow;
-  const wbActiveKey = useWorkbench(wb, (st) => st.activeKey);
   const wbActiveTabId = useWorkbench(wb, (st) => st.sets[st.activeKey]?.activeTabId ?? null);
   const untouchedDoors = useRef(new Set<string>());
   // ⌘T's door, for the mount-once key listener below.
@@ -6967,6 +6975,7 @@ function App() {
     chat?: { text: string };
     focusBrowseId?: string;
     quiet?: boolean;
+    owner?: string | null;
   } | null>(null);
   // Search from the plan, mid-flight: the anchored passage waiting for the
   // browser to report which thread it opened, so the research comment can
@@ -6986,7 +6995,8 @@ function App() {
     }).catch((err) => setToast(`Couldn't link the search to the plan: ${err}`, 6000));
   };
   const openUrlInBrowser = (url: string) => {
-    setBrowserOpenRequest({ url, nonce: Date.now() });
+    // The page is the session's that asked (a door, a plan, a card).
+    setBrowserOpenRequest({ url, nonce: Date.now(), owner: browserOwnerRef.current });
     selectSurface("browser");
   };
 
@@ -10573,6 +10583,7 @@ function App() {
                   // mounts only when the browser surface is selected, so an event
                   // emitted at selection time would beat its own listener.
                   openRequest={browserOpenRequest}
+                  ownerKey={browserOwner}
                   // Re-sync the native webview whenever a surrounding pane toggles
                   // and reflows the slot without a drag (e.g. closing the comment
                   // pane, which otherwise leaves the webview stranded at its old

@@ -15,6 +15,7 @@ import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import type { TilePage } from "./BrowserTileStage";
 import type { TabGroup } from "../lib/tabGroups";
 import type { ClosedPage } from "../lib/browserNewTab";
+import { groupByOwner } from "../lib/browserOwner";
 
 /** The icon-only strip's width, and the default. */
 export const RAIL_ICON_WIDTH = 40;
@@ -29,7 +30,11 @@ function storedWidth(): number {
 }
 
 interface Props {
-  tabs: TilePage[]; activeId: string; onSelect: (id: string) => void; onCloseTab: (id: string) => void; onNewTab: () => void;
+  tabs: TilePage[]; activeId: string;
+  /** The session on screen (W5): its own pages lead under "This session",
+   *  every other session's follow under "Other sessions". Home lists all in
+   *  order. */
+  owner?: string | null; onSelect: (id: string) => void; onCloseTab: (id: string) => void; onNewTab: () => void;
   onTabDrag: (event: PointerEvent, id: string) => void; onResize: () => void;
   tileBadges?: Record<string, number>; hoveredTileTab?: string | null; onHoverTile?: (id: string | null) => void;
   /** Tabs the agent is acting on: a spinner until the turn ends (BC-41). */
@@ -82,8 +87,14 @@ export default function BrowserTabRail(props: Props) {
       {<button type="button" className="rb-tab-close" tabIndex={tab.id === props.activeId ? 0 : -1} aria-label={`Close ${tab.title || "tab"}`} onClick={event => { event.stopPropagation(); closeTab(tab.id); }}><X size={12}/></button>}
     </div>;
   };
+  const owned = props.organized && !collapsed ? null : groupByOwner(props.tabs, props.owner);
+  const byOwner = (label: string, kind: string, pages: TilePage[]) => pages.length ? <section key={kind} data-owner-group={kind}>
+    {collapsed ? kind === "others" && <span className="rb-rail-rule" aria-hidden/> : <div className="rb-group-title rb-owner-title" role="presentation">{label}<span>{pages.length}</span></div>}
+    {pages.map(tab => renderTab(tab, props.tabs.indexOf(tab)))}
+  </section> : null;
   const ordered = props.organized && !collapsed
     ? props.groups.map(group => <section key={group.id} data-tab-group={group.id}><button className="rb-group-title" aria-expanded={!group.collapsed} onClick={() => props.onToggleGroup(group.id)}><ChevronDown size={12}/>{group.name}<span>{group.browseIds.length}</span></button>{!group.collapsed && group.browseIds.map(id => props.tabs.findIndex(tab => tab.browseId === id)).filter(i => i >= 0).map(i => renderTab(props.tabs[i], i))}</section>)
+    : owned ? [byOwner("This session", "here", owned.here), byOwner("Other sessions", "others", owned.others)]
     : props.tabs.map(renderTab);
   const closed = props.closed ?? [];
   return <aside ref={rail} className="rb-tab-rail" data-collapsed={collapsed || undefined} aria-label="Browser tabs" style={{ "--browser-rail-width": `${width}px` } as CSSProperties}>

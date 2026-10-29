@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { isOwnerKey } from "./browserOwner";
 /** Durable assignments use conversation IDs, never a tab's strip position. */
 export type BrowserPreset = "browse" | "discuss" | "compare" | "research" | "grid";
 /** A mosaic's uniform grid. Each side is 1..MAX_GRID_SIDE. */
@@ -31,7 +32,7 @@ export const DEFAULT_BROWSER_LAYOUT: BrowserLayout = {
   preset: "browse", tiles: [], horizontal: 0.5, vertical: 0.5, maximized: null, focused: null,
 };
 export function canonicalTabId(browseId: string): string { return `t-${browseId}`; }
-export interface BrowserTabDescriptor { id?: string | null; browseId?: string | null; url: string; title?: string; favicon?: string }
+export interface BrowserTabDescriptor { id?: string | null; browseId?: string | null; url: string; title?: string; favicon?: string; /** The session the page was opened in (W5, `lib/browserOwner`). */ owner?: string }
 export function restoreBrowserTabs(descriptors: BrowserTabDescriptor[], createId: () => string, titleOf: (url: string) => string) {
   const seen = new Set<string>();
   return descriptors.flatMap((descriptor) => {
@@ -40,7 +41,7 @@ export function restoreBrowserTabs(descriptors: BrowserTabDescriptor[], createId
     if (seen.has(browseId)) return [];
     seen.add(browseId);
     const id = canonicalTabId(browseId);
-    return [{ id, label: `browser-${id}`, browseId, url: descriptor.url, ...(typeof descriptor.favicon === "string" && /^https?:/.test(descriptor.favicon) ? { favicon: descriptor.favicon } : {}), title: typeof descriptor.title === "string" && descriptor.title ? descriptor.title : titleOf(descriptor.url) }];
+    return [{ id, label: `browser-${id}`, browseId, url: descriptor.url, ...(typeof descriptor.favicon === "string" && /^https?:/.test(descriptor.favicon) ? { favicon: descriptor.favicon } : {}), ...(isOwnerKey(descriptor.owner) ? { owner: descriptor.owner } : {}), title: typeof descriptor.title === "string" && descriptor.title ? descriptor.title : titleOf(descriptor.url) }];
   });
 }
 export function focusedWorkspaceTab<T extends { browseId: string }>(tabs: T[], layout: BrowserLayout): T | undefined {
