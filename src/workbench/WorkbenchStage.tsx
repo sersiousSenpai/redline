@@ -471,24 +471,11 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
     const hiddenByZoom = !!tab.zoomed && !zoomedHere;
     const shown = active && !hiddenByZoom;
     return (
-      <div
-        className="rl-wb-pane"
-        data-pane-kind={pane.kind}
-        data-pane-id={pane.id}
-        data-focused={focused ? "" : undefined}
-        data-zoomed={zoomedHere ? "" : undefined}
-        // Focusable by script only (the stage hands it the caret when its
-        // tab is shown), never a Tab stop.
-        tabIndex={-1}
-        // Focus follows the pointer into a pane (capture, so a click a child
-        // swallows still counts); a focused document beside a surface keeps
-        // the surface on screen (`view.ts`: the surface never follows focus).
-        onPointerDownCapture={focused ? undefined : () => onFocusPane(pane.id)}
-      >
+      <PaneBox paneId={pane.id} kind={pane.kind} focused={focused} zoomed={zoomedHere} onFocusPane={onFocusPane}>
         <ErrorBoundary region={pane.kind} fallback={(err, reset) => <PaneFallback region={pane.kind} error={err} reset={reset} />}>
           {renderPane(pane, { visible: visible && !hiddenByZoom, focused, active: shown })}
         </ErrorBoundary>
-      </div>
+      </PaneBox>
     );
   }
   const children = node.children.map((child, i) => (
@@ -504,6 +491,47 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
     >
       {children}
     </SplitView>
+  );
+}
+
+/** A pane's box. Focus follows the pointer into it: a press anywhere inside
+ *  makes it the tab's focused pane, heard in the DOM's capture phase on the
+ *  box itself. Not React's `onPointerDownCapture`: a singleton's body (the
+ *  plan, the browser, the companion chat) is a portal mounted elsewhere in
+ *  React's tree and only moved into this box in the DOM, so React never
+ *  routed its presses here — a click in the plan's text left the focus on
+ *  the other pane (W5 walk). A focused document beside a surface keeps the
+ *  surface on screen (`view.ts`: the surface never follows focus). */
+function PaneBox({ paneId, kind, focused, zoomed, onFocusPane, children }: {
+  paneId: string;
+  kind: string;
+  focused: boolean;
+  zoomed: boolean;
+  onFocusPane: (paneId: string) => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || focused) return;
+    const press = () => onFocusPane(paneId);
+    el.addEventListener("pointerdown", press, true);
+    return () => el.removeEventListener("pointerdown", press, true);
+  }, [paneId, focused, onFocusPane]);
+  return (
+    <div
+      ref={ref}
+      className="rl-wb-pane"
+      data-pane-kind={kind}
+      data-pane-id={paneId}
+      data-focused={focused ? "" : undefined}
+      data-zoomed={zoomed ? "" : undefined}
+      // Focusable by script only (the stage hands it the caret when its tab
+      // is shown), never a Tab stop.
+      tabIndex={-1}
+    >
+      {children}
+    </div>
   );
 }
 

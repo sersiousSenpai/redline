@@ -424,6 +424,35 @@ describe("the pane menu beside streaming terminals (W5 fix)", () => {
   });
 });
 
+// W5 walk: a click in the plan's text did not focus the plan pane. The
+// plan's body is a singleton: a portal mounted outside the stage in React's
+// tree, its host moved into the pane's slot in the DOM, so React never
+// routed the press to the pane's capture handler.
+describe("a press in a singleton's body focuses its pane (W5 fix)", () => {
+  it("plan | door, the door focused: a press in the plan's portalled body makes the plan the focused pane", async () => {
+    const { createBoundedPortalHost, PersistentPortalSlot } = await import("../components/PersistentPortalSlot");
+    const { createPortal } = await import("react-dom");
+    const planHost = createBoundedPortalHost("plan");
+    await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "plan", data: { sessionId: "s1", version: null } }, newPaneId: "pl", before: true }));
+    await act(async () => store.dispatch({ type: "focusPane", paneId: "p1" }));
+    const render = (pane: AnyPane, ctx: { active: boolean }) =>
+      pane.kind === "plan" ? <PersistentPortalSlot host={planHost} name="plan" active={ctx.active} /> : <input data-pane-input={pane.id} aria-label={pane.id} />;
+    // The body, as App mounts it: beside the stage, portalled into the host.
+    // It keeps its presses to itself, as editors do.
+    const body = <p data-plan-text="" onPointerDown={(e) => e.stopPropagation()}>Plan text</p>;
+    await act(async () => root.render(<><WorkbenchStage store={store} renderPane={render} onNewTab={() => {}} />{createPortal(body, planHost)}</>));
+    const text = host.querySelector<HTMLElement>('.rl-wb-pane[data-pane-id="pl"] [data-plan-text]');
+    expect(text).not.toBeNull();
+    const focused = () => store.getState().sets.home!.tabs.t1.focusedPaneId;
+    expect(focused()).toBe("p1");
+    await act(async () => { text!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true })); });
+    expect(focused()).toBe("pl");
+    // And back: a press in the door focuses the door.
+    await act(async () => { host.querySelector<HTMLElement>("[data-pane-input=p1]")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true })); });
+    expect(focused()).toBe("p1");
+  });
+});
+
 describe("the stage's pane keys (W5)", () => {
   const rect = (left: number, top: number, width: number, height: number) => () => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
   const press = (code: string, over: KeyboardEventInit) => {
