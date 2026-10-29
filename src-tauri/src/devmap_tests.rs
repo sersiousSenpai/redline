@@ -1052,3 +1052,78 @@ fn prune_keeps_the_most_recent_rows() {
     assert_eq!(rows[0].port, 3059, "newest survives");
     assert!(rows.iter().all(|r| r.port >= 3010));
 }
+
+fn sighting(port: u16, stack: &str) -> crate::db::DevServerSighting {
+    crate::db::DevServerSighting {
+        project_path: "/p".into(),
+        project_name: "p".into(),
+        port,
+        url: format!("http://localhost:{port}"),
+        stack: stack.into(),
+        run_command: "npm run dev".into(),
+        last_pid: Some(42),
+        last_args: Some("vite".into()),
+    }
+}
+
+/// A scan writes only what changed, in one transaction: a rescan of the same
+/// servers inside the refresh window writes nothing at all.
+#[test]
+fn a_rescan_writes_only_what_changed() {
+    use crate::db::DEV_SERVER_SEEN_REFRESH_MS as REFRESH;
+    let db = Database::open_in_memory().unwrap();
+    let seen = vec![sighting(3000, "vite"), sighting(3001, "next")];
+    assert_eq!(db.record_dev_servers(&seen, 1_000, 50).unwrap(), 2, "new rows");
+    assert_eq!(db.record_dev_servers(&seen, 2_000, 50).unwrap(), 0, "nothing moved");
+    let rows = db.list_dev_servers(10).unwrap();
+    assert!(rows.iter().all(|r| r.last_seen_at == 1_000), "an unchanged rescan keeps its stamp");
+    let mut moved = seen.clone();
+    moved[1].stack = "remix".into();
+    assert_eq!(db.record_dev_servers(&moved, 3_000, 50).unwrap(), 1, "one fact moved");
+    assert_eq!(
+        db.record_dev_servers(&moved, 1_000 + REFRESH, 50).unwrap(),
+        1,
+        "the stale stamp refreshes; the one just written does not"
+    );
+    let rows = db.list_dev_servers(10).unwrap();
+    let r3001 = rows.iter().find(|r| r.port == 3001).unwrap();
+    assert_eq!((r3001.stack.as_str(), r3001.last_seen_at), ("remix", 3_000));
+    assert_eq!(rows.iter().find(|r| r.port == 3000).unwrap().last_seen_at, 1_000 + REFRESH);
+}
+
+/// The prune that used to run on every scan runs when a row is added, and
+/// keeps the newest.
+#[test]
+fn recording_a_new_server_prunes_to_the_newest() {
+    let db = Database::open_in_memory().unwrap();
+    for i in 0..60u16 {
+        db.record_dev_servers(&[sighting(3000 + i, "vite")], 1_000 + i as i64, 50).unwrap();
+    }
+    let rows = db.list_dev_servers(100).unwrap();
+    assert_eq!(rows.len(), 50);
+    assert_eq!(rows[0].port, 3059, "newest survives");
+}
+
+/// A scan that changed nothing never takes the writer: it answers while
+/// another thread holds it.
+#[test]
+fn an_unchanged_scan_never_waits_for_the_writer() {
+    let dir = std::env::temp_dir().join(format!("redline-devmap-writer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = std::sync::Arc::new(Database::open(&dir.join("redline.db")).unwrap());
+    let seen = vec![sighting(3000, "vite")];
+    db.record_dev_servers(&seen, 1_000, 50).unwrap();
+    let held = db.lock_conn();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (db, seen) = (std::sync::Arc::clone(&db), seen.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(db.record_dev_servers(&seen, 2_000, 50).ok());
+        });
+    }
+    let written = rx.recv_timeout(std::time::Duration::from_secs(3));
+    drop(held);
+    assert_eq!(written.ok(), Some(Some(0)), "an unchanged scan waited on the held writer");
+    let _ = std::fs::remove_dir_all(&dir);
+}

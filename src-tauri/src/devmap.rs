@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::db::Database;
+use crate::db::{Database, DevServerSighting};
 use crate::state::SessionStore;
 
 #[path = "devlaunch.rs"]
@@ -1090,6 +1090,9 @@ fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevSe
     let mut running: Vec<RunningServer> = Vec::new();
     let mut others: Vec<OtherListener> = Vec::new();
     let now = crate::ledger::now_millis();
+    // Written together after the sweep, and only what changed
+    // (`Database::record_dev_servers`).
+    let mut sightings: Vec<DevServerSighting> = Vec::new();
 
     for pid in &pids {
         let Some((comm, ports)) = by_pid.get(pid) else {
@@ -1149,17 +1152,16 @@ fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevSe
         let url = format!("http://localhost:{port}");
 
         if port < EPHEMERAL_PORT_FLOOR {
-            let _ = db.upsert_dev_server(
-                &project_path,
-                &project_name,
+            sightings.push(DevServerSighting {
+                project_path: project_path.clone(),
+                project_name: project_name.clone(),
                 port,
-                &url,
-                &stack,
-                &run_command,
-                Some(*pid),
-                Some(args.as_str()).filter(|a| !a.is_empty()),
-                now,
-            );
+                url: url.clone(),
+                stack: stack.clone(),
+                run_command: run_command.clone(),
+                last_pid: Some(*pid),
+                last_args: Some(args.clone()).filter(|a| !a.is_empty()),
+            });
         }
 
         running.push(RunningServer {
@@ -1179,7 +1181,7 @@ fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevSe
     running.sort_by(|a, b| a.port.cmp(&b.port));
     others.sort_by(|a, b| a.port.cmp(&b.port));
 
-    let _ = db.prune_dev_servers(KEEP_ROWS);
+    let _ = db.record_dev_servers(&sightings, now, KEEP_ROWS);
     let rows = db
         .list_dev_servers(MAX_RECENT * 2)
         .unwrap_or_default()

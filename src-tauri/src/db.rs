@@ -141,6 +141,24 @@ pub struct SeatBurnRow {
 /// One remembered dev server — a `(project_path, port)` pair we have seen
 /// listening at least once. Rows outlive the process, so the Localhost surface
 /// can offer "run it again" for a server that is no longer up.
+/// One dev server a scan saw (`Database::record_dev_servers`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevServerSighting {
+    pub project_path: String,
+    pub project_name: String,
+    pub port: u16,
+    pub url: String,
+    pub stack: String,
+    pub run_command: String,
+    pub last_pid: Option<u32>,
+    pub last_args: Option<String>,
+}
+
+/// How old an unchanged sighting's `last_seen_at` may get before a scan
+/// rewrites it. The Localhost poll scans every few seconds; a minute is far
+/// finer than anything that orders remembered servers needs.
+pub const DEV_SERVER_SEEN_REFRESH_MS: i64 = 60_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DevServerRow {
     pub id: i64,
@@ -6585,8 +6603,22 @@ impl Database {
         last_args: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<()> {
+        let seen = DevServerSighting {
+            project_path: project_path.to_string(),
+            project_name: project_name.to_string(),
+            port,
+            url: url.to_string(),
+            stack: stack.to_string(),
+            run_command: run_command.to_string(),
+            last_pid,
+            last_args: last_args.map(str::to_string),
+        };
         let conn = self.lock_conn();
-        conn.execute(
+        Self::upsert_dev_server_on(&conn, &seen, now)
+    }
+
+    fn upsert_dev_server_on(conn: &Connection, s: &DevServerSighting, now: i64) -> rusqlite::Result<()> {
+        conn.prepare_cached(
             "INSERT INTO dev_servers
                  (project_path, project_name, port, url, stack, run_command,
                   last_pid, last_args, first_seen_at, last_seen_at)
@@ -6599,19 +6631,84 @@ impl Database {
                  last_pid     = excluded.last_pid,
                  last_args    = excluded.last_args,
                  last_seen_at = excluded.last_seen_at",
-            params![
-                project_path,
-                project_name,
-                port as i64,
-                url,
-                stack,
-                run_command,
-                last_pid.map(|p| p as i64),
-                last_args,
-                now,
-            ],
-        )?;
+        )?
+        .execute(params![
+            s.project_path,
+            s.project_name,
+            s.port as i64,
+            s.url,
+            s.stack,
+            s.run_command,
+            s.last_pid.map(|p| p as i64),
+            s.last_args,
+            now,
+        ])?;
         Ok(())
+    }
+
+    /// Record one scan's dev servers. The Localhost poll scans every few
+    /// seconds and used to take the writer once per server plus once to
+    /// prune, every scan, even when nothing had changed — and queue behind
+    /// whatever held it (2026-10-29: 5.7k samples of a scan waiting there).
+    ///
+    /// Now the stored rows are compared on a reader first. A sighting is
+    /// written only when it is new, when one of its facts moved, or when its
+    /// `last_seen_at` is `DEV_SERVER_SEEN_REFRESH_MS` old; all of them in ONE
+    /// transaction, with the prune only when a row was added (nothing else
+    /// grows the table). A scan that changed nothing never takes the writer.
+    /// Returns the rows written.
+    pub fn record_dev_servers(&self, seen: &[DevServerSighting], now: i64, keep: i64) -> rusqlite::Result<usize> {
+        if seen.is_empty() {
+            return Ok(0);
+        }
+        type Stored = (String, String, String, String, Option<i64>, Option<String>, i64);
+        let stored: HashMap<(String, u16), Stored> = {
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "SELECT project_path, port, project_name, url, stack, run_command,
+                        last_pid, last_args, last_seen_at
+                 FROM dev_servers",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u16),
+                    (r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?),
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut added = false;
+        let changed: Vec<&DevServerSighting> = seen
+            .iter()
+            .filter(|s| match stored.get(&(s.project_path.clone(), s.port)) {
+                None => {
+                    added = true;
+                    true
+                }
+                Some((name, url, stack, run, pid, args, last_seen)) => {
+                    *name != s.project_name
+                        || *url != s.url
+                        || *stack != s.stack
+                        || *run != s.run_command
+                        || *pid != s.last_pid.map(|p| p as i64)
+                        || *args != s.last_args
+                        || now - *last_seen >= DEV_SERVER_SEEN_REFRESH_MS
+                }
+            })
+            .collect();
+        if changed.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
+        for s in &changed {
+            Self::upsert_dev_server_on(&tx, s, now)?;
+        }
+        if added {
+            tx.execute(Self::PRUNE_DEV_SERVERS, params![keep])?;
+        }
+        tx.commit()?;
+        Ok(changed.len())
     }
 
     /// Remembered dev servers, most-recently-seen first. Rows are returned
@@ -6645,15 +6742,16 @@ impl Database {
     /// Drop all but the `keep` most-recently-seen rows. Deliberately a COUNT
     /// prune and not an existence prune: an unmounted volume or a repo that is
     /// briefly moved must not destroy its history.
+    /// Scans prune inside `record_dev_servers`.
+    #[cfg(test)]
     pub fn prune_dev_servers(&self, keep: i64) -> rusqlite::Result<usize> {
         let conn = self.lock_conn();
-        conn.execute(
-            "DELETE FROM dev_servers WHERE id NOT IN (
-                 SELECT id FROM dev_servers ORDER BY last_seen_at DESC LIMIT ?1
-             )",
-            params![keep],
-        )
+        conn.execute(Self::PRUNE_DEV_SERVERS, params![keep])
     }
+
+    const PRUNE_DEV_SERVERS: &'static str = "DELETE FROM dev_servers WHERE id NOT IN (
+                 SELECT id FROM dev_servers ORDER BY last_seen_at DESC LIMIT ?1
+             )";
 
     /// `first_seen_at` is deliberately not part of `DevServerRow` (nothing in
     /// the UI shows it) — but the invariant that an upsert never rewrites it is
