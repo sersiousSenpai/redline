@@ -96,7 +96,9 @@
     post({ kind: "shortcut", value: event.shiftKey ? "split-down" : "split" });
   });
   let lastInput = 0;
-  for (const name of ["pointerdown", "keydown", "wheel", "touchstart"]) document.addEventListener(name, (event) => {
+  // A pointerup too: a drag that began in Redline's own document and was
+  // let go over this page never hears its release otherwise (LAST2).
+  for (const name of ["pointerdown", "pointerup", "keydown", "wheel", "touchstart"]) document.addEventListener(name, (event) => {
     if (!event.isTrusted) return;
     if ((name === "wheel" || name === "touchstart") && performance.now() - lastInput < 100) return;
     lastInput = performance.now();

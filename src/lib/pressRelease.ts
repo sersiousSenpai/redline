@@ -14,18 +14,38 @@
 //     anything under the pointer that keeps them;
 //   * a mouse move with the button already up: the release it missed;
 //   * `RELEASE_EVENT`, raised on the window when the release happened
-//     somewhere this document cannot hear (a browser page's own mouse-up).
+//     somewhere this document cannot hear (a browser page's own mouse-up);
+//   * the window server's button state (`pointer_pressed`), polled while
+//     the press is in flight: the button up is the release, wherever it went.
 //
 // The caller's `onRelease` runs at most once per watch; `stop()` ends the
 // watch without it.
+
+import { invoke } from "@tauri-apps/api/core";
 
 export const RELEASE_EVENT = "redline:press-release";
 
 /** Where a release landed, when it is known. */
 export type ReleasePoint = { x: number; y: number } | null;
 
+/** How often a press in flight asks the window server whether the button is
+ *  still held (`pointer_pressed`). */
+const PRESSED_POLL_MS = 100;
+
 export function watchRelease(onRelease: (at: ReleasePoint) => void): () => void {
   let done = false;
+  // The last word: the window server's own button state. A release AppKit
+  // gave to anything this document never hears still ends the press within
+  // a poll. Only in the app (no Tauri, no poll), and an unanswered ask is
+  // read as "still held".
+  let poll: ReturnType<typeof setInterval> | undefined;
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    poll = setInterval(() => {
+      void invoke<boolean>("pointer_pressed")
+        .then((held) => { if (!held) finish(null); })
+        .catch(() => {});
+    }, PRESSED_POLL_MS);
+  }
   const finish = (at: ReleasePoint) => {
     if (done) return;
     stop();
@@ -42,6 +62,7 @@ export function watchRelease(onRelease: (at: ReleasePoint) => void): () => void 
   const onElsewhere = () => finish(null);
   function stop() {
     done = true;
+    if (poll !== undefined) clearInterval(poll);
     window.removeEventListener("pointerup", onUp, true);
     window.removeEventListener("mouseup", onUp, true);
     window.removeEventListener("pointermove", onMove, true);

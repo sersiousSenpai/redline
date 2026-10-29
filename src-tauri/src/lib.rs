@@ -11568,6 +11568,7 @@ pub fn run() {
             hook_conflicts::watch_hook_conflicts,
             hook_conflicts::unwatch_hook_conflicts,
             browser_events::browser_inspect,
+            browser_events::pointer_pressed,
             browser_events::browser_set_appearance,
             browser_overlay::browser_overlay_regions,
             browser_workspace::browser_protect_tabs,

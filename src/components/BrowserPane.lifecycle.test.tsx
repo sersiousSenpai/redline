@@ -36,7 +36,7 @@ vi.mock("./BrowserChat", async () => ({ BrowserChat: (await import("react")).mem
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 import { __resetResizeSession, beginResizeSession, endResizeSession } from "../lib/resizeSession";
-import { PANE_PRESS_EVENT } from "../lib/pressRelease";
+import { PANE_PRESS_EVENT, RELEASE_EVENT } from "../lib/pressRelease";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, dock: HTMLDivElement, root: Root;
@@ -580,6 +580,17 @@ it("a press inside the visible page is raised as a pane press from the page's sl
     expect(pressed).toHaveBeenCalledOnce();
     expect(host.contains(pressed.mock.calls[0][0].target as Node)).toBe(true);
   } finally { document.removeEventListener(PANE_PRESS_EVENT, pressed); }
+});
+
+// LAST2 walk: a drag let go over a page waited for an extra click.
+it("a release the page heard is raised as the end of whatever press is in flight, and selects nothing", async () => {
+  const released = vi.fn();
+  window.addEventListener(RELEASE_EVENT, released);
+  try {
+    await mount();
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "pointerup" });
+    expect(released).toHaveBeenCalledOnce();
+  } finally { window.removeEventListener(RELEASE_EVENT, released); }
 });
 
 it("finishes hiding a pending native show after the pane unmounts", async () => {

@@ -84,7 +84,7 @@ import { MissionChat } from "./MissionChat";
 import { MissionStartDialog } from "./MissionStartDialog";
 import { useMission } from "../hooks/useMission";
 import { usePageActions } from "../hooks/usePageActions";
-import { PANE_PRESS_EVENT } from "../lib/pressRelease";
+import { PANE_PRESS_EVENT, RELEASE_EVENT } from "../lib/pressRelease";
 
 // A native child webview is an OS-level layer painted on top of the React DOM —
 // it does not flow inline. So this component renders an invisible placeholder
@@ -1643,6 +1643,12 @@ function BrowserPaneBase({
           else if (tab.url !== url && videoFsRef.current.state.tabId === tab.id) videoFsRef.current.dispatch({ type: "exit" });
         }
         if (tab.url !== url) { scheduleCacheRef.current(tab.id); applySiteAppearanceRef.current({ ...tab, url }); }
+      } else if (event.kind === "interaction" && event.value === "pointerup") {
+        // A release the page heard: the end of a drag that began in
+        // Redline's document and was let go over this page (a tab dropped
+        // on the page's edge, a seam dragged over it), which the document
+        // never hears itself (lib/pressRelease).
+        window.dispatchEvent(new Event(RELEASE_EVENT));
       } else if (event.kind === "interaction" || event.kind === "focus") {
         // A press in the page never reaches Redline's own document: say so, for
         // the footer pill's floating card, which closes on a press outside it.

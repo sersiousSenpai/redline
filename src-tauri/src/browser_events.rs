@@ -98,7 +98,9 @@ fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
     // dictation key (a field in a frame has the keyboard as much as the page
     // does). All other browser actions and page-state updates remain
     // restricted to the main frame.
-    let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart");
+    // A release too: a drag that began in Redline's document and was let go
+    // over the page ends there (LAST2), whatever frame it was let go in.
+    let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart" || value["value"] == "pointerup");
     (main_frame || press || value["kind"] == "voice" || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
 }
 /// The dictation key a page says went down (`down:` or `field:`), if that is
@@ -161,7 +163,9 @@ mod native {
                 if voice_press(&value).is_some_and(|code| !key_down(code) || !message.webView().is_some_and(|view| has_keyboard(&view))) { return; }
                 // An embed's press puts the island's card away, but never
                 // interrupts the agent's page actions: that stays the page's.
-                if value["kind"] == "shortcut" || (value["kind"] == "interaction" && main_frame) { note_input(&self.ivars().label); }
+                // A release is not input to the page: it may be the end of a
+                // drag that began in Redline's own document.
+                if value["kind"] == "shortcut" || (value["kind"] == "interaction" && main_frame && value["value"] != "pointerup") { note_input(&self.ivars().label); }
                 value["label"] = Value::String(self.ivars().label.clone());
                 let _ = self.ivars().app.emit_to("main", "browser-page-event", value);
             }
@@ -185,6 +189,24 @@ mod native {
 }
 #[cfg(target_os = "macos")]
 pub use native::install;
+
+/// Whether the mouse's primary button is held right now, read from the
+/// window server. A drag that began in Redline's document asks while it
+/// waits for its release: a release AppKit handed to a native browser page,
+/// or to anything else this document never hears, still ends the drag
+/// instead of waiting for an extra click (LAST2). Elsewhere it says held,
+/// and the drag waits for the release events as before.
+#[tauri::command]
+pub fn pointer_pressed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSEvent::pressedMouseButtons() & 1 == 1
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
 
 #[tauri::command]
 pub fn browser_inspect(app: tauri::AppHandle, label: String) -> Result<(), String> {
@@ -259,6 +281,8 @@ mod tests {
         assert!(signal_for_frame(r#"{"kind":"shortcut","value":"open-front-door"}"#, false).is_some());
         assert!(signal_for_frame(r#"{"kind":"interaction","value":"pointerdown"}"#, false).is_some());
         assert!(signal_for_frame(r#"{"kind":"interaction","value":"touchstart"}"#, false).is_some());
+        // A release, so a drag let go over an embed ends there (LAST2).
+        assert!(signal_for_frame(r#"{"kind":"interaction","value":"pointerup"}"#, false).is_some());
         for raw in [
             r#"{"kind":"shortcut","value":"close-tab"}"#,
             r#"{"kind":"shortcut","value":"toggle-monochat"}"#,
