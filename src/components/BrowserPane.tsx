@@ -465,6 +465,40 @@ function BrowserPaneBase({
   const [tabShots, setTabShots] = useState<Map<string, string>>(
     () => new Map(),
   );
+  const tabShotsRef = useRef(tabShots);
+  tabShotsRef.current = tabShots;
+  /** Take the on-screen tab `id`'s picture, the resize stand-in: true once
+   *  it is in `tabShots`. Never for a tab that is off screen or hidden
+   *  (WebKit snapshots a hidden view blank). */
+  const captureShot = useCallback(async (id: string): Promise<boolean> => {
+    if (!tileIdsRef.current.includes(id) || !visibleRef.current) return false;
+    const el = slotRef.current;
+    const width = Math.round((tileSlotsRef.current.get(id) ?? el)?.getBoundingClientRect().width ?? 0);
+    if (width < 64) return false;
+    try {
+      const shot = await invoke<{ path: string }>(
+        "browser_take_thumbnail",
+        { label: `browser-${id}`, key: `tab-${id}`, width },
+      );
+      const file = await invoke<BinaryFile>("read_file_base64", {
+        path: shot.path,
+      });
+      if (!file?.data) return false;
+      const url = `data:image/png;base64,${file.data}`;
+      // The tab closed while its picture was being taken.
+      if (!tabsRef.current.some((t) => t.id === id)) return false;
+      setTabShots((prev) => {
+        const next = new Map(prev);
+        next.set(id, url);
+        return next;
+      });
+      return true;
+    } catch {
+      return false; /* no picture for this tab */
+    }
+  }, []);
+  const captureShotRef = useRef(captureShot);
+  captureShotRef.current = captureShot;
   const scheduleCacheSnapshot = useCallback((id: string, delay = 800) => {
     const captureMissionId = activeMissionIdRef.current;
     const timers = snapTimersRef.current;
@@ -484,35 +518,9 @@ function BrowserPaneBase({
         void invoke("browser_cache_snapshot", { label, onScreen, missionId: captureMissionId }).catch(() => {});
         // Piggyback a picture on the same settle. Only the tab that is
         // actually on screen: WebKit snapshots a hidden view blank, and a
-        // blank stand-in is worse than none. Deliberately here rather than at
-        // drag start — a capture then would be exactly the hitch we're
-        // removing, so a drag uses whatever picture already exists.
-        if (!tileIdsRef.current.includes(id) || !visibleRef.current) return;
-        const el = slotRef.current;
-        const width = Math.round((tileSlotsRef.current.get(id) ?? el)?.getBoundingClientRect().width ?? 0);
-        if (width < 64) return;
-        void (async () => {
-          try {
-            const shot = await invoke<{ path: string }>(
-              "browser_take_thumbnail",
-              { label, key: `tab-${id}`, width },
-            );
-            const file = await invoke<BinaryFile>("read_file_base64", {
-              path: shot.path,
-            });
-            if (!file.data) return;
-            const url = `data:image/png;base64,${file.data}`;
-            setTabShots((prev) => {
-              // The tab closed while its picture was being taken.
-              if (!tabsRef.current.some((t) => t.id === id)) return prev;
-              const next = new Map(prev);
-              next.set(id, url);
-              return next;
-            });
-          } catch {
-            /* no picture for this tab — the drag falls back to blank */
-          }
-        })();
+        // blank stand-in is worse than none. A drag that finds no picture
+        // takes one before the page steps aside (the resize session below).
+        void captureShotRef.current(id);
       }, delay),
     );
   }, []);
@@ -956,13 +964,40 @@ function BrowserPaneBase({
     dockMissionId,
     dockMissionTitle,
   ]);
-  // True for the length of any drag anywhere in the app. The native webview
-  // cannot ride a drag — it is a sibling OS view that always paints above the
-  // main webview and steals the pointer at the OS level, so DOM pointer capture
-  // can't save it and it must hide. What it must NOT do is leave a blank
-  // rectangle: for the duration, the tab's last picture stands in.
+  // True for the length of any drag anywhere in the app, once the pages on
+  // screen have a picture. The native webview is a sibling OS view that
+  // always paints above the main webview, so it steps aside for a drag —
+  // but never into a blank rectangle: the tab's last picture stands in.
+  // A page with no picture yet (one restored at boot, or reloaded, has
+  // never navigated) has it taken first, and stays live until it lands; a
+  // capture that fails leaves it live for the whole drag, following the
+  // slot frame by frame (its ResizeObserver), rather than blank.
   const [resizing, setResizing] = useState(false);
-  useEffect(() => onResizeSession(setResizing), []);
+  useEffect(() => {
+    let session = 0;
+    const off = onResizeSession((active) => {
+      session += 1;
+      if (!active) {
+        setResizing(false);
+        return;
+      }
+      const mine = session;
+      const missing = visibleRef.current
+        ? tileIdsRef.current.filter((id) => wvMapRef.current.has(id) && !tabShotsRef.current.has(id))
+        : [];
+      if (!missing.length) {
+        setResizing(true);
+        return;
+      }
+      void Promise.all(missing.map((id) => captureShotRef.current(id))).then((taken) => {
+        if (mine === session && taken.every(Boolean)) setResizing(true);
+      });
+    });
+    return () => {
+      session += 1;
+      off();
+    };
+  }, []);
 
   // The native webview is hidden whenever the pane is logically hidden, the
   // chat divider is being dragged, or an HTML overlay we own is up (the mission

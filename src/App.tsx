@@ -994,8 +994,8 @@ function App() {
   // (`workbench/view.ts`): a surface pane's kind, or "document" for the
   // plate's faces, a wall and an agent chat. It does NOT follow focus:
   // clicking the plan half of a plan + browser tile must not hide the
-  // webview. `splitDragging` hides the native webview while the tile's
-  // divider drags, so it doesn't swallow the pointer.
+  // webview. A divider drag in the stage is a resize session: the browser
+  // pane takes its picture, then steps aside for it (BrowserPane).
   const stageSurface: Surface = view.surface;
   // What the workbench does for `selectSurface(next)`, bound below once the
   // state it reads (the drafter's document, the review) exists.
@@ -1021,7 +1021,6 @@ function App() {
   const serversOpen = stageSurface === "servers";
   const memoryOpen = stageSurface === "memory";
   const chatOpen = stageSurface === "chat";
-  const [splitDragging, setSplitDragging] = useState(false);
   // The one way any surface comes forward — the door's destinations, the
   // palette and every programmatic open funnel through here. Hands the
   // Discussion sidecar to the review on enter / back to the plan on leave.
@@ -7547,7 +7546,9 @@ function App() {
   // The native webview must be hidden whenever a pane divider is mid-drag —
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
-  // draggable over the browser, exactly as they are over the document.
+  // draggable over the browser, exactly as they are over the document. (The
+  // stage's own dividers and a tab dragged over the stage are resize
+  // sessions the browser pane handles itself: picture first, then hidden.)
   // A curtained side pane paints over the doc column in React DOM — which the
   // native webview would ignore (it always paints above). Hide the browser
   // while any curtain is up, exactly like under modals and drags.
@@ -7562,7 +7563,6 @@ function App() {
     !browserOverlayActive &&
     !sidebarDragging &&
     !isDragging &&
-    !splitDragging &&
     !liveFlags.curtain &&
     // A fullscreen rail covers the stage; the native webview paints above
     // React DOM and would show through it.
@@ -9755,7 +9755,6 @@ function App() {
               store={wb}
               renderPane={renderPane}
               describePane={describePane}
-              onSplitDragging={setSplitDragging}
               onNewTab={openDoorTab}
               onCloseTab={closeTabRequest}
               onSplit={splitFocusedWithDoor}

@@ -35,6 +35,7 @@ vi.mock("./BrowserChat", async () => ({ BrowserChat: (await import("react")).mem
 }) }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
+import { __resetResizeSession, beginResizeSession, endResizeSession } from "../lib/resizeSession";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, dock: HTMLDivElement, root: Root;
@@ -940,6 +941,71 @@ describe("one workspace, filtered by owner (W5)", () => {
     expect(mocks.invoke.mock.calls.filter(([c]) => c === "browser_close").length).toBe(closed);
     expect(mocks.invoke.mock.calls.filter(([c]) => c === "browser_create_tab").length).toBe(created);
     expect(mocks.load.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
+
+// W5 walk: the browser went blank under a divider drag. Its pictures were
+// only ever taken when a page navigated, so a page restored at boot (or
+// reloaded) had none, and the drag hid the webview into nothing.
+describe("a resize session: the picture first, then the page steps aside", () => {
+  const sessions: (() => void)[] = [];
+  const begin = async () => {
+    await act(async () => { beginResizeSession(); });
+    sessions.push(endResizeSession);
+  };
+  const end = async () => { await act(async () => { sessions.pop()?.(); }); await settle(); };
+  const shots = () => [...host.querySelectorAll<HTMLImageElement>("section img")].length;
+  // An earlier test's drag may have left the app-wide count up: start at
+  // rest (before the mount, which subscribes).
+  beforeEach(() => __resetResizeSession());
+  afterEach(async () => { while (sessions.length) await end(); });
+
+  it("takes the pictures the pages on screen lack, and only then hides them behind those pictures", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    await mount();
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "browser_take_thumbnail") { await gate; return { path: `/tmp/${args.key}.png` }; }
+      if (command === "read_file_base64") return { data: "iVBORw0KGgo=" };
+      return base(command, args);
+    });
+    const views = [...mocks.views.values()];
+    expect(views.every((view) => view.visible)).toBe(true);
+    await begin();
+    await settle();
+    // Still being pictured: the pages stay live meanwhile, never blank.
+    expect(mocks.invoke).toHaveBeenCalledWith("browser_take_thumbnail", expect.objectContaining({ label: "browser-t-one" }));
+    expect(mocks.invoke).toHaveBeenCalledWith("browser_take_thumbnail", expect.objectContaining({ label: "browser-t-two" }));
+    expect(views.every((view) => view.visible)).toBe(true);
+    await act(async () => { release(); });
+    await settle();
+    expect(views.every((view) => !view.visible)).toBe(true);
+    expect(shots()).toBe(2);
+    await end();
+    expect(views.every((view) => view.visible)).toBe(true);
+    // A picture in hand: the next drag hides at once, taking none.
+    mocks.invoke.mockClear();
+    await begin();
+    await settle();
+    expect(views.every((view) => !view.visible)).toBe(true);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("browser_take_thumbnail", expect.anything());
+  });
+
+  it("keeps a page whose picture cannot be taken live for the whole drag, following the slot", async () => {
+    await mount();
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "browser_take_thumbnail") throw new Error("snapshot failed");
+      return base(command, args);
+    });
+    const views = [...mocks.views.values()];
+    await begin();
+    await settle();
+    expect(views.every((view) => view.visible)).toBe(true);
+    expect(shots()).toBe(0);
+    await end();
+    expect(views.every((view) => view.visible)).toBe(true);
   });
 });
 
