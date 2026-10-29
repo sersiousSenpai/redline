@@ -755,8 +755,19 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
   onSelect?: (sessionId: string, terminalId: string) => void;
 }) {
   const { id, title, status, kept } = terminal;
+  // Its own menu on right-click, never WebKit's (LAST2), and never the plan
+  // row's around it.
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const actions: RowAction[] = [
+    { label: "Show terminal", icon: <Terminal size={14} aria-hidden />, onSelect: () => onSelect?.(sessionId, id) },
+  ];
   return (
-    <li className="rl-sb-term" data-status={status} data-kept={kept ? "" : undefined}>
+    <li className="rl-sb-term" data-status={status} data-kept={kept ? "" : undefined}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setMenuAt({ x: e.clientX, y: e.clientY });
+      }}>
       <button
         type="button"
         className="rl-sb-term-row"
@@ -780,6 +791,8 @@ function TerminalRowBase({ sessionId, terminal, onSelect }: {
         {status === "exited" && <span className="rl-sb-term-state">exited</span>}
         {kept && status === "idle" && <span className="rl-sb-term-state">kept</span>}
       </button>
+      <RowMenu open={menuAt !== null} onOpenChange={(open) => { if (!open) setMenuAt(null); }} at={menuAt} label={title}
+        trigger={false} triggerClassName="rl-sb-dots" actions={actions} />
     </li>
   );
 }
@@ -1076,7 +1089,7 @@ function SessionRowBase({
           </span>
         )}
         <div
-          className="flex items-center gap-2"
+          className="rl-sb-status-line"
           style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
         >
           {/* A plan landed here while the reviewer was mid-discussion
@@ -1103,6 +1116,7 @@ function SessionRowBase({
           {working && !combining && <Spinner size={10} className="rl-sb-spin" />}
           {!combining && <ResumePill sessionId={session.sessionId} className="rl-sb-resume" />}
           <span
+            className="rl-sb-statusword"
             style={{
               color: STATUS_COLORS[session.status],
               textTransform: "uppercase",
@@ -1124,6 +1138,7 @@ function SessionRowBase({
               stored provenance claims neither). */}
           {session.attachState === "detached" && (
             <span
+              className="rl-sb-pill"
               title={detachedPillTitle(session.backend)}
               style={{
                 color: "var(--color-warning, #b45309)",
@@ -1145,6 +1160,7 @@ function SessionRowBase({
               differently", not to label every row with the obvious. */}
           {session.backend === "codex" && (
             <span
+              className="rl-sb-pill"
               title={
                 session.model
                   ? `Planned by Codex · ${session.model}`
@@ -1166,6 +1182,7 @@ function SessionRowBase({
           )}
           {session.runState && BUILD_STATE_CHIPS[session.runState] && !combining && (
             <span
+              className="rl-sb-pill"
               title={BUILD_STATE_CHIPS[session.runState].title}
               style={{
                 color: BUILD_STATE_CHIPS[session.runState].color,

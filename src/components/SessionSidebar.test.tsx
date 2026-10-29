@@ -675,6 +675,16 @@ describe("a row's ⋯ (D37)", () => {
     expect(labels()).toEqual(["Open session", "Remove launch"]);
   });
 
+  // LAST2 walk: a terminal row's right-click showed WebKit's own menu.
+  it("a terminal row's right-click opens its own menu, never WebKit's nor the plan row's", async () => {
+    await renderAll();
+    const term = planRow("Plan a").querySelector<HTMLElement>(".rl-sb-term .rl-sb-term-row")!;
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 });
+    await act(async () => { term.dispatchEvent(event); });
+    expect(event.defaultPrevented).toBe(true);
+    expect(labels()).toEqual(["Show terminal"]);
+  });
+
   it("⇧F10 and the menu key open the focused row's menu; Escape hands focus to its ⋯", async () => {
     await renderAll();
     await focus(rowButton());
@@ -698,8 +708,10 @@ describe("a row's ⋯ (D37)", () => {
     const { join } = await import("node:path");
     const tsx = readFileSync("src/components/SessionSidebar.tsx", "utf8");
     const menus = tsx.split("<RowMenu").slice(1).map((tag) => tag.slice(0, tag.indexOf("/>")));
-    expect(menus).toHaveLength(2);
-    for (const tag of menus) expect(tag).toContain("trigger={hot}");
+    // The plan and light rows' (⋯ while hot) and a terminal row's (no ⋯:
+    // its menu is a right-click's, LAST2).
+    expect(menus).toHaveLength(3);
+    for (const tag of menus) expect(tag).toMatch(/trigger=\{(hot|false)\}/);
     // The plan row's version chip no longer steps aside for a ⋯.
     const planRowSource = tsx.slice(tsx.indexOf("function SessionRowBase("), tsx.indexOf("const SessionRow = memo("));
     expect(planRowSource).not.toContain("group-hover");
@@ -716,6 +728,20 @@ describe("a row's ⋯ (D37)", () => {
     const css = readFileSync("src/components/SessionSidebar.css", "utf8");
     const rule = css.slice(css.indexOf(".rl-sb-dots {"), css.indexOf("}", css.indexOf(".rl-sb-dots {")));
     expect(rule).not.toContain("opacity");
+  });
+});
+
+// LAST2 walk: "in review" wrapped and the port chip was clipped at the
+// sidebar's 200 px minimum.
+describe("a plan row's status line", () => {
+  it("is one line: the word and the pills give way with an ellipsis, the port chip never", async () => {
+    const { readFileSync } = await import("node:fs");
+    const sheet = readFileSync("src/components/SessionSidebar.css", "utf8");
+    expect(sheet).toMatch(/\.rl-sb-status-line \{[^}]*white-space: nowrap;/);
+    expect(sheet).toMatch(/\.rl-sb-status-line > \* \{ flex-shrink: 0; \}/);
+    expect(sheet).toMatch(/\.rl-sb-status-line > \.rl-sb-pill \{ flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;/);
+    const tsx = readFileSync("src/components/SessionSidebar.tsx", "utf8");
+    expect(tsx).toContain('className="rl-sb-status-line"');
   });
 });
 

@@ -299,5 +299,14 @@
 /* Inside the line's own height (10px type at the inherited 1.5 = 15px): a
    server starting or stopping must not grow the row. 14px border-box, its
    12px globe on a 12px line. Pinned in SessionSidebar.test.tsx. */
+/* A plan row's status line is ONE line (LAST2: "in review" wrapped and the
+   port chip was clipped at the sidebar's 200 px minimum). The status word
+   and the pills give way first, each with an ellipsis; the port chip, the
+   count and the glyphs keep their width, so the chip always fits. */
+.rl-sb-status-line { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.rl-sb-status-line > * { flex-shrink: 0; }
+.rl-sb-status-line > .rl-sb-statusword,
+.rl-sb-status-line > .rl-sb-pill { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-sb-status-line > .rl-sb-statusword { min-width: 24px; }
 .rl-sb-port { display: inline-flex; align-items: center; gap: 3px; box-sizing: border-box; height: 14px; padding: 0 6px; border: 1px solid var(--color-rule); border-radius: 9999px; font-family: var(--font-mono); font-size: 10px; line-height: 12px; letter-spacing: 0; text-transform: none; white-space: nowrap; color: var(--color-ink-muted); cursor: pointer; }
 .rl-sb-port:hover, .rl-sb-port:focus-visible { color: var(--color-ink); border-color: var(--color-ink-muted); }
