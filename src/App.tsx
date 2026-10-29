@@ -794,10 +794,11 @@ function App() {
     wb.dispatch({ type: "selectSession", key: planKey(sessionId), defaults: { agentTerminalId: sessionTerminalsRef.current.get(sessionId) ?? null } });
   }, []);
   const sessionTerminalsRef = useRef<ReadonlyMap<string, string>>(new Map());
-  // Count of open header dropdowns (theme, mode, alerts, download). Folded into
-  // `browserVisible` below so the native browser webview hides while a menu is
-  // up — otherwise the OS-composited webview paints over the DOM menu. Header
-  // dropdowns register via the MenuOverlayProvider / useMenuOverlay context.
+  // Count of open header dropdowns (theme, mode, alerts, download). Handed to
+  // the browser pane (`menuOver`) so the native webview steps aside while a
+  // menu is up — otherwise the OS-composited webview paints over the DOM
+  // menu — behind a fresh picture of its page. Dropdowns register via the
+  // MenuOverlayProvider / useMenuOverlay context.
   const [openMenuCount, setOpenMenuCount] = useState(0);
   const adjustMenuOverlay = useCallback(
     (delta: number) => setOpenMenuCount((c) => Math.max(0, c + delta)),
@@ -7566,8 +7567,7 @@ function App() {
     !liveFlags.curtain &&
     // A fullscreen rail covers the stage; the native webview paints above
     // React DOM and would show through it.
-    !paneFullscreen &&
-    openMenuCount === 0;
+    !paneFullscreen;
 
   // Close the terminal a launch is running in and the launch is over: the PTY
   // dies with the tile, so no plan is ever coming. Without this the Planning
@@ -10496,6 +10496,9 @@ function App() {
                   onPageContext={setBrowserIslandPage}
                   surfaceActive={browserOpen}
                   visible={browserVisible && !hookConflicts.dialogOpen}
+                  // A menu over the page: the pane pictures its pages first,
+                  // then steps aside behind the picture, never into a blank.
+                  menuOver={openMenuCount > 0}
                   projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
                   // "Open" on a Localhost card. A prop, not an event: this pane
                   // mounts only when the browser surface is selected, so an event

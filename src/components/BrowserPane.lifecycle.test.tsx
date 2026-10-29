@@ -962,6 +962,51 @@ describe("one workspace, filtered by owner (W5)", () => {
 // W5 walk: the browser went blank under a divider drag. Its pictures were
 // only ever taken when a page navigated, so a page restored at boot (or
 // reloaded) had none, and the drag hid the webview into nothing.
+// LAST2 walk: with a tab menu open the page went blank, or showed a
+// stale picture scaled from before the rail folded.
+describe("a menu over the page: a fresh picture first, then the page steps aside", () => {
+  const shots = () => [...host.querySelectorAll<HTMLImageElement>("section img")].length;
+  const thumbnails = (base: (command: string, args: Record<string, unknown>) => unknown, gate?: Promise<void>) =>
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "browser_take_thumbnail") { await gate; return { path: `/tmp/${args.key}.png` }; }
+      if (command === "read_file_base64") return { data: "iVBORw0KGgo=" };
+      return base(command, args);
+    });
+
+  it("pictures the pages, hides them only behind those pictures, and comes back when the menu closes", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    await mount();
+    thumbnails(mocks.invoke.getMockImplementation()!, gate);
+    const views = [...mocks.views.values()];
+    await mount({ menuOver: true });
+    expect(views.every((view) => view.visible)).toBe(true);
+    await act(async () => { release(); });
+    await settle();
+    expect(views.every((view) => !view.visible)).toBe(true);
+    expect(shots()).toBe(2);
+    await mount({ menuOver: false });
+    expect(views.every((view) => view.visible)).toBe(true);
+    // A picture taken at this width: the next menu hides at once.
+    mocks.invoke.mockClear();
+    await mount({ menuOver: true });
+    expect(views.every((view) => !view.visible)).toBe(true);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("browser_take_thumbnail", expect.anything());
+  });
+
+  it("a picture taken at another width (before the rail folded) is retaken, not shown scaled", async () => {
+    await mount();
+    thumbnails(mocks.invoke.getMockImplementation()!);
+    await mount({ menuOver: true });
+    await mount({ menuOver: false });
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1100, bottom: 700, width: 1100, height: 700, toJSON: () => ({}) });
+    mocks.invoke.mockClear();
+    await mount({ menuOver: true });
+    expect(mocks.invoke).toHaveBeenCalledWith("browser_take_thumbnail", expect.objectContaining({ width: 1100 }));
+    rect.mockRestore();
+  });
+});
+
 describe("a resize session: the picture first, then the page steps aside", () => {
   const sessions: (() => void)[] = [];
   const begin = async () => {

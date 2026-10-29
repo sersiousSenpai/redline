@@ -235,6 +235,9 @@ interface Bookmark {
   url: string;
 }
 
+/** How long a menu waits for the pages' pictures before they step aside. */
+const MENU_SHOT_WAIT_MS = 250;
+
 interface BrowserPaneProps {
   onPageContext?: (page: import("../lib/surfaceContext").BrowserIslandPage | null) => void;
   /** Close the browser (toggle it off). */
@@ -244,6 +247,9 @@ interface BrowserPaneProps {
   /** When false (e.g. a modal/overlay covers the pane), the native webview is
    *  hidden so it doesn't paint over the overlay. Defaults to true. */
   visible?: boolean;
+  /** A menu is open over the app (App's menu overlay count). The pages on
+   *  screen step aside for it behind a fresh picture of themselves. */
+  menuOver?: boolean;
   /** Surface selection, independent of temporary overlay occlusion. */
   surfaceActive?: boolean;
   /** Active file-explorer folder, if one is open — passed to the page-discussion
@@ -349,6 +355,7 @@ function BrowserPaneBase({
   onOpenDraft,
   onMissionContinue,
   visible = true,
+  menuOver = false,
   surfaceActive = true,
   projectDir = null,
   onSendToRedline,
@@ -468,6 +475,18 @@ function BrowserPaneBase({
   );
   const tabShotsRef = useRef(tabShots);
   tabShotsRef.current = tabShots;
+  // The width each picture was taken at. One taken at another width (before
+  // the rail folded, before a split) is stale: shown, it is scaled.
+  const shotWidthsRef = useRef(new Map<string, number>());
+  /** Tab `id` on screen has no picture of its page as it stands now. */
+  const needsShot = useCallback((id: string): boolean => {
+    if (!tabShotsRef.current.has(id)) return true;
+    const width = Math.round((tileSlotsRef.current.get(id) ?? slotRef.current)?.getBoundingClientRect().width ?? 0);
+    const taken = shotWidthsRef.current.get(id);
+    return taken === undefined || Math.abs(taken - width) > 2;
+  }, []);
+  const needsShotRef = useRef(needsShot);
+  needsShotRef.current = needsShot;
   /** Take the on-screen tab `id`'s picture, the resize stand-in: true once
    *  it is in `tabShots`. Never for a tab that is off screen or hidden
    *  (WebKit snapshots a hidden view blank). */
@@ -488,6 +507,7 @@ function BrowserPaneBase({
       const url = `data:image/png;base64,${file.data}`;
       // The tab closed while its picture was being taken.
       if (!tabsRef.current.some((t) => t.id === id)) return false;
+      shotWidthsRef.current.set(id, width);
       setTabShots((prev) => {
         const next = new Map(prev);
         next.set(id, url);
@@ -984,7 +1004,7 @@ function BrowserPaneBase({
       }
       const mine = session;
       const missing = visibleRef.current
-        ? tileIdsRef.current.filter((id) => wvMapRef.current.has(id) && !tabShotsRef.current.has(id))
+        ? tileIdsRef.current.filter((id) => wvMapRef.current.has(id) && needsShotRef.current(id))
         : [];
       if (!missing.length) {
         setResizing(true);
@@ -1004,8 +1024,34 @@ function BrowserPaneBase({
   // chat divider is being dragged, or an HTML overlay we own is up (the mission
   // start dialog / menu) — a native webview paints OVER React DOM, so it must
   // step aside for those, the same reason bookmarks use a native popup menu.
+  // A menu over the app (`menuOver`): the same, picture first. A menu must
+  // not wait on a capture for long, so a picture that has not landed within
+  // MENU_SHOT_WAIT_MS lets the page step aside anyway (LAST2: the page went
+  // blank, or showed a stale, scaled picture, while a tab menu was open).
+  const [menuAside, setMenuAside] = useState(false);
+  useEffect(() => {
+    if (!menuOver) {
+      setMenuAside(false);
+      return;
+    }
+    let live = true;
+    const aside = () => { if (live) setMenuAside(true); };
+    const missing = visibleRef.current
+      ? tileIdsRef.current.filter((id) => wvMapRef.current.has(id) && needsShotRef.current(id))
+      : [];
+    if (!missing.length) {
+      aside();
+      return () => { live = false; };
+    }
+    const timer = window.setTimeout(aside, MENU_SHOT_WAIT_MS);
+    void Promise.all(missing.map((id) => captureShotRef.current(id))).then(aside);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [menuOver]);
   const effectiveVisible =
-    visible && surfaceActive && !resizing && !bookmarksOpen && !preferencesOpen &&
+    visible && surfaceActive && !resizing && !menuAside && !bookmarksOpen && !preferencesOpen &&
     !tabDragging &&
     !tileDragging &&
     !layoutMenuOpen &&
