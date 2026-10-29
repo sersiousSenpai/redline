@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn shared_matcher_status_install_timeout_and_uninstall_preserve_siblings() {
         let path = tmppath();
-        let foreign = json!({"type":"command","command":"plannotator","timeout":345600});
+        let foreign = json!({"type":"command","command":"plan-reviewer","timeout":345600});
         let custom = json!({"type":"http","url":HOOK_URL,"timeout":600,"headers":{"custom":"keep"}});
         let original = json!({"hooks":{"PreToolUse":[{"matcher":"Edit|ExitPlanMode","metadata":"keep","hooks":[foreign.clone(),custom]}]}});
         std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();

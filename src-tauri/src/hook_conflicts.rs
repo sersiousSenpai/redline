@@ -17,7 +17,47 @@ use std::{
 };
 use tauri::Emitter;
 
-const PLUGIN: &str = "plannotator@plannotator";
+/// Another plan-review tool's installation, by what it writes into a settings
+/// file: a bare executable registered as a plan handler (`PreToolUse` or
+/// `PermissionRequest` on `ExitPlanMode` for Claude Code, `Stop` for Codex)
+/// and a Claude Code plugin registration under `enabledPlugins`. Each is
+/// matched by the SHA-256 of its name (the executable's file name without
+/// `.exe`; the plugin's `name@marketplace` key), so the detector recognizes
+/// that hook without the tool's name appearing in this tree. Tests swap in a
+/// neutral placeholder signature.
+struct Signature {
+    executable: &'static str,
+    plugin: &'static str,
+}
+const INSTALLED: Signature = Signature {
+    executable: "f96939c7020cbaede6e7c8d6ceb8283d59f19f1c9961fe507dcdec0949e68d06",
+    plugin: "fbf4b7d5b0072d45149f697144b33210432c067f7d7a7ab2c865fb28906b717d",
+};
+/// `plan-reviewer` and `plan-reviewer@plan-reviewer`.
+#[cfg(test)]
+const PLACEHOLDER: Signature = Signature {
+    executable: "2a519c7de2408146cb5b1f27b810842d1245ca81b6bdcb719274f219cb2cb61a",
+    plugin: "1ce5bc0a9571aa9703274518906732b1059219b599c30e5149d6c92731e351ae",
+};
+#[cfg(not(test))]
+fn signature() -> &'static Signature {
+    &INSTALLED
+}
+#[cfg(test)]
+fn signature() -> &'static Signature {
+    &PLACEHOLDER
+}
+/// A command word that runs the other plan-review tool's executable.
+fn reviewer_executable(word: &str) -> bool {
+    word.rsplit(['/', '\\']).next().is_some_and(|name| {
+        let name = name.strip_suffix(".exe").unwrap_or(name);
+        hook_config::fingerprint(name.as_bytes()) == signature().executable
+    })
+}
+/// An `enabledPlugins` key that registers the other plan-review tool.
+fn reviewer_plugin(key: &str) -> bool {
+    hook_config::fingerprint(key.as_bytes()) == signature().plugin
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -238,7 +278,7 @@ fn recognize(command: &str) -> Recognition {
 }
 fn recognize_inner(command: &str, depth: usize) -> Recognition {
     let (tokens, safe) = words(command);
-    let candidate = tokens.iter().any(|s| executable(s, "plannotator"));
+    let candidate = tokens.iter().any(|s| reviewer_executable(s));
     if depth > 3 {
         return if candidate {
             Recognition::Manual
@@ -288,7 +328,7 @@ fn recognize_inner(command: &str, depth: usize) -> Recognition {
             };
         }
         // Only the documented no-argument plan handler is automatically owned.
-        if executable(token, "plannotator") {
+        if reviewer_executable(token) {
             return if safe && tokens.len() == i + 1 && !token.contains(['$', '`']) {
                 Recognition::Direct
             } else {
@@ -357,6 +397,7 @@ fn validate(root: &Value) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_conflict(
     (source, snapshot): (&Source, &str),
     pointer: String,
@@ -365,12 +406,13 @@ fn make_conflict(
     action: &str,
     detail: &str,
     command: Option<String>,
+    plugin_id: Option<String>,
 ) -> HookConflict {
     let source_path = source.path.to_string_lossy().into_owned();
     let id = hook_config::fingerprint(
         format!(
             "{source_path}\n{pointer}\n{}",
-            command.as_deref().unwrap_or(PLUGIN)
+            command.as_deref().or(plugin_id.as_deref()).unwrap_or_default()
         )
         .as_bytes(),
     );
@@ -386,14 +428,14 @@ fn make_conflict(
         action: action.into(),
         detail: detail.into(),
         command,
-        plugin_id: (kind == "plugin").then(|| PLUGIN.into()),
+        plugin_id,
         pointer,
     }
 }
 
 fn scan_sources(sources: &[Source]) -> ConflictScan {
     let mut scan = ConflictScan::default();
-    let mut plugin: Option<(Source, String, bool)> = None;
+    let mut plugin: Option<(Source, String, bool, String)> = None;
     let mut claude_error = false;
     for source in sources {
         let inspected = (|| -> Result<Option<(Value, String)>, String> {
@@ -420,12 +462,13 @@ fn scan_sources(sources: &[Source]) -> ConflictScan {
         };
         if source.backend == "claude-code" {
             scan.permission_hooks.extend(permission_hooks(source, &root));
-            if let Some(enabled) = root
+            if let Some((key, enabled)) = root
                 .get("enabledPlugins")
-                .and_then(|p| p.get(PLUGIN))
-                .and_then(Value::as_bool)
+                .and_then(Value::as_object)
+                .and_then(|p| p.iter().find(|(key, _)| reviewer_plugin(key)))
+                .and_then(|(key, on)| Some((key.clone(), on.as_bool()?)))
             {
-                plugin = Some((source.clone(), snapshot.clone(), enabled));
+                plugin = Some((source.clone(), snapshot.clone(), enabled, key));
             }
         }
         let events: &[&str] = if source.backend == "codex" {
@@ -461,9 +504,9 @@ fn scan_sources(sources: &[Source]) -> ConflictScan {
                     let (kind, action, detail) = if !writable {
                         ("managed", "view", "This configuration is managed, read-only, or a symlink. Edit it at its source; automatic removal is unavailable.")
                     } else if recognized == Recognition::Manual {
-                        ("wrapper", "view", "This command may invoke Plannotator through an unrecognized wrapper or additional shell actions. Inspect it manually to preserve those actions.")
+                        ("wrapper", "view", "This command may invoke another plan-review tool through an unrecognized wrapper or additional shell actions. Inspect it manually to preserve those actions.")
                     } else {
-                        ("direct", "removeHooks", "Remove only the identified Plannotator plan handlers in this file. Keep other hooks, the Plannotator executable, and saved reviews.")
+                        ("direct", "removeHooks", "Remove only the identified plan-review handlers in this file. Keep other hooks, that tool's executable, and saved reviews.")
                     };
                     scan.conflicts.push(make_conflict(
                         (source, &snapshot),
@@ -473,19 +516,20 @@ fn scan_sources(sources: &[Source]) -> ConflictScan {
                         action,
                         detail,
                         Some(command.into()),
+                        None,
                     ));
                 }
             }
         }
     }
-    if let Some((source, snapshot, enabled)) = plugin {
+    if let Some((source, snapshot, enabled, key)) = plugin {
         if enabled {
             let writable = !source.managed
                 && !claude_error
                 && !std::fs::symlink_metadata(&source.path)
                     .is_ok_and(|m| m.file_type().is_symlink() || m.permissions().readonly());
-            scan.conflicts.push(make_conflict((&source, &snapshot), format!("/enabledPlugins/{PLUGIN}"), "PermissionRequest / ExitPlanMode", "plugin", if writable { "disablePlugin" } else { "view" },
-                if writable { "Disable the exact Plannotator plugin registration in this scope. This also disables its other bundled features; the executable and saved reviews remain." } else { "Plugin precedence cannot be safely edited in this scope. Inspect the configuration and any reported inspection errors." }, None));
+            scan.conflicts.push(make_conflict((&source, &snapshot), format!("/enabledPlugins/{key}"), "PermissionRequest / ExitPlanMode", "plugin", if writable { "disablePlugin" } else { "view" },
+                if writable { "Disable the exact plan-review plugin registration in this scope. This also disables its other bundled features; its executable and saved reviews remain." } else { "Plugin precedence cannot be safely edited in this scope. Inspect the configuration and any reported inspection errors." }, None, Some(key)));
         } else {
             scan.inactive_plugins
                 .push(source.path.to_string_lossy().into_owned());
@@ -628,8 +672,10 @@ fn remove_at(sources: &[Source], identities: &[ConflictIdentity]) -> RemovalRepo
             {
                 root.as_object_mut().unwrap().remove("hooks");
             }
-            if selected.iter().any(|c| c.action == "disablePlugin") {
-                root["enabledPlugins"][PLUGIN] = Value::Bool(false);
+            for c in selected.iter().filter(|c| c.action == "disablePlugin") {
+                if let Some(key) = &c.plugin_id {
+                    root["enabledPlugins"][key.as_str()] = Value::Bool(false);
+                }
             }
             hook_config::replace(&source.path, Some(&original), &root)
         })();
@@ -744,6 +790,20 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
+    /// The neutral placeholder `PLACEHOLDER` digests.
+    const PLUGIN: &str = "plan-reviewer@plan-reviewer";
+
+    #[test]
+    fn signatures_are_distinct_sha256_digests_and_the_placeholder_is_honest() {
+        for digest in [INSTALLED.executable, INSTALLED.plugin, PLACEHOLDER.executable, PLACEHOLDER.plugin] {
+            assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()), "{digest}");
+        }
+        assert_ne!(INSTALLED.executable, INSTALLED.plugin);
+        assert_ne!(INSTALLED.executable, PLACEHOLDER.executable);
+        assert!(reviewer_executable("plan-reviewer") && reviewer_executable("C:\\bin\\plan-reviewer.exe"));
+        assert!(reviewer_plugin(PLUGIN) && !reviewer_plugin("plan-reviewer"));
+    }
+
     struct Fixture {
         dir: PathBuf,
     }
@@ -779,33 +839,33 @@ mod tests {
     #[test]
     fn executable_paths_quotes_and_safe_prefixes_are_owned_conservatively() {
         for command in [
-            "plannotator",
-            "/Users/yusufalbazian/.local/bin/plannotator",
-            "'/a path/plannotator'",
-            "PLANNOTATOR_REMOTE=1 plannotator",
-            "env PLANNOTATOR_PORT=9999 /bin/plannotator",
-            "env -i command -- plannotator",
-            "exec plannotator",
-            "bash -lc 'env PLANNOTATOR_REMOTE=1 plannotator'",
+            "plan-reviewer",
+            "/Users/yusufalbazian/.local/bin/plan-reviewer",
+            "'/a path/plan-reviewer'",
+            "PLAN_REVIEWER_REMOTE=1 plan-reviewer",
+            "env PLAN_REVIEWER_PORT=9999 /bin/plan-reviewer",
+            "env -i command -- plan-reviewer",
+            "exec plan-reviewer",
+            "bash -lc 'env PLAN_REVIEWER_REMOTE=1 plan-reviewer'",
         ] {
             assert_eq!(recognize(command), Recognition::Direct, "{command}");
         }
         for command in [
-            "plannotator && notify",
-            "wrapper plannotator",
-            "plannotator --unknown",
-            "plannotator > /tmp/log",
-            "'$HOME/bin/plannotator'",
-            "sh -c 'plannotator; echo done'",
-            "plannotator | tee out",
+            "plan-reviewer && notify",
+            "wrapper plan-reviewer",
+            "plan-reviewer --unknown",
+            "plan-reviewer > /tmp/log",
+            "'$HOME/bin/plan-reviewer'",
+            "sh -c 'plan-reviewer; echo done'",
+            "plan-reviewer | tee out",
         ] {
             assert_ne!(recognize(command), Recognition::Direct, "{command}");
         }
         for command in [
-            "my-plannotator",
-            "/bin/plannotator-helper",
-            "echo https://plannotator.ai",
-            "printf plannotator-is-installed",
+            "my-plan-reviewer",
+            "/bin/plan-reviewer-helper",
+            "echo https://plan-reviewer.example",
+            "printf plan-reviewer-is-installed",
             "curl http://127.0.0.1:7676/v1/plan",
         ] {
             assert_eq!(recognize(command), Recognition::None, "{command}");
@@ -845,11 +905,11 @@ mod tests {
     }
 
     #[test]
-    fn installed_codex_two_handler_fixture_removes_only_plannotator_and_backs_up() {
+    fn installed_codex_two_handler_fixture_removes_only_the_other_reviewer_and_backs_up() {
         let fixture = Fixture::new();
         let redline =
             direct("/usr/bin/curl -sS --data-binary @- http://127.0.0.1:7676/v1/codex/stop");
-        let original = json!({"permissions":{"allow":["untouched"]},"hooks":{"Stop":[{"matcher":"*","custom":"keep","hooks":[direct("/Users/yusufalbazian/.local/bin/plannotator"),redline.clone()]}],"UserPromptSubmit":[{"hooks":[direct("capture")]}]}});
+        let original = json!({"permissions":{"allow":["untouched"]},"hooks":{"Stop":[{"matcher":"*","custom":"keep","hooks":[direct("/Users/yusufalbazian/.local/bin/plan-reviewer"),redline.clone()]}],"UserPromptSubmit":[{"hooks":[direct("capture")]}]}});
         let source = fixture.source("hooks.json", "codex", original.clone());
         let before = fs::read(&source.path).unwrap();
         let scan = scan_sources(&[source.clone()]);
@@ -880,9 +940,9 @@ mod tests {
     fn claude_inspects_every_handler_both_plan_events_and_regex_matchers() {
         let fixture = Fixture::new();
         let source = fixture.source("settings.json", "claude-code", json!({"hooks":{
-            "PreToolUse":[{"matcher":"Edit|ExitPlanMode","hooks":[direct("other"),direct("plannotator"),direct("plannotator")]}],
-            "PermissionRequest":[{"matcher":"^ExitPlanMode$","hooks":[direct("env PLANNOTATOR_REMOTE=1 plannotator")]}],
-            "PostToolUse":[{"matcher":"ExitPlanMode","hooks":[direct("plannotator")]}]
+            "PreToolUse":[{"matcher":"Edit|ExitPlanMode","hooks":[direct("other"),direct("plan-reviewer"),direct("plan-reviewer")]}],
+            "PermissionRequest":[{"matcher":"^ExitPlanMode$","hooks":[direct("env PLAN_REVIEWER_REMOTE=1 plan-reviewer")]}],
+            "PostToolUse":[{"matcher":"ExitPlanMode","hooks":[direct("plan-reviewer")]}]
         }}));
         let scan = scan_sources(&[source.clone()]);
         assert_eq!(scan.conflicts.len(), 3);
@@ -937,7 +997,7 @@ mod tests {
     fn removing_last_handler_preserves_matcher_metadata_and_untouched_containers() {
         let fixture = Fixture::new();
         let source = fixture.source("hooks.json", "codex", json!({"hooks":{"Stop":[
-            {"matcher":"*","label":"keep me","hooks":[direct("plannotator")]},
+            {"matcher":"*","label":"keep me","hooks":[direct("plan-reviewer")]},
             {"matcher":"*","hooks":[]}
         ]}}));
         let scan = scan_sources(&[source.clone()]);
@@ -983,7 +1043,7 @@ mod tests {
         let wrapper = fixture.source(
             "hooks.json",
             "codex",
-            json!({"hooks":{"Stop":[{"hooks":[direct("wrapper plannotator")]}]}}),
+            json!({"hooks":{"Stop":[{"hooks":[direct("wrapper plan-reviewer")]}]}}),
         );
         let inputs = [managed, wrapper];
         let scan = scan_sources(&inputs);
@@ -1003,7 +1063,7 @@ mod tests {
             "[]",
             "{\"hooks\": []}",
             "{\"hooks\":{\"Stop\":[{\"hooks\":{}}]}}",
-            "{\"enabledPlugins\":{\"plannotator@plannotator\":\"yes\"}}",
+            "{\"enabledPlugins\":{\"plan-reviewer@plan-reviewer\":\"yes\"}}",
         ] {
             let source = fixture.source("bad.json", "codex", json!({}));
             fs::write(&source.path, invalid).unwrap();
@@ -1021,7 +1081,7 @@ mod tests {
     #[test]
     fn stale_snapshot_refuses_external_edits_and_partial_failure_keeps_conflict() {
         let fixture = Fixture::new();
-        let config = json!({"hooks":{"Stop":[{"hooks":[direct("plannotator")]}]}});
+        let config = json!({"hooks":{"Stop":[{"hooks":[direct("plan-reviewer")]}]}});
         let a = fixture.source("a.json", "codex", config.clone());
         let b = fixture.source("b.json", "codex", config.clone());
         let sources = [a.clone(), b.clone()];
@@ -1048,7 +1108,7 @@ mod tests {
         let source = fixture.source(
             "outside.json",
             "codex",
-            json!({"hooks":{"Stop":[{"hooks":[direct("plannotator")]}]}}),
+            json!({"hooks":{"Stop":[{"hooks":[direct("plan-reviewer")]}]}}),
         );
         let scan = scan_sources(&[source]);
         assert!(remove_at(&[], &identities(&scan)).results[0]
@@ -1072,7 +1132,7 @@ mod tests {
         let source = fixture.source(
             "mode.json",
             "codex",
-            json!({"hooks":{"Stop":[{"hooks":[direct("plannotator")]}]}}),
+            json!({"hooks":{"Stop":[{"hooks":[direct("plan-reviewer")]}]}}),
         );
         fs::set_permissions(&source.path, fs::Permissions::from_mode(0o640)).unwrap();
         let scan = scan_sources(&[source.clone()]);

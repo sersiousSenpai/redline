@@ -266,7 +266,7 @@ mod tests {
     use super::*;
     #[test]
     fn updating_a_shared_matcher_preserves_other_handlers_and_removes_only_our_duplicates() {
-        let foreign = json!({"type":"command","command":"plannotator","timeout":345600});
+        let foreign = json!({"type":"command","command":"plan-reviewer","timeout":345600});
         let mut entries = vec![
             json!({"matcher":"*","hooks":[foreign.clone(),{"type":"command","command":format!("curl --max-time 600 {STOP_URL}")}]}),
             json!({"hooks":[{"type":"command","command":format!("/usr/bin/curl {STOP_URL}")}, {"type":"command","command":"another hook"}]}),
