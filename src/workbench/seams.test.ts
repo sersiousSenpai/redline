@@ -3,13 +3,14 @@
 //
 // D38: sidebar | stage | rail meet on 1px rules — no gutter, no inset card,
 // no rounded column, no floating chevron — and each column has a hard stop:
-// one that cannot keep it folds instead of squishing. D40 raises the stage's
-// stop to a door's, whose composer keeps one chip row.
+// one that cannot keep it folds instead of squishing. D40 gives each pane
+// kind its own stop, which sets the stage's.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { DIVIDER_W, DOOR_MIN_W, SEAM_W, SHELL_EDGE, SHELL_GUTTER, STAGE_MIN_W, docMinFor } from "../lib/paneLayout";
+import { DIVIDER_W, DOOR_MIN_W, SEAM_W, SHELL_EDGE, SHELL_GUTTER, STAGE_MIN_W, computePaneLayout, docMinFor } from "../lib/paneLayout";
+import { PANE_MIN_W } from "./model";
 import { RAIL_FOLD_BELOW, SIDEBAR_FOLD_BELOW, railFoldsAt, responsivePose, sidebarFoldsAt, NO_NARROW_OPEN } from "./poses";
 import { RAIL_MIN_W, SIDEBAR_MIN_W, clampSidebarWidth } from "./rail";
 
@@ -78,11 +79,12 @@ describe("no collapse pills (D38)", () => {
 });
 
 describe("hard stops (D38, D40)", () => {
-  it("pins the three minimums, the stage's raised to a door's", () => {
+  it("pins the three minimums; the stage's follows the pane on it", () => {
     expect(SIDEBAR_MIN_W).toBe(200);
     expect(RAIL_MIN_W).toBe(280);
-    expect(STAGE_MIN_W).toBe(Math.max(480, DOOR_MIN_W));
+    expect(STAGE_MIN_W).toBe(480);
     expect(docMinFor(1440)).toBe(STAGE_MIN_W);
+    expect(docMinFor(1440, DOOR_MIN_W)).toBe(560);
     expect(clampSidebarWidth(150)).toBe(200);
     // The stylesheets hold the same numbers: content never reflows below them.
     const styles = css("src/styles.css");
@@ -99,16 +101,24 @@ describe("hard stops (D38, D40)", () => {
     expect(sidebarFoldsAt(SIDEBAR_FOLD_BELOW)).toBe(false);
     expect(sidebarFoldsAt(SIDEBAR_FOLD_BELOW - 1)).toBe(true);
     expect(SIDEBAR_MIN_W + RAIL_MIN_W + 2 * DIVIDER_W + STAGE_MIN_W).toBeLessThanOrEqual(RAIL_FOLD_BELOW);
+    // A lone door keeps them too: its minimum moves no breakpoint.
+    expect(railFoldsAt(RAIL_FOLD_BELOW, DOOR_MIN_W)).toBe(false);
+    expect(sidebarFoldsAt(SIDEBAR_FOLD_BELOW, DOOR_MIN_W)).toBe(false);
   });
 
   it("a split that asks more of the stage folds the columns it cannot sit beside", () => {
     const open = { sidebarCollapsed: false, paneCollapsed: false, narrowOpen: NO_NARROW_OPEN };
-    // A plan beside a door at 1440: neither column fits beside 1201 px.
-    const both = responsivePose({ winWidth: 1440, ...open, stageMin: 1201 });
-    expect(both).toMatchObject({ paneCollapsed: true, sidebarCollapsed: true });
-    // A plan beside a browser at 1440: the rail folds, the sidebar stays.
-    const rail = responsivePose({ winWidth: 1440, ...open, stageMin: 1021 });
-    expect(rail).toMatchObject({ paneCollapsed: true, sidebarCollapsed: false });
+    // A plan beside a browser at 1440 (480 + 1 + 420) with a 260 sidebar: the
+    // sidebar stays open — the rail gives first, here only down to 280.
+    const page = PANE_MIN_W.plan + 1 + PANE_MIN_W.browser;
+    expect(responsivePose({ winWidth: 1440, ...open, stageMin: page })).toMatchObject({ sidebarCollapsed: false });
+    const l = computePaneLayout({ winWidth: 1440, sidebarWidth: 260, sidebarCollapsed: false, paneWidth: 320, paneCollapsed: false, paneFullscreen: false, stageMin: page, sidebarMin: SIDEBAR_MIN_W, paneMin: RAIL_MIN_W });
+    expect(l.sidebarW).toBeGreaterThanOrEqual(SIDEBAR_MIN_W);
+    expect(l.docFlowW).toBe(page);
+    expect(l.curtainActive).toBe(false);
+    // A plan beside a door and a page (1463 px): neither column fits.
+    const wide = PANE_MIN_W.plan + PANE_MIN_W.door + PANE_MIN_W.browser + 2;
+    expect(responsivePose({ winWidth: 1440, ...open, stageMin: wide })).toMatchObject({ paneCollapsed: true, sidebarCollapsed: true });
     expect(responsivePose({ winWidth: 1440, ...open })).toMatchObject({ paneCollapsed: false, sidebarCollapsed: false });
   });
 });

@@ -2,30 +2,30 @@
 // Copyright 2026 Yusuf Al-Bazian
 
 /** A door pane's hard stop (D40): its composer keeps ONE row of chips —
- *  harness · project · destination · History, then + 🎙 ↑ (≈ 395 px fixed
- *  plus the project chip, which ellipsizes) inside the island's 20 px
- *  padding and the room's 24 px margins — and its headline one line. Every
- *  other pane kind's stop is `PANE_MIN_W` in workbench/reducer.ts. */
-export const DOOR_MIN_W = 600;
-/** The stage's hard stop (D38's 480 px, raised to the door's by D40, so a
- *  lone door never draws below its own minimum): the centre column never
- *  draws narrower. A side column that cannot keep its own minimum beside it
- *  folds (`workbench/poses.ts`); a hand-opened narrow column curtains over
- *  it. A split's panes can ask more (`stageMin`). */
-export const STAGE_MIN_W = Math.max(480, DOOR_MIN_W);
-/** Minimum useful document-column width — the stage's hard stop. Below it
- *  the side columns shrink toward their own minimums first, and only a
- *  column opened by hand in its narrow regime slides OVER the doc like a
- *  curtain. */
+ *  harness · project · destination · History, then + 🎙 ↑ — inside the
+ *  island's compact padding and the room's 24 px margins, and its headline
+ *  one line. Every other pane kind's stop is `PANE_MIN_W` in
+ *  workbench/model.ts. */
+export const DOOR_MIN_W = 560;
+/** The stage's hard stop when nothing on it says otherwise (D38): the
+ *  centre column never draws narrower. The tab on screen sets the real
+ *  floor (`stageMin`): its focused pane's minimum, or a split's panes at
+ *  theirs. A side column that cannot keep its own minimum beside it folds
+ *  (`workbench/poses.ts`); a hand-opened narrow column curtains over it. */
+export const STAGE_MIN_W = 480;
+/** Minimum useful document-column width — the stage's default hard stop.
+ *  Below it the side columns shrink toward their own minimums first, and
+ *  only a column opened by hand in its narrow regime slides OVER the doc
+ *  like a curtain. */
 export const DOC_MIN = STAGE_MIN_W;
 /** On wide windows the absolute floor is stingy — a 480px doc strip in a
  *  3000px window reads as squeezed shut. The floor scales to a fraction of
  *  the window once that fraction beats the absolute minimum. */
 export const DOC_MIN_FRAC = 0.2;
-/** The effective doc floor for a window: the larger of the absolute minimum
- *  and the window fraction. */
-export function docMinFor(winWidth: number): number {
-  return Math.max(DOC_MIN, Math.round(winWidth * DOC_MIN_FRAC));
+/** The effective stage floor for a window: the larger of the minimum (the
+ *  tab on screen's, else DOC_MIN) and the window fraction. */
+export function docMinFor(winWidth: number, min: number = DOC_MIN): number {
+  return Math.max(min, Math.round(winWidth * DOC_MIN_FRAC));
 }
 /** The gap between two columns (D38): none. Sidebar, stage and rail meet on
  *  a 1px rule, never on a strip of hull. */
@@ -179,8 +179,9 @@ export interface PaneLayoutInput {
    *  curtains over the document, and the other column (in its default pose)
    *  stays in flow, taking only what the first cannot (D18). */
   overlayFirst?: "pane" | "sidebar";
-  /** What the stage's tab asks beyond `docMinFor` (D40): the sum of its
-   *  split's pane minimums. Unlike `docMin` it keeps the columns' fit. */
+  /** What the stage's tab asks (D40): its focused pane's minimum, or its
+   *  split's panes at theirs. Given, it replaces DOC_MIN as the floor;
+   *  unlike `docMin` it keeps the columns' fit. */
   stageMin?: number;
   /** Each open column's hard stop (D38). Given, and outside the narrow
    *  regime (no `docMin`), a stage short of its floor takes the room back
@@ -224,7 +225,7 @@ export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
   const edge = (i.paneCollapsed && !i.paneFullscreen ? (i.paneEdgeW ?? 0) : 0) + (i.sidebarCollapsed ? (i.sidebarEdgeW ?? 0) : 0);
   const available = Math.max(0, i.winWidth - dividers - 2 * SHELL_EDGE - edge);
   // Degrade gracefully below tiny window widths.
-  const docTarget = Math.min(Math.max(docMinFor(i.winWidth), i.docMin ?? 0, i.stageMin ?? 0), available);
+  const docTarget = Math.min(Math.max(docMinFor(i.winWidth, i.stageMin || DOC_MIN), i.docMin ?? 0), available);
   // Hard stops (D38): outside the narrow regime the columns give the stage
   // its floor back before anything curtains — the rail first, then the
   // sidebar, each down to its own minimum and no further.

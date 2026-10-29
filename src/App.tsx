@@ -370,7 +370,7 @@ import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, re
 import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
 import { needsYouTerminals, terminalStatus, wallStatus } from "./workbench/status";
 import type { NeedReason } from "./lib/sessionGroups";
-import { HOME_KEY, activeSessionOf, activeTabOf, tabMinWidth, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeSessionOf, activeTabOf, layoutMinWidth, tabMinWidth, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
@@ -601,11 +601,18 @@ void loadWorkbenchStage().catch(() => {});
 void loadPlanPane().catch(() => {});
 let doorCounter = 0;
 const selectActiveKey = (s: WorkbenchState) => s.activeKey;
-/** What the tab on screen asks of the stage (D40): its split's panes at
- *  their minimums. */
+/** What the tab on screen asks of the stage (D40): its focused pane's
+ *  minimum, or its split's panes at theirs. */
 const selectStageMin = (s: WorkbenchState) => {
   const set = s.sets[s.activeKey];
   return set ? tabMinWidth(activeTabOf(set), set.panes) : 0;
+};
+/** The tab on screen and its whole layout's minimum, zoom aside: what the
+ *  stage's automatic zoom is measured against. */
+const selectStageFit = (s: WorkbenchState) => {
+  const set = s.sets[s.activeKey];
+  const tab = set && activeTabOf(set);
+  return tab ? `${s.activeKey}|${tab.id}|${layoutMinWidth(tab.root, set.panes)}` : "";
 };
 /** The widest the stage can be at this window, both side columns folded to
  *  their edges (D40): a split or a merge whose panes cannot all keep their
@@ -2880,6 +2887,13 @@ function App() {
   // columns it cannot sit beside, as a narrow window does, and gives them
   // back when it closes.
   const stageMin = useWorkbench(wb, selectStageMin);
+  // A window that cannot hold the tab's split at its panes' minimums — the
+  // side columns folded — zooms the focused pane instead of squeezing them;
+  // wide enough again, that zoom clears (a user's own ⌘⇧↩ stays).
+  const stageFit = useWorkbench(wb, selectStageFit);
+  useEffect(() => {
+    if (stageFit) wb.dispatch({ type: "fitStage", room: winWidth - SIDEBAR_EDGE_W - RAIL_EDGE_W - 2 * DIVIDER_W });
+  }, [winWidth, stageFit]);
   useEffect(() => setNarrowOpen((open) => settleNarrowOpen(open, winWidth, stageMin)), [winWidth, stageMin]);
   const pose = responsivePose({ winWidth, sidebarCollapsed: sidebarCollapsedPref, paneCollapsed: paneCollapsedPref, narrowOpen, stageMin });
   const poseRef = useRef(pose);
@@ -4104,7 +4118,7 @@ function App() {
   // floor beside the other column as drawn, and never below its own
   // minimum (past which it snaps shut). The rail also keeps its 600 px
   // ceiling.
-  const seams = 2 * DIVIDER_W + Math.max(docMinFor(winWidth), stageMin);
+  const seams = 2 * DIVIDER_W + docMinFor(winWidth, stageMin || undefined);
   const sidebarMaxW = Math.max(
     SIDEBAR_MIN_W,
     winWidth - (paneCollapsed ? RAIL_EDGE_W : layout.paneW) - seams,

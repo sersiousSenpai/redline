@@ -150,6 +150,9 @@ function parseTab(raw: unknown, panes: Record<string, AnyPane>): Tab | null {
   // A zoom comes back only as the reducer keeps it: the focused pane of a
   // split.
   const zoomed = ids.length > 1 && raw.zoomed === focusedPaneId ? focusedPaneId : undefined;
+  // The stage's own zoom (D40) comes back as the stage's, so a wide enough
+  // window still clears it.
+  if (zoomed && raw.autoZoomed === true) return { id: raw.id, root, focusedPaneId, zoomed, autoZoomed: true };
   return zoomed ? { id: raw.id, root, focusedPaneId, zoomed } : { id: raw.id, root, focusedPaneId };
 }
 

@@ -28,10 +28,10 @@ export function railFoldsAt(winWidth: number, stageMin = 0): boolean {
 export function sidebarFoldsAt(winWidth: number, stageMin = 0): boolean {
   return winWidth < SIDEBAR_FOLD_BELOW || SIDEBAR_MIN_W + RAIL_EDGE_W + 2 * DIVIDER_W + stageFloor(winWidth, stageMin) > winWidth;
 }
-/** The stage's floor at this window: its own, or what the tab on screen
- *  asks (D40: a split's panes at their minimums). */
+/** The stage's floor at this window: what the tab on screen asks (D40: its
+ *  focused pane's minimum, or a split's panes at theirs), else DOC_MIN. */
 function stageFloor(winWidth: number, stageMin: number): number {
-  return Math.max(docMinFor(winWidth), stageMin);
+  return docMinFor(winWidth, stageMin || undefined);
 }
 
 /** The document's floor while the rail is in its narrow regime: a rail the

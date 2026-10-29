@@ -650,7 +650,7 @@ export function SplitView({ column, weights, mins, onWeightsChange, onDraggingCh
           cells.current[i] = el;
         }}
         className="rl-wb-split-cell flex flex-col overflow-hidden min-w-0 min-h-0"
-        style={{ flexGrow: shares[i], flexShrink: 1, flexBasis: 0, minWidth: cellMin(mins, i, n) }}
+        style={{ flexGrow: shares[i], flexShrink: 1, flexBasis: 0, minWidth: mins?.[i] ? `${mins[i]}px` : undefined }}
       >
         {child}
       </div>,
@@ -658,18 +658,6 @@ export function SplitView({ column, weights, mins, onWeightsChange, onDraggingCh
   });
   cells.current.length = n;
   return <div className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`} data-split-arity={n}>{out}</div>;
-}
-
-/** A cell's `min-width` (D40): its pane's minimum while the split has room
- *  for every child's — which a split or a merge never lacks when it is made
- *  — else its share of the room in proportion to the minimums, so a window
- *  narrowed under a split shares what is left instead of pushing a pane off
- *  the stage. */
-export function cellMin(mins: readonly number[] | undefined, i: number, n: number): string | undefined {
-  const own = mins?.[i];
-  if (!mins || !own) return undefined;
-  const sum = mins.reduce((a, b) => a + b, 0);
-  return `min(${own}px, calc((100% - ${(n - 1) * DIVIDER}px) * ${+(own / sum).toFixed(4)}))`;
 }
 
 /** `shares` with the pair at `gap`, `gap + 1` re-divided: `r` of their

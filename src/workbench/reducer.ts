@@ -135,6 +135,11 @@ export type WorkbenchAction =
   /** ⌘⇧↩: the pane (default: the focused one) fills its tab, or the tab
    *  comes back when one is zoomed. Only a split zooms. */
   | { type: "zoomPane"; key?: SessionKey; tabId?: string; paneId?: string }
+  /** The window settled at a width whose stage (side columns folded) is
+   *  `room` px (D40): the tab on screen zooms its focused pane while its
+   *  split cannot keep every pane's minimum there, and that automatic zoom
+   *  clears once it can. A user's own zoom is left alone. */
+  | { type: "fitStage"; key?: SessionKey; room: number }
   /** "Move to new tab": the pane leaves its split for a tab of its own, just
    *  after the one it left, in front. A tab of one pane stays as it is. */
   | { type: "movePaneToTab"; key?: SessionKey; paneId: string; tabId?: string }
@@ -247,11 +252,23 @@ function withZoomKept(set: TabSet): TabSet {
   for (const [id, tab] of Object.entries(set.tabs)) {
     if (!tab.zoomed) continue;
     if (isSplit(tab.root) && tab.focusedPaneId === tab.zoomed && paneIdsOf(tab.root).includes(tab.zoomed)) continue;
-    const rest = { ...tab };
-    delete rest.zoomed;
-    tabs = { ...(tabs ?? set.tabs), [id]: rest };
+    // The stage's own zoom (D40) follows the focus to another pane of the
+    // split instead of dropping it into a stage too narrow for it.
+    if (tab.autoZoomed && isSplit(tab.root) && paneIdsOf(tab.root).includes(tab.focusedPaneId)) {
+      tabs = { ...(tabs ?? set.tabs), [id]: { ...tab, zoomed: tab.focusedPaneId } };
+      continue;
+    }
+    tabs = { ...(tabs ?? set.tabs), [id]: unzoomed(tab) };
   }
   return tabs ? { ...set, tabs } : set;
+}
+
+/** `tab` with no zoom, the stage's or the user's. */
+function unzoomed(tab: Tab): Tab {
+  const rest = { ...tab };
+  delete rest.zoomed;
+  delete rest.autoZoomed;
+  return rest;
 }
 
 /** `next` with the tab it stops showing remembered as the most recent one
@@ -1199,14 +1216,21 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const set = setOf(state, key);
       const tab = set && (action.tabId ? set.tabs[action.tabId] : activeTabOf(set));
       if (!set || !tab) return state;
-      if (tab.zoomed) {
-        const rest = { ...tab };
-        delete rest.zoomed;
-        return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: rest } });
-      }
+      if (tab.zoomed) return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: unzoomed(tab) } });
       const paneId = action.paneId ?? tab.focusedPaneId;
       if (!isSplit(tab.root) || !paneIdsOf(tab.root).includes(paneId)) return state;
       return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: { ...tab, focusedPaneId: paneId, zoomed: paneId } } });
+    }
+
+    case "fitStage": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const tab = set && activeTabOf(set);
+      if (!set || !tab || !isSplit(tab.root)) return state;
+      const fits = layoutMinWidth(tab.root, set.panes) <= action.room;
+      if (tab.autoZoomed && fits) return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: unzoomed(tab) } });
+      if (tab.zoomed || fits) return state;
+      return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: { ...tab, zoomed: tab.focusedPaneId, autoZoomed: true } } });
     }
 
     case "movePaneToTab": {

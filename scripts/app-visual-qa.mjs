@@ -41,7 +41,7 @@
 //!   merge-drop  (W5, `walls` seed) a Terminals tab dragged onto the wall's
 //!             right quarter (snapshot of the lit half), let go: merged
 //!   door-min  (D40) Home's door at 1100×720 with both columns open: the
-//!             stage at its floor, the door's one chip row and headline
+//!             door at its 560 px minimum, one chip row, a one-line headline
 //!
 //! Per scene × theme × size it writes `<scene>.png` — `-<theme>` appended
 //! for a theme other than aurora, `-<w>x<h>` when more than one size runs
@@ -304,12 +304,12 @@ const DRIVES = {
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-split .rl-split-divider') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=plan]') && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane[data-pane-kind=servers]')", timeout: 8000, why: "the tab is the plan beside Localhost, a divider between" },
   ],
   // D40: Home's door with both columns open at 1100 × 720, where the stage
-  // sits at its floor (the door's minimum, 600 px): one chip row, the
+  // sits at the door's minimum (560 px): one chip row, the
   // headline on one line.
   "door-min": [
     ...AT_HOME,
     { do: "viewport", width: 1100, height: 720, why: "the stage at its floor" },
-    { do: "waitFor", expr: "(() => { const p = document.querySelector('[data-rl-door-plate]'); return !!p && Math.round(p.getBoundingClientRect().width) === 600 && !!document.querySelector('.rl-frontdoor-focus[data-landed] .rl-fd-tools'); })()", timeout: 8000, why: "the door plate is 600 px and the box has landed" },
+    { do: "waitFor", expr: "(() => { const p = document.querySelector('[data-rl-door-plate]'); return !!p && Math.round(p.getBoundingClientRect().width) === 560 && !!document.querySelector('.rl-frontdoor-focus[data-landed] .rl-fd-tools'); })()", timeout: 8000, why: "the door plate is 560 px and the box has landed" },
   ],
   // ⌘D on a plan: the plan's tab splits right, a door in the new half,
   // and the door's composer lands on THAT half — never over the plan.
@@ -336,13 +336,16 @@ const DRIVES = {
     { do: "key", key: "Enter", why: "⏎: the door half becomes the browser" },
     { do: "waitFor", expr: `!!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=plan]") && !!document.querySelector("${SHOWN} .rl-wb-pane[data-pane-kind=browser]") && document.querySelectorAll("${SHOWN} .rl-split-divider").length === 1`, timeout: 15000, why: "one tab: the plan beside the browser, a divider between" },
     { do: "viewport", run: true, why: "back to the run's size" },
-    { do: "press", css: `${SHOWN} .rl-split-divider`, why: "take the divider" },
-    { do: "moveTo", css: `${SHOWN} > .rl-wb-split`, fx: 0.6, fy: 0.5, why: "drag it toward 60 %" },
-    { do: "release", css: `${SHOWN} > .rl-wb-split`, fx: 0.6, fy: 0.5, why: "let go: the weights land" },
-    // D40: the plan keeps 600 px and the page 420, so 40 % is past the
-    // plan's stop; 60 % lands at 1440, and a narrower stage stops at a
-    // minimum on the way.
-    { do: "waitFor", expr: `(() => { const c = document.querySelector("${SHOWN} > .rl-wb-split > .rl-wb-split-cell"); const g = c ? Number(c.style.flexGrow) : NaN; return g >= 0.499 && g <= 0.63 && (window.innerWidth < 1440 || Math.abs(g - 0.6) < 0.03); })()`, timeout: 5000, why: "the plan's share moved toward 60 %, stopping at a minimum" },
+    // D40: below the split's minimums (the plan's 480 + the page's 420,
+    // side columns folded) the stage zooms the focused pane — the page —
+    // instead of squeezing both; the split stays, its divider hidden.
+    { do: "waitFor", expr: `window.innerWidth >= 1000 ? !document.querySelector("${SHOWN}[data-zoomed]") : !!document.querySelector("${SHOWN}[data-zoomed] .rl-wb-pane[data-zoomed][data-pane-kind=browser]")`, timeout: 5000, why: "split when it fits, the page zoomed when it does not" },
+    { do: "press", css: `${SHOWN} .rl-split-divider`, when: `!document.querySelector("${SHOWN}[data-zoomed]")`, why: "take the divider" },
+    { do: "moveTo", css: `${SHOWN} > .rl-wb-split`, fx: 0.6, fy: 0.5, when: `!document.querySelector("${SHOWN}[data-zoomed]")`, why: "drag it toward 60 %" },
+    { do: "release", css: `${SHOWN} > .rl-wb-split`, fx: 0.6, fy: 0.5, when: `!document.querySelector("${SHOWN}[data-zoomed]")`, why: "let go: the weights land" },
+    // The plan keeps 480 px and the page 420: the drag moves toward 60 % and
+    // stops no later than a minimum.
+    { do: "waitFor", expr: `(() => { if (document.querySelector("${SHOWN}[data-zoomed]")) return true; const c = document.querySelector("${SHOWN} > .rl-wb-split > .rl-wb-split-cell"); const g = c ? Number(c.style.flexGrow) : NaN; return g >= 0.499 && g <= 0.63; })()`, timeout: 5000, why: "the plan's share moved toward 60 %, stopping at a minimum" },
   ],
   // W5: three panes and a direction change — ⌘D, then ⌘⇧D in the new
   // door — a divider dragged, then ⌃⌘← back to the plan and ⌘⌥= evens all.

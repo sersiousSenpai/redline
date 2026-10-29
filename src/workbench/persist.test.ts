@@ -336,4 +336,15 @@ describe("a zoomed tab (W5)", () => {
     raw.sets.home.tabs.t1.zoomed = "nope";
     expect(parseWorkbench(raw)!.sets.home!.tabs.t1.zoomed).toBeUndefined();
   });
+
+  it("the stage's own zoom comes back as the stage's (D40), so a wide window still clears it", () => {
+    let s = sample();
+    s = reduce(s, { type: "focusPane", key: HOME_KEY, paneId: "b" });
+    s = reduce(s, { type: "fitStage", key: HOME_KEY, room: 10 });
+    const back = parseWorkbench(JSON.parse(JSON.stringify(s)))!;
+    expect(back.sets.home!.tabs.t1).toMatchObject({ zoomed: "b", autoZoomed: true });
+    // A user's zoom never comes back as the stage's.
+    const user = parseWorkbench(JSON.parse(JSON.stringify(reduce(sample(), { type: "zoomPane", key: HOME_KEY, paneId: "b" }))))!;
+    expect(user.sets.home!.tabs.t1.autoZoomed).toBeUndefined();
+  });
 });

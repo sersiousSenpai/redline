@@ -9,7 +9,7 @@ import { DOOR_MIN_W } from "../lib/paneLayout";
 import { reduce } from "./reducer";
 import { createWorkbenchStore, type WorkbenchStore } from "./store";
 import { isResizing } from "../lib/resizeSession";
-import { WorkbenchStage, cellMin } from "./WorkbenchStage";
+import { WorkbenchStage } from "./WorkbenchStage";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -432,11 +432,10 @@ describe("pane minimums in a split (D40)", () => {
 
   it("each cell carries its pane's minimum, and the seam is one rule", async () => {
     const { a, b, divider } = await planBesideDoor(1440);
-    // Its own minimum while the split has room; a proportional share of a
-    // window narrowed under it, so no pane is pushed off the stage.
-    expect(a.style.minWidth).toContain(`${PANE_MIN_W.plan}px`);
-    expect(b.style.minWidth).toContain(`${DOOR_MIN_W}px`);
-    expect(cellMin([PANE_MIN_W.plan, DOOR_MIN_W], 1, 2)).toBe(`min(${DOOR_MIN_W}px, calc((100% - 1px) * ${+(DOOR_MIN_W / (PANE_MIN_W.plan + DOOR_MIN_W)).toFixed(4)}))`);
+    // Never a proportional squeeze: a window too narrow for the split zooms
+    // its focused pane instead (the reducer's `fitStage`).
+    expect(a.style.minWidth).toBe(`${PANE_MIN_W.plan}px`);
+    expect(b.style.minWidth).toBe(`${DOOR_MIN_W}px`);
     expect(divider.style.flex).toBe("0 0 1px");
   });
 

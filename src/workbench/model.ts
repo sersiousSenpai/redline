@@ -191,6 +191,11 @@ export interface Tab {
    *  mounted, hidden. Always the focused pane: focus moving elsewhere, a
    *  split, a close or a merge puts the tab back (the reducer keeps it so). */
   zoomed?: string;
+  /** The zoom is the stage's, not the user's (D40): set when the window
+   *  cannot hold the split at its panes' minimums, it follows the focus and
+   *  is cleared once the window is wide enough again. A user's own ⌘⇧↩
+   *  zoom never carries it, so it is never cleared that way. */
+  autoZoomed?: true;
 }
 
 /** A closed tab, kept for ⌘⇧T: the tab, its panes, and where it sat. */
@@ -400,14 +405,14 @@ export const PANE_MIN_W: Record<PaneKind, number> = {
   // The composer's one chip row (harness · project · destination · History,
   // then + 🎙 ↑) and a one-line headline.
   door: DOOR_MIN_W,
-  // The docked contents (~216 px) beside a 48 ch measure of plan text.
-  plan: 600,
+  // A readable measure of plan text beside its margin marks.
+  plan: 480,
   // The draft's editor and its toolbar's one row, as the door's.
   drafter: DOOR_MIN_W,
   // The page strip beside the address bar.
   browser: 420,
   // The compact composer's chips and its send.
-  chat: 400,
+  chat: 480,
   // Two terminal tiles side by side.
   terminals: 480,
   review: 480,
@@ -429,10 +434,11 @@ export function layoutMinWidth(node: LayoutNode, panes: Record<string, AnyPane>)
   return node.direction === "row" ? mins.reduce((a, b) => a + b, 0) + (mins.length - 1) * SPLIT_SEAM_W : Math.max(0, ...mins);
 }
 
-/** What the tab on screen asks of the stage: a zoomed pane alone, else its
- *  whole layout. A lone pane asks nothing beyond the stage's own floor,
- *  which every lone pane fits. */
+/** What the tab on screen asks of the stage (D40): its focused pane's
+ *  minimum when it shows one pane (alone, or zoomed), else its whole
+ *  layout at every pane's minimum. */
 export function tabMinWidth(tab: Tab | null | undefined, panes: Record<string, AnyPane>): number {
-  if (!tab || tab.zoomed || !isSplit(tab.root)) return 0;
+  if (!tab) return 0;
+  if (tab.zoomed) return paneMinWidth(panes[tab.zoomed]);
   return layoutMinWidth(tab.root, panes);
 }

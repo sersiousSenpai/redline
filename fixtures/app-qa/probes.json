@@ -22,7 +22,7 @@
   ],
   "door-min": {
     "probes": [
-      { "name": "door plate at the stage's floor (D40)", "css": [".rl-wb-door-plate"], "expect": { "width": 600 } },
+      { "name": "door plate at its minimum (D40)", "css": [".rl-wb-door-plate"], "expect": { "width": 560 } },
       { "name": "one chip row at the door's minimum (D40)", "css": [".rl-frontdoor-focus .rl-fd-island .rl-fd-tools"], "expect": { "height": 34 } },
       { "name": "headline on one line at the door's minimum (D40)", "css": [".rl-fd-welcome-hero .rl-fd-title"], "expect": { "height": 32 } }
     ]

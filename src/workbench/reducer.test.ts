@@ -951,7 +951,10 @@ describe("pane minimums (D40)", () => {
 
   it("gives every kind a minimum, the door's its one-row composer", () => {
     expect(PANE_MIN_W.door).toBe(DOOR_MIN_W);
+    expect(DOOR_MIN_W).toBe(560);
+    expect(PANE_MIN_W.plan).toBe(480);
     expect(PANE_MIN_W.browser).toBe(420);
+    expect(PANE_MIN_W.chat).toBe(480);
     expect(PANE_MIN_W.terminals).toBe(480);
     expect(PANE_MIN_W.file).toBe(360);
     for (const kind of Object.keys(PANE_MIN_W) as (keyof typeof PANE_MIN_W)[]) expect(PANE_MIN_W[kind]).toBeGreaterThanOrEqual(360);
@@ -964,8 +967,9 @@ describe("pane minimums (D40)", () => {
     expect(layoutMinWidth(root(s), panes)).toBe(PANE_MIN_W.plan + SPLIT_SEAM_W + DOOR_MIN_W);
     s = reduce(s, { type: "splitPane", paneId: "d", direction: "column", pane: file("/a"), newPaneId: "f" });
     expect(layoutMinWidth(root(s), set(s).panes)).toBe(PANE_MIN_W.plan + SPLIT_SEAM_W + DOOR_MIN_W);
-    // A lone pane asks nothing past the stage's own floor; a zoomed tab too.
-    expect(tabMinWidth(activeTabOf(set(home(plan))), set(home(plan)).panes)).toBe(0);
+    // A lone pane asks its own minimum; a zoomed tab its zoomed pane's.
+    expect(tabMinWidth(activeTabOf(set(home(plan))), set(home(plan)).panes)).toBe(PANE_MIN_W.plan);
+    expect(tabMinWidth(activeTabOf(set(home(door()))), set(home(door())).panes)).toBe(DOOR_MIN_W);
   });
 
   it("a split with a door fits a 1440 stage and is refused at 900", () => {
@@ -994,5 +998,58 @@ describe("pane minimums (D40)", () => {
     const merged = reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "right", room: ROOM_1440 });
     expect(kinds(merged)).toEqual(["plan", "door"]);
     expect(reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "bottom", room: ROOM_900 })).not.toBe(s);
+  });
+});
+
+// D40: a window that cannot hold the tab's split at its panes' minimums (the
+// side columns folded) zooms the focused pane — the tree stays — and that
+// automatic zoom clears once the window is wide enough again. A user's own
+// zoom is never cleared that way.
+describe("the stage's automatic zoom (D40)", () => {
+  const plan: PaneInit = { kind: "plan", data: { sessionId: "s1", version: null } };
+  const page: PaneInit = { kind: "browser", data: { workspace: "regular" } };
+  /** A plan beside a page (901 px at their minimums), the page focused. */
+  const split = () => reduce(home(plan), { type: "splitPane", paneId: "p1", direction: "row", pane: page, newPaneId: "b" });
+  const tab = (s: WorkbenchState) => activeTabOf(set(s))!;
+
+  it("zooms the focused pane when the stage is too narrow, keeping the tree", () => {
+    const s = split();
+    const narrow = reduce(s, { type: "fitStage", room: 900 - 86 });
+    expect(tab(narrow)).toMatchObject({ zoomed: "b", autoZoomed: true });
+    expect(root(narrow)).toEqual(root(s));
+    expect(tabMinWidth(tab(narrow), set(narrow).panes)).toBe(PANE_MIN_W.browser);
+    // Room enough: nothing to do, the same state back.
+    expect(reduce(s, { type: "fitStage", room: 1440 - 86 })).toBe(s);
+  });
+
+  it("clears its own zoom once the window is wide enough again", () => {
+    const narrow = reduce(split(), { type: "fitStage", room: 814 });
+    const wide = reduce(narrow, { type: "fitStage", room: 1354 });
+    expect(tab(wide).zoomed).toBeUndefined();
+    expect(tab(wide).autoZoomed).toBeUndefined();
+    // Still too narrow: it stays.
+    expect(reduce(narrow, { type: "fitStage", room: 850 })).toBe(narrow);
+  });
+
+  it("never clears a user's own zoom", () => {
+    const zoomed = reduce(split(), { type: "zoomPane" });
+    expect(tab(zoomed)).toMatchObject({ zoomed: "b" });
+    expect(tab(zoomed).autoZoomed).toBeUndefined();
+    expect(reduce(zoomed, { type: "fitStage", room: 1354 })).toBe(zoomed);
+    expect(reduce(zoomed, { type: "fitStage", room: 814 })).toBe(zoomed);
+  });
+
+  it("follows the focus to another pane of the split; ⌘⇧↩ puts it back for good", () => {
+    const narrow = reduce(split(), { type: "fitStage", room: 814 });
+    const moved = reduce(narrow, { type: "focusPane", paneId: "p1" });
+    expect(tab(moved)).toMatchObject({ zoomed: "p1", autoZoomed: true });
+    const back = reduce(moved, { type: "zoomPane" });
+    expect(tab(back).zoomed).toBeUndefined();
+    expect(tab(back).autoZoomed).toBeUndefined();
+  });
+
+  it("a lone pane never zooms", () => {
+    const s = home(plan);
+    expect(reduce(s, { type: "fitStage", room: 100 })).toBe(s);
   });
 });

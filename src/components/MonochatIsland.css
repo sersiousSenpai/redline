@@ -81,6 +81,9 @@
 .rl-monochat .rl-fd-tools { gap: 7px; }
 .rl-monochat .rl-frontdoor .rl-fd-tools,
 .rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { flex-wrap: nowrap; }
+/* Compact (the door near its minimum): the box's padding and the chips' gap
+   step down so the row still fits whole at DOOR_MIN_W. */
+.rl-monochat .rl-frontdoor.is-compact .rl-fd-tools { gap: 5px; }
 .rl-monochat .rl-fd-tools > * { min-width: 0; flex-shrink: 1; }
 .rl-monochat .rl-fd-tools > .rl-composer-send-tools { flex-shrink: 0; }
 .rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
@@ -98,6 +101,7 @@
 .rl-monochat .rl-floating-composer .rl-fd-island { position: static; }
 
 .rl-monochat .rl-floating-composer.rl-frontdoor { padding: 0 8px 8px; }
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-compact { padding: 0 4px 8px; --fd-island-pad-x: 14px; --fd-edge: calc(4px + 1px + var(--fd-island-pad-x)); }
 .rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px var(--fd-island-pad-x) 12px; border-radius: 24px; background: var(--color-glass-3); }
 .rl-monochat .rl-fd-strip { display: none; }
 

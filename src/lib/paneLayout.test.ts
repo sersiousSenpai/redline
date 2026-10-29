@@ -25,16 +25,19 @@ import {
 } from "./paneLayout";
 
 // D38: the columns meet on 1px rules — no gutter, no window-edge ring — and
-// the stage holds a hard floor: D38's 480 px, raised to a door's minimum by
-// D40. Drag math reads them through computePaneLayout only.
+// the stage holds a hard floor: D38's 480 px, or what the tab on screen asks
+// (D40). Drag math reads them through computePaneLayout only.
 describe("shell constants", () => {
   it("pins no gutter, no edge ring, a one-rule seam and the stage's floor", () => {
     expect(SHELL_GUTTER).toBe(0);
     expect(SHELL_EDGE).toBe(0);
     expect(SEAM_W).toBe(1);
     expect(DIVIDER_W).toBe(SEAM_W);
-    expect(DOOR_MIN_W).toBe(600);
-    expect(STAGE_MIN_W).toBe(Math.max(480, DOOR_MIN_W));
+    expect(DOOR_MIN_W).toBe(560);
+    expect(STAGE_MIN_W).toBe(480);
+    // The tab on screen sets the real floor: a lone door's is its own.
+    expect(docMinFor(1440, DOOR_MIN_W)).toBe(DOOR_MIN_W);
+    expect(computePaneLayout({ ...base, winWidth: 1100, stageMin: DOOR_MIN_W, sidebarMin: 200, paneMin: 280 }).docFlowW).toBe(DOOR_MIN_W);
     expect(DOC_MIN).toBe(STAGE_MIN_W);
   });
 });
