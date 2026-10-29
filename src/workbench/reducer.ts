@@ -20,6 +20,7 @@ import {
   MAX_WALL_TILES,
   RECENT_TABS_CAP,
   activeTabOf,
+  clampWeights,
   doorDraftKey,
   emptyTabSet,
   isSplit,
@@ -55,6 +56,17 @@ export interface DefaultsContext {
 }
 
 export type FocusDirection = "left" | "right" | "up" | "down";
+
+/** Which side of a pane a dragged tab lands on. */
+export type DropEdge = "left" | "right" | "top" | "bottom";
+
+/** A pane's box as rendered, in any one coordinate space. */
+export interface PaneRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
 
 /** How the Files rail opens a file: a plain click previews, a second click
  *  (or a double-click, or an edit) pins, ⌘-click opens a tab of its own. */
@@ -109,9 +121,24 @@ export type WorkbenchAction =
    *  came through follows the launch; W5 drags tabs between sessions). */
   | { type: "moveTab"; from: SessionKey; to: SessionKey; tabId: string; at?: number; activate?: boolean }
   | { type: "focusPane"; key?: SessionKey; paneId: string }
-  | { type: "focusPane"; key?: SessionKey; dir: FocusDirection }
+  /** ⌃⌘ + an arrow: the neighbour that way. With `rects` (each shown pane's
+   *  box as rendered) it is the geometric neighbour; without, the tree's. */
+  | { type: "focusPane"; key?: SessionKey; dir: FocusDirection; rects?: Readonly<Record<string, PaneRect>> }
+  /** A split's weights, by its child-index path from the root; every share
+   *  is kept at `MIN_SPLIT_SHARE` or more. */
   | { type: "resizeSplit"; key?: SessionKey; tabId?: string; path: number[]; weights: number[] }
   | { type: "equalize"; key?: SessionKey; tabId?: string }
+  /** ⌘⇧↩: the pane (default: the focused one) fills its tab, or the tab
+   *  comes back when one is zoomed. Only a split zooms. */
+  | { type: "zoomPane"; key?: SessionKey; tabId?: string; paneId?: string }
+  /** "Move to new tab": the pane leaves its split for a tab of its own, just
+   *  after the one it left, in front. A tab of one pane stays as it is. */
+  | { type: "movePaneToTab"; key?: SessionKey; paneId: string; tabId?: string }
+  /** Merge a tab into another: dropped on a pane's edge (`paneId`), the
+   *  pane splits that way with the tab's whole layout; on a tab (`intoTabId`,
+   *  the tab menu's "Merge into ⟵/⟶"), its root does. The tab leaves the
+   *  strip (still open: no ⌘⇧T entry) and the merged tab comes forward. */
+  | { type: "mergeTab"; key?: SessionKey; tabId: string; paneId?: string; intoTabId?: string; edge: DropEdge }
   | {
       type: "openSurface";
       key?: SessionKey;
@@ -171,7 +198,23 @@ function setOf(state: WorkbenchState, key: SessionKey): TabSet | null {
 }
 
 function putSet(state: WorkbenchState, key: SessionKey, set: TabSet): WorkbenchState {
-  return { ...state, sets: { ...state.sets, [key]: withRecent(state.sets[key], set) } };
+  return { ...state, sets: { ...state.sets, [key]: withRecent(state.sets[key], withZoomKept(set)) } };
+}
+
+/** A zoom holds only while it can: the tab is a split, the zoomed pane is
+ *  in it, and it is the focused pane. Focus moving elsewhere (a click
+ *  through, ⌃⌘ + an arrow, a reveal), a split, a close or a merge puts the
+ *  tab back. The same set back when no tab changed. */
+function withZoomKept(set: TabSet): TabSet {
+  let tabs: Record<string, Tab> | null = null;
+  for (const [id, tab] of Object.entries(set.tabs)) {
+    if (!tab.zoomed) continue;
+    if (isSplit(tab.root) && tab.focusedPaneId === tab.zoomed && paneIdsOf(tab.root).includes(tab.zoomed)) continue;
+    const rest = { ...tab };
+    delete rest.zoomed;
+    tabs = { ...(tabs ?? set.tabs), [id]: rest };
+  }
+  return tabs ? { ...set, tabs } : set;
 }
 
 /** `next` with the tab it stops showing remembered as the most recent one
@@ -282,14 +325,20 @@ function insertBeside(
   const parentPath = path.slice(0, -1);
   const parent = path.length ? nodeAt(root, parentPath) : null;
   const index = path[path.length - 1];
+  // A node of the split's own direction joins as its children (a merged
+  // tab's row beside a pane of a row is one row, not a row in a row).
+  const parts: { node: LayoutNode; weight: number }[] =
+    isSplit(leaf) && leaf.direction === direction
+      ? leaf.children.map((node, i) => ({ node, weight: leaf.weights[i] ?? 1 / leaf.children.length }))
+      : [{ node: leaf, weight: 1 }];
   if (parent && isSplit(parent) && parent.direction === direction && index !== undefined) {
     const children = parent.children.slice();
     const weights = parent.weights.slice();
     const share = (weights[index] ?? 1 / children.length) / 2;
     weights[index] = share;
     const at = before ? index : index + 1;
-    children.splice(at, 0, leaf);
-    weights.splice(at, 0, share);
+    children.splice(at, 0, ...parts.map((p) => p.node));
+    weights.splice(at, 0, ...parts.map((p) => p.weight * share));
     return replaceAt(root, parentPath, {
       ...parent,
       children,
@@ -298,13 +347,39 @@ function insertBeside(
   }
   const target = nodeAt(root, path);
   if (!target) return root;
-  const wrapped: LayoutNode = {
-    split: true,
-    direction,
-    children: before ? [leaf, target] : [target, leaf],
-    weights: [0.5, 0.5],
-  };
+  const added = parts.map((p) => p.node);
+  const addedWeights = parts.map((p) => p.weight / 2);
+  const children = before ? [...added, target] : [target, ...added];
+  const weights = before ? [...addedWeights, 0.5] : [0.5, ...addedWeights];
+  const wrapped: LayoutNode = { split: true, direction, children, weights: normalizeWeights(weights, children.length) };
   return replaceAt(root, path, wrapped);
+}
+
+/** The pane you reach by moving `dir` from `from` on screen: of the panes
+ *  wholly beyond `from`'s edge that way, the one sharing the most of its
+ *  span across that axis, then the nearest, then the first in reading
+ *  order. Null at the edge of the tab. */
+export function geometricNeighbour(rects: Readonly<Record<string, PaneRect>>, from: string, dir: FocusDirection): string | null {
+  const a = rects[from];
+  if (!a) return null;
+  const EPS = 2;
+  const horizontal = dir === "left" || dir === "right";
+  let best: { id: string; overlap: number; gap: number } | null = null;
+  for (const [id, b] of Object.entries(rects)) {
+    if (id === from) continue;
+    let gap: number;
+    if (dir === "right") gap = b.left - (a.left + a.width);
+    else if (dir === "left") gap = a.left - (b.left + b.width);
+    else if (dir === "down") gap = b.top - (a.top + a.height);
+    else gap = a.top - (b.top + b.height);
+    if (gap < -EPS) continue;
+    const overlap = horizontal
+      ? Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top)
+      : Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
+    if (overlap <= 0) continue;
+    if (!best || overlap > best.overlap + EPS || (Math.abs(overlap - best.overlap) <= EPS && gap < best.gap)) best = { id, overlap, gap };
+  }
+  return best?.id ?? null;
 }
 
 /** The pane you reach by moving `dir` from `paneId`, or null at an edge.
@@ -1060,7 +1135,9 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       }
       const tab = activeTabOf(set);
       if (!tab) return state;
-      const target = neighbourPane(tab.root, tab.focusedPaneId, action.dir);
+      const ids = paneIdsOf(tab.root);
+      const rects = action.rects ? Object.fromEntries(Object.entries(action.rects).filter(([id]) => ids.includes(id))) : null;
+      const target = rects && rects[tab.focusedPaneId] ? geometricNeighbour(rects, tab.focusedPaneId, action.dir) : neighbourPane(tab.root, tab.focusedPaneId, action.dir);
       if (!target) return state;
       return putSet(state, key, withTab(set, tab.id, (t) => ({ ...t, focusedPaneId: target })));
     }
@@ -1072,8 +1149,70 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       if (!set || !tab) return state;
       const node = nodeAt(tab.root, action.path);
       if (!node || !isSplit(node) || action.weights.length !== node.children.length) return state;
-      const weights = normalizeWeights(action.weights, node.children.length);
+      const weights = clampWeights(normalizeWeights(action.weights, node.children.length));
+      if (weights.every((w, i) => Math.abs(w - node.weights[i]) < 1e-9)) return state;
       return putSet(state, key, withTab(set, tab.id, (t) => ({ ...t, root: replaceAt(t.root, action.path, { ...node, weights }) })));
+    }
+
+    case "zoomPane": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const tab = set && (action.tabId ? set.tabs[action.tabId] : activeTabOf(set));
+      if (!set || !tab) return state;
+      if (tab.zoomed) {
+        const rest = { ...tab };
+        delete rest.zoomed;
+        return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: rest } });
+      }
+      const paneId = action.paneId ?? tab.focusedPaneId;
+      if (!isSplit(tab.root) || !paneIdsOf(tab.root).includes(paneId)) return state;
+      return putSet(state, key, { ...set, tabs: { ...set.tabs, [tab.id]: { ...tab, focusedPaneId: paneId, zoomed: paneId } } });
+    }
+
+    case "movePaneToTab": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const from = set && tabHolding(set, action.paneId);
+      const pane = set?.panes[action.paneId];
+      if (!set || !from || !pane || !isSplit(from.root)) return state;
+      const root = removePane(from.root, action.paneId);
+      if (!root) return state;
+      const left = paneIdsOf(root);
+      const tabId = action.tabId ?? newId("tab");
+      const order = set.order.slice();
+      order.splice(order.indexOf(from.id) + 1, 0, tabId);
+      return putSet(state, key, {
+        ...set,
+        order,
+        activeTabId: tabId,
+        tabs: {
+          ...set.tabs,
+          [from.id]: { ...from, root, focusedPaneId: left.includes(from.focusedPaneId) ? from.focusedPaneId : left[0] },
+          [tabId]: { id: tabId, root: { pane: action.paneId }, focusedPaneId: action.paneId },
+        },
+      });
+    }
+
+    case "mergeTab": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const source = set?.tabs[action.tabId];
+      if (!set || !source) return state;
+      const target = action.paneId ? tabHolding(set, action.paneId) : action.intoTabId ? (set.tabs[action.intoTabId] ?? null) : null;
+      if (!target || target.id === source.id) return state;
+      const direction: SplitDirection = action.edge === "left" || action.edge === "right" ? "row" : "column";
+      const before = action.edge === "left" || action.edge === "top";
+      const path = action.paneId ? pathTo(target.root, action.paneId) : [];
+      if (!path) return state;
+      const root = insertBeside(target.root, path, direction, source.root, before);
+      const tabs = { ...set.tabs, [target.id]: { ...target, root, focusedPaneId: source.focusedPaneId } };
+      delete tabs[source.id];
+      return putSet(state, key, {
+        ...set,
+        order: set.order.filter((id) => id !== source.id),
+        activeTabId: target.id,
+        tabs,
+      });
     }
 
     case "equalize": {

@@ -147,7 +147,10 @@ function parseTab(raw: unknown, panes: Record<string, AnyPane>): Tab | null {
   if (!root) return null;
   const ids = paneIdsOf(root);
   const focusedPaneId = str(raw.focusedPaneId) && ids.includes(raw.focusedPaneId) ? raw.focusedPaneId : ids[0];
-  return { id: raw.id, root, focusedPaneId };
+  // A zoom comes back only as the reducer keeps it: the focused pane of a
+  // split.
+  const zoomed = ids.length > 1 && raw.zoomed === focusedPaneId ? focusedPaneId : undefined;
+  return zoomed ? { id: raw.id, root, focusedPaneId, zoomed } : { id: raw.id, root, focusedPaneId };
 }
 
 function parseClosed(raw: unknown): ClosedTab | null {

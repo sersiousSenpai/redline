@@ -323,3 +323,17 @@ describe("bootToHome", () => {
     expect(parsed?.sets.home?.order).toEqual(["a", "b"]);
   });
 });
+
+describe("a zoomed tab (W5)", () => {
+  it("comes back zoomed only as the reducer keeps a zoom: the focused pane of a split", () => {
+    let s = sample();
+    s = reduce(s, { type: "zoomPane", key: HOME_KEY, paneId: "b" });
+    const back = parseWorkbench(JSON.parse(JSON.stringify(s)))!;
+    expect(back.sets.home!.tabs.t1.zoomed).toBe("b");
+    const raw = JSON.parse(JSON.stringify(s));
+    raw.sets.home.tabs.t1.zoomed = "p1"; // not the focused pane
+    expect(parseWorkbench(raw)!.sets.home!.tabs.t1.zoomed).toBeUndefined();
+    raw.sets.home.tabs.t1.zoomed = "nope";
+    expect(parseWorkbench(raw)!.sets.home!.tabs.t1.zoomed).toBeUndefined();
+  });
+});

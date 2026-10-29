@@ -16,6 +16,7 @@ import {
   isDocumentKind,
   paneIdsOf,
   sessionIdOf,
+  shownPaneIds,
   type AnyPane,
   type DocumentKind,
   type PaneKind,
@@ -95,8 +96,17 @@ export function kindForSurface(surface: Surface, key: SessionKey, session: strin
   return surface;
 }
 
-export function stageView(state: WorkbenchState): StageView {
+/** The panes the active tab shows: its zoomed pane alone while one is
+ *  zoomed (the others stay mounted, hidden), else all of them. */
+export function shownPanes(state: WorkbenchState): AnyPane[] {
   const { set, tab, panes } = activePanes(state);
+  if (!tab?.zoomed || !set) return panes;
+  return shownPaneIds(tab).map((id) => set.panes[id]).filter((p): p is AnyPane => Boolean(p));
+}
+
+export function stageView(state: WorkbenchState): StageView {
+  const { set, tab } = activePanes(state);
+  const panes = shownPanes(state);
   const focused = tab && set ? (set.panes[tab.focusedPaneId] ?? null) : null;
   let surface: Surface = "document";
   for (const pane of panes) {
@@ -146,16 +156,17 @@ export function plateFace(view: Pick<StageView, "focusedKind">, activeId: string
 }
 
 /** The geometry the browser's native webview re-reads its rect on: the
- *  set, the tab and its layout tree. */
+ *  set, the tab, its layout tree — every split's path and weights, so the
+ *  webview follows each divider — and the zoom. */
 export function selectLayoutKey(state: WorkbenchState): string {
   const { key, tab } = activePanes(state);
-  return tab ? `${key}|${tab.id}|${JSON.stringify(tab.root)}` : key;
+  return tab ? `${key}|${tab.id}|${JSON.stringify(tab.root)}|${tab.zoomed ?? ""}` : key;
 }
 
 /** The companion chat the active tab shows, if any: the room is a pane,
  *  and the one ChatRoom body follows it. */
 export function selectVisibleCompanion(state: WorkbenchState): string | null {
-  for (const pane of activePanes(state).panes) if (pane.kind === "chat" && pane.data.source === "companion") return pane.data.companionId;
+  for (const pane of shownPanes(state)) if (pane.kind === "chat" && pane.data.source === "companion") return pane.data.companionId;
   return null;
 }
 

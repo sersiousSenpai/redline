@@ -22,7 +22,7 @@ import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, u
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { rafCoalesce } from "../lib/raf";
 import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
-import { activeTabOf, isSplit, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
+import { MIN_SPLIT_SHARE, activeTabOf, isSplit, normalizeWeights, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
 import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
@@ -231,6 +231,7 @@ const TabBody = memo(function TabBody({ tab, panes, active, visible, renderPane,
       inert={!active}
       role="tabpanel"
       data-wb-tab={tab.id}
+      data-zoomed={tab.zoomed ? "" : undefined}
     >
       <LayoutView node={tab.root} path={[]} tab={tab} panes={panes} active={active} visible={visible} renderPane={renderPane} onFocusPane={onFocusPane} onResize={onResize} onSplitDragging={onSplitDragging} />
     </div>
@@ -253,11 +254,19 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
     const pane = panes[node.pane];
     if (!pane) return null;
     const focused = tab.focusedPaneId === pane.id;
+    // A zoomed tab shows its zoomed pane over the whole tab; the others stay
+    // mounted (their state, their editors) but are off screen to their
+    // bodies too: no webview, no wall pinned over them.
+    const zoomedHere = tab.zoomed === pane.id;
+    const hiddenByZoom = !!tab.zoomed && !zoomedHere;
+    const shown = active && !hiddenByZoom;
     return (
       <div
         className="rl-wb-pane"
         data-pane-kind={pane.kind}
+        data-pane-id={pane.id}
         data-focused={focused ? "" : undefined}
+        data-zoomed={zoomedHere ? "" : undefined}
         // Focusable by script only (the stage hands it the caret when its
         // tab is shown), never a Tab stop.
         tabIndex={-1}
@@ -267,7 +276,7 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
         onPointerDownCapture={focused ? undefined : () => onFocusPane(pane.id)}
       >
         <ErrorBoundary region={pane.kind} fallback={(err, reset) => <PaneFallback region={pane.kind} error={err} reset={reset} />}>
-          {renderPane(pane, { visible, focused, active })}
+          {renderPane(pane, { visible: visible && !hiddenByZoom, focused, active: shown })}
         </ErrorBoundary>
       </div>
     );
@@ -275,28 +284,15 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
   const children = node.children.map((child, i) => (
     <LayoutView key={i} node={child} path={[...path, i]} tab={tab} panes={panes} active={active} visible={visible} renderPane={renderPane} onFocusPane={onFocusPane} onResize={onResize} onSplitDragging={onSplitDragging} />
   ));
-  if (children.length === 2) {
-    return (
-      <TwoUp
-        column={node.direction === "column"}
-        ratio={node.weights[0] ?? 0.5}
-        onRatioChange={(r) => onResize(tab.id, path, [r, 1 - r])}
-        onDraggingChange={onSplitDragging}
-        first={children[0]}
-        second={children[1]}
-      />
-    );
-  }
-  // Wider splits are W5's (the n-ary divider); until then they lay out by
-  // weight with no divider.
   return (
-    <div className="rl-wb-split" style={{ display: "flex", flexDirection: node.direction === "column" ? "column" : "row", flex: 1, minHeight: 0, minWidth: 0 }}>
-      {children.map((child, i) => (
-        <div key={i} style={{ flex: `${node.weights[i] ?? 1} 1 0`, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          {child}
-        </div>
-      ))}
-    </div>
+    <SplitView
+      column={node.direction === "column"}
+      weights={node.weights}
+      onWeightsChange={(weights) => onResize(tab.id, path, weights)}
+      onDraggingChange={onSplitDragging}
+    >
+      {children}
+    </SplitView>
   );
 }
 
@@ -309,52 +305,63 @@ function undrawn(el: Element): boolean {
   return false;
 }
 
-/** The narrowest share a pane of the tile keeps while its divider drags. A
- *  weight of 0 is not a weight (`normalizeWeights` would even the split), and
- *  a pane goes by its own ✕, not by a drag to the edge. */
-export const MIN_SHARE = 0.1;
+/** The narrowest share a child of a split keeps while a divider drags
+ *  (`MIN_SPLIT_SHARE`, which the reducer keeps too). A weight of 0 is not a
+ *  weight, and a pane goes by its own ✕, not by a drag to the edge. */
+export const MIN_SHARE = MIN_SPLIT_SHARE;
 
-const clampShare = (r: number) => Math.max(MIN_SHARE, Math.min(1 - MIN_SHARE, r));
+/** The divider's thickness, in px. */
+const DIVIDER = 6;
 
-/** Two children of a split and the divider between them. The live share is
- *  written straight onto the first child's flex-basis, so a drag frame costs
- *  one style write plus layout and re-renders neither pane (a custom property
- *  on the container would invalidate style for both whole subtrees); the
- *  tab's weights take the result once, on release. A drag holds a resize
- *  session (`lib/resizeSession`), so the native webview shows its snapshot
- *  meanwhile, and `onDraggingChange` tells App. */
-function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }: {
+/** A split of any arity: its children laid out by weight (each child's
+ *  `flex-grow`, over a zero basis, so the dividers' own pixels come off the
+ *  top), and a divider in every gap. A drag moves the two children either
+ *  side of its divider and no other: the pair's total share is fixed, each
+ *  keeps `MIN_SHARE` of the whole split. The live shares are written straight
+ *  onto the pair's `flex-grow`, so a drag frame costs two style writes plus
+ *  layout and re-renders no pane; the split's weights take the result once,
+ *  on release. A drag holds a resize session (`lib/resizeSession`), so every
+ *  native webview shows its snapshot meanwhile, and `onDraggingChange` tells
+ *  App. A double-click evens the pair. */
+export function SplitView({ column, weights, onWeightsChange, onDraggingChange, children }: {
   column: boolean;
-  ratio: number;
-  onRatioChange: (next: number) => void;
+  weights: readonly number[];
+  onWeightsChange: (next: number[]) => void;
   onDraggingChange?: (dragging: boolean) => void;
-  first: ReactNode;
-  second: ReactNode;
+  children: ReactNode[];
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const firstRef = useRef<HTMLDivElement | null>(null);
-  const startDrag = (e: ReactPointerEvent) => {
+  const cells = useRef<(HTMLDivElement | null)[]>([]);
+  const n = children.length;
+  const shares = normalizeWeights(weights, n);
+  const startDrag = (gap: number, e: ReactPointerEvent) => {
     e.preventDefault();
-    const el = containerRef.current;
-    if (!el) return;
+    const a = cells.current[gap];
+    const b = cells.current[gap + 1];
+    if (!a || !b) return;
     // Captured, so a fast drag that leaves the 6px handle keeps tracking.
     const handle = e.currentTarget as HTMLElement;
     const pointerId = e.pointerId;
     handle.setPointerCapture?.(pointerId);
     onDraggingChange?.(true);
     beginResizeSession();
-    // The container cannot move during the drag: read it once, not per event.
-    const rect = el.getBoundingClientRect();
-    const size = column ? rect.height : rect.width;
-    const origin = column ? rect.top : rect.left;
-    const start = clampShare(ratio);
-    let pending = start;
-    const apply = rafCoalesce((r: number) => {
-      if (firstRef.current) firstRef.current.style.flexBasis = `${r * 100}%`;
-    });
+    // Nothing but this drag moves the pair: read it once, not per event.
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    const origin = column ? ra.top : ra.left;
+    const span = column ? ra.height + rb.height : ra.width + rb.width;
+    const total = shares[gap] + shares[gap + 1];
+    const lo = Math.min(0.5, MIN_SHARE / total);
+    const startShare = total > 0 ? shares[gap] / total : 0.5;
+    let pending = startShare;
+    const write = (r: number) => {
+      a.style.flexGrow = String(r * total);
+      b.style.flexGrow = String((1 - r) * total);
+    };
+    const apply = rafCoalesce(write);
     const move = (ev: PointerEvent) => {
-      const pos = column ? ev.clientY : ev.clientX;
-      pending = clampShare(size > 0 ? (pos - origin) / size : 0.5);
+      if (span <= 0) return;
+      const pos = (column ? ev.clientY : ev.clientX) - origin - DIVIDER / 2;
+      pending = Math.max(lo, Math.min(1 - lo, pos / span));
       apply(pending);
     };
     // Every way a drag ends ends it once: a release commits; a cancel (the
@@ -366,17 +373,16 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
       if (done) return;
       done = true;
       apply.cancel();
-      const rest = commit ? pending : start;
       // The exact rest position lands before the commit: no frame where the
       // DOM and the state disagree.
-      if (firstRef.current) firstRef.current.style.flexBasis = `${rest * 100}%`;
+      write(commit ? pending : startShare);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", escape, true);
       handle.removeEventListener("lostpointercapture", cancel);
       if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture?.(pointerId);
-      if (commit) onRatioChange(pending);
+      if (commit) onWeightsChange(pairAt(shares, gap, pending));
       onDraggingChange?.(false);
       endResizeSession();
     };
@@ -398,23 +404,49 @@ function TwoUp({ column, ratio, onRatioChange, onDraggingChange, first, second }
     window.addEventListener("pointercancel", cancel);
     handle.addEventListener("lostpointercapture", cancel);
   };
-  return (
-    <div ref={containerRef} className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`}>
-      <div ref={firstRef} className="flex flex-col overflow-hidden min-w-0 min-h-0" style={{ flexGrow: 0, flexShrink: 0, flexBasis: `${clampShare(ratio) * 100}%` }}>
-        {first}
-      </div>
+  const out: ReactNode[] = [];
+  children.forEach((child, i) => {
+    if (i > 0) {
+      const gap = i - 1;
+      out.push(
+        <div
+          key={`d${gap}`}
+          onPointerDown={(e) => startDrag(gap, e)}
+          onDoubleClick={() => onWeightsChange(pairAt(shares, gap, 0.5))}
+          title="Drag to resize · double-click to even"
+          className="rl-split-divider shrink-0"
+          role="separator"
+          aria-orientation={column ? "horizontal" : "vertical"}
+          data-split-gap={gap}
+          style={{ flex: `0 0 ${DIVIDER}px`, cursor: column ? "row-resize" : "col-resize", background: "var(--color-rule)", touchAction: "none" }}
+        />,
+      );
+    }
+    out.push(
       <div
-        onPointerDown={startDrag}
-        onDoubleClick={() => onRatioChange(0.5)}
-        title="Drag to resize · double-click to even"
-        className="rl-split-divider shrink-0"
-        role="separator"
-        aria-orientation={column ? "horizontal" : "vertical"}
-        style={{ flex: "0 0 6px", cursor: column ? "row-resize" : "col-resize", background: "var(--color-rule)", touchAction: "none" }}
-      />
-      <div className="flex flex-col overflow-hidden min-w-0 min-h-0 flex-1">{second}</div>
-    </div>
-  );
+        key={`c${i}`}
+        ref={(el) => {
+          cells.current[i] = el;
+        }}
+        className="rl-wb-split-cell flex flex-col overflow-hidden min-w-0 min-h-0"
+        style={{ flexGrow: shares[i], flexShrink: 1, flexBasis: 0 }}
+      >
+        {child}
+      </div>,
+    );
+  });
+  cells.current.length = n;
+  return <div className={`rl-wb-split flex-1 min-w-0 min-h-0 flex ${column ? "flex-col" : "flex-row"}`} data-split-arity={n}>{out}</div>;
+}
+
+/** `shares` with the pair at `gap`, `gap + 1` re-divided: `r` of their
+ *  total to the first. */
+function pairAt(shares: readonly number[], gap: number, r: number): number[] {
+  const next = shares.slice();
+  const total = next[gap] + next[gap + 1];
+  next[gap] = r * total;
+  next[gap + 1] = (1 - r) * total;
+  return next;
 }
 
 function PaneFallback({ region, error, reset }: { region: string; error: Error; reset: () => void }) {

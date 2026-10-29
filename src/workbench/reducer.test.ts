@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   CLOSED_CAP,
   HOME_KEY,
+  MIN_SPLIT_SHARE,
+  clampWeights,
+  shownPaneIds,
   MAX_WALL_TILES,
   activeTabOf,
   emptyWorkbench,
@@ -24,7 +27,7 @@ import {
   type SessionKey,
   type WorkbenchState,
 } from "./model";
-import { DEFAULT_DOOR_DRAFT_KEY, doorDraftKey, neighbourPane, reduce } from "./reducer";
+import { DEFAULT_DOOR_DRAFT_KEY, doorDraftKey, geometricNeighbour, neighbourPane, reduce, type PaneRect } from "./reducer";
 
 const door = (n = 1): PaneInit => ({ kind: "door", data: { draftKey: `d${n}` } });
 const file = (path: string): PaneInit => ({ kind: "file", data: { path } });
@@ -335,6 +338,169 @@ describe("splits", () => {
     s = reduce(s, { type: "focusPane", dir: "down" });
     expect(activeTabOf(set(s))!.focusedPaneId).toBe("b");
     expect(reduce(s, { type: "focusPane", dir: "right" })).toBe(s);
+  });
+});
+
+describe("any split tree (W5)", () => {
+  /** p1 | (a / b): a row of the door and a column of two files. */
+  function three(): WorkbenchState {
+    let s = home(door(1));
+    s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: file("/a"), newPaneId: "a" });
+    return reduce(s, { type: "splitPane", paneId: "a", direction: "column", pane: file("/b"), newPaneId: "b" });
+  }
+  const tab = (s: WorkbenchState) => activeTabOf(set(s))!;
+
+  it("keeps every share at 10 % or more, through any resize", () => {
+    expect(clampWeights([0.98, 0.01, 0.01]).every((w) => w >= MIN_SPLIT_SHARE - 1e-9)).toBe(true);
+    expect(clampWeights([0.98, 0.01, 0.01]).reduce((a, b) => a + b, 0)).toBeCloseTo(1);
+    expect(clampWeights([0.5, 0.5])).toEqual([0.5, 0.5]);
+    let s = three();
+    s = reduce(s, { type: "resizeSplit", path: [], weights: [0.99, 0.01] });
+    const w = (root(s) as { weights: number[] }).weights;
+    expect(w[1]).toBeCloseTo(MIN_SPLIT_SHARE);
+    expect(w[0]).toBeCloseTo(1 - MIN_SPLIT_SHARE);
+    // The same weights again move nothing.
+    expect(reduce(s, { type: "resizeSplit", path: [], weights: w })).toBe(s);
+  });
+
+  it("closing any pane collapses a split left with one child, at any depth", () => {
+    let s = three();
+    s = reduce(s, { type: "closePane", paneId: "a" });
+    expect(root(s)).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "b" }], weights: [0.5, 0.5] });
+    s = reduce(s, { type: "closePane", paneId: "p1" });
+    expect(root(s)).toEqual({ pane: "b" });
+  });
+
+  it("equalize evens every split of the tab, nested ones too", () => {
+    let s = three();
+    s = reduce(s, { type: "resizeSplit", path: [], weights: [0.8, 0.2] });
+    s = reduce(s, { type: "resizeSplit", path: [1], weights: [0.3, 0.7] });
+    s = reduce(s, { type: "equalize" });
+    const r = root(s) as { weights: number[]; children: LayoutNode[] };
+    expect(r.weights).toEqual([0.5, 0.5]);
+    expect((r.children[1] as { weights: number[] }).weights).toEqual([0.5, 0.5]);
+    // A tab of one pane has nothing to even.
+    const one = home(door(1));
+    expect(reduce(one, { type: "equalize" })).toBe(one);
+  });
+
+  it("zooms the focused pane of a split, and puts it back on the second ask", () => {
+    let s = three();
+    expect(tab(s).focusedPaneId).toBe("b");
+    s = reduce(s, { type: "zoomPane" });
+    expect(tab(s).zoomed).toBe("b");
+    expect(shownPaneIds(tab(s))).toEqual(["b"]);
+    expect(kinds(s)).toEqual(["file"]);
+    s = reduce(s, { type: "zoomPane" });
+    expect(tab(s).zoomed).toBeUndefined();
+    expect(shownPaneIds(tab(s))).toEqual(["p1", "a", "b"]);
+    // A tab of one pane does not zoom.
+    const one = home(door(1));
+    expect(reduce(one, { type: "zoomPane" })).toBe(one);
+  });
+
+  it("a zoom ends when focus moves, the tab splits, or the zoomed pane closes", () => {
+    const zoomed = reduce(three(), { type: "zoomPane", paneId: "a" });
+    expect(tab(zoomed).focusedPaneId).toBe("a");
+    expect(tab(reduce(zoomed, { type: "focusPane", paneId: "p1" })).zoomed).toBeUndefined();
+    expect(tab(reduce(zoomed, { type: "splitPane", paneId: "a", direction: "row", pane: door(2), newPaneId: "d" })).zoomed).toBeUndefined();
+    expect(tab(reduce(zoomed, { type: "closePane", paneId: "a" })).zoomed).toBeUndefined();
+    // Another tab's changes leave it zoomed.
+    const other = reduce(zoomed, { type: "openTab", pane: door(3), tabId: "t9", paneId: "p9", activate: false });
+    expect(other.sets.home!.tabs.t1.zoomed).toBe("a");
+  });
+
+  it("the singleton holder is the zoomed pane while the tab is zoomed", () => {
+    let s = home(door(1));
+    s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "browser", data: { workspace: "regular" } }, newPaneId: "b1" });
+    s = reduce(s, { type: "splitPane", paneId: "b1", direction: "row", pane: { kind: "browser", data: { workspace: "regular" } }, newPaneId: "b2" });
+    // "Bring here" asked for b1; b2 is zoomed: b2 holds, b1 is not on screen.
+    s = reduce(s, { type: "zoomPane", paneId: "b2" });
+    expect(singletonHolder(s, "browser", "b1")).toBe("b2");
+    s = reduce(s, { type: "zoomPane" });
+    expect(singletonHolder(s, "browser", "b1")).toBe("b1");
+  });
+
+  it("moves a pane out of its split into a tab of its own, just after, in front", () => {
+    let s = three();
+    s = reduce(s, { type: "openTab", pane: door(5), tabId: "t5", paneId: "p5", activate: false });
+    s = reduce(s, { type: "movePaneToTab", paneId: "a", tabId: "m" });
+    expect(set(s).order).toEqual(["t1", "m", "t5"]);
+    expect(set(s).activeTabId).toBe("m");
+    expect(set(s).tabs.m.root).toEqual({ pane: "a" });
+    expect(set(s).tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "b" }], weights: [0.5, 0.5] });
+    expect(set(s).tabs.t1.focusedPaneId).toBe("b");
+    expect(set(s).panes.a.kind).toBe("file");
+    // A tab of one pane has nothing to move out of.
+    expect(reduce(s, { type: "movePaneToTab", paneId: "a" })).toBe(s);
+  });
+
+  it("merges a dragged tab onto a pane's edge, its whole layout beside the pane", () => {
+    let s = home(door(1), file("/x"));
+    s = reduce(s, { type: "selectTab", tabId: "t1" });
+    s = reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "right" });
+    expect(set(s).order).toEqual(["t1"]);
+    expect(set(s).activeTabId).toBe("t1");
+    expect(set(s).tabs.t1.root).toEqual({ split: true, direction: "row", children: [{ pane: "p1" }, { pane: "p2" }], weights: [0.5, 0.5] });
+    expect(set(s).tabs.t1.focusedPaneId).toBe("p2");
+    // Not remembered for ⌘⇧T: the tab is still open, merged.
+    expect(set(s).closed).toHaveLength(0);
+    // On the top edge of a pane in a row: that pane becomes a column.
+    s = reduce(s, { type: "openTab", pane: file("/y"), tabId: "t3", paneId: "p3", activate: false });
+    s = reduce(s, { type: "mergeTab", tabId: "t3", paneId: "p2", edge: "top" });
+    expect(paneIdsOf(root(s))).toEqual(["p1", "p3", "p2"]);
+    const r = root(s) as { children: LayoutNode[] };
+    expect(isSplit(r.children[1]) && r.children[1].direction).toBe("column");
+  });
+
+  it("a merged row beside a pane of a row joins the row (n-ary), never a row in a row", () => {
+    let s = home(door(1), door(2), door(3));
+    s = reduce(s, { type: "mergeTab", tabId: "t3", intoTabId: "t2", edge: "right" });
+    // t2 is now p2 | p3; merged on the left of t1's p1: one row of three.
+    s = reduce(s, { type: "mergeTab", tabId: "t2", paneId: "p1", edge: "left" });
+    const r = root(s) as { direction: string; children: LayoutNode[]; weights: number[] };
+    expect(r.direction).toBe("row");
+    expect(r.children).toEqual([{ pane: "p2" }, { pane: "p3" }, { pane: "p1" }]);
+    expect(r.weights.reduce((a, b) => a + b, 0)).toBeCloseTo(1);
+    expect(r.weights[2]).toBeCloseTo(0.5);
+  });
+
+  it("merging a tab into itself, or onto a pane it holds, does nothing", () => {
+    const s = home(door(1), door(2));
+    expect(reduce(s, { type: "mergeTab", tabId: "t1", paneId: "p1", edge: "left" })).toBe(s);
+    expect(reduce(s, { type: "mergeTab", tabId: "t1", intoTabId: "t1", edge: "left" })).toBe(s);
+    expect(reduce(s, { type: "mergeTab", tabId: "nope", paneId: "p1", edge: "left" })).toBe(s);
+  });
+
+  it("focus by direction follows the rendered boxes when they are given", () => {
+    // ┌────┬────┐
+    // │ p1 │ a  │
+    // │    ├──┬─┤
+    // │    │b │c│
+    // └────┴──┴─┘
+    const rects: Record<string, PaneRect> = {
+      p1: { left: 0, top: 0, width: 500, height: 800 },
+      a: { left: 506, top: 0, width: 500, height: 400 },
+      b: { left: 506, top: 406, width: 300, height: 394 },
+      c: { left: 812, top: 406, width: 194, height: 394 },
+    };
+    expect(geometricNeighbour(rects, "p1", "right")).toBe("a");
+    expect(geometricNeighbour(rects, "c", "left")).toBe("b");
+    expect(geometricNeighbour(rects, "b", "left")).toBe("p1");
+    expect(geometricNeighbour(rects, "c", "up")).toBe("a");
+    expect(geometricNeighbour(rects, "a", "down")).toBe("b");
+    expect(geometricNeighbour(rects, "a", "up")).toBeNull();
+    expect(geometricNeighbour(rects, "p1", "left")).toBeNull();
+    expect(geometricNeighbour(rects, "missing", "left")).toBeNull();
+    let s = three();
+    s = reduce(s, { type: "splitPane", paneId: "b", direction: "row", pane: file("/c"), newPaneId: "c" });
+    // From c, the tree says left is b; up, the tree's nearest column is a.
+    s = reduce(s, { type: "focusPane", dir: "up", rects });
+    expect(tab(s).focusedPaneId).toBe("a");
+    s = reduce(s, { type: "focusPane", dir: "left", rects });
+    expect(tab(s).focusedPaneId).toBe("p1");
+    // Boxes for panes of another tab are ignored.
+    expect(reduce(s, { type: "focusPane", dir: "right", rects: { p1: rects.p1, zz: rects.a } })).toBe(s);
   });
 });
 

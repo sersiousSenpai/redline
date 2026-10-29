@@ -87,7 +87,7 @@ describe("per-surface error boundaries", () => {
     // chunk of its own (a door, a file, a terminal wall) still crashes alone.
     const leaf = STAGE.slice(STAGE.indexOf("if (!isSplit(node)) {"), STAGE.indexOf("const children = node.children.map("));
     expect(leaf).toContain("<ErrorBoundary region={pane.kind} fallback={(err, reset) => <PaneFallback");
-    expect(leaf).toContain("{renderPane(pane, { visible, focused, active })}");
+    expect(leaf).toContain("{renderPane(pane, { visible: visible && !hiddenByZoom, focused, active: shown })}");
   });
 
   it("every surface region is distinct", () => {

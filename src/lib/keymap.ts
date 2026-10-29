@@ -94,7 +94,13 @@ export const WORKBENCH_KEYMAP: KeyBinding[] = [
   // (CodeMirror's next occurrence prevents the default first).
   { id: "split", keys: ["⌘", "D"], label: "Split right with a new tab's door (in a wall: a new tile)", group: "Layout", wired: true },
   { id: "split-down", keys: ["⌘", "⇧", "D"], label: "Split down with a new tab's door", group: "Layout", wired: true },
-  { id: "zoom-pane", keys: ["⌘", "⇧", "↩"], label: "Zoom the focused tile, or put it back", group: "Layout", wired: true },
+  // W5: any split tree. ⌘\\ splits right with a door everywhere, a wall
+  // included; ⌃⌘ + an arrow moves the focus to the pane that way on screen
+  // (⌘⌥↑ / ⌘⌥↓ stay CodeMirror's); ⌘⌥= evens every split of the tab.
+  { id: "split-anywhere", keys: ["⌘", "\\"], label: "Split right with a new tab's door (a wall too)", group: "Layout", wired: true },
+  { id: "focus-pane", keys: ["⌘", "⌃", "←/→/↑/↓"], label: "Focus the pane that way", group: "Layout", wired: true },
+  { id: "equalize", keys: ["⌘", "⌥", "="], label: "Even out the tab's splits", group: "Layout", wired: true },
+  { id: "zoom-pane", keys: ["⌘", "⇧", "↩"], label: "Zoom the focused pane (in a wall: its tile), or put it back", group: "Layout", wired: true },
 ];
 
 /** The classic shell's registry with the workbench's chords folded in: the
@@ -158,7 +164,7 @@ export const PAGE_ONLY_SIGNALS: readonly string[] = ["next-page", "previous-page
 
 /** Wired bindings a focused page keeps for itself: splits and the zoom act
  *  on the workbench's panes, which a page is not. */
-export const PAGE_KEEPS: readonly string[] = ["split", "split-down", "zoom-pane"];
+export const PAGE_KEEPS: readonly string[] = ["split", "split-down", "split-anywhere", "focus-pane", "equalize", "zoom-pane"];
 
 // ---- The two wired matchers -------------------------------------------------
 
@@ -287,6 +293,37 @@ export function isRailToggleKey(e: KeyComboInfo): boolean {
 export function splitKeyOf(e: KeyComboInfo): "row" | "column" | null {
   if (!commandOnly(e) || e.altKey || e.code !== "KeyD") return null;
   return e.shiftKey ? "column" : "row";
+}
+
+/** ⌘\\ — split the focused pane right with a door, whatever it is (inside a
+ *  wall too, where ⌘D adds a tile). ⌘ only, on the physical key. */
+export function isSplitAnywhereKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && !e.altKey && e.code === "Backslash";
+}
+
+/** ⌃⌘ + an arrow → the direction to move the pane focus; null otherwise.
+ *  Exactly ⌃⌘: ⌘⌥↑ / ⌘⌥↓ are CodeMirror's, ⌃ + an arrow is the shell's
+ *  and macOS's. */
+export function focusPaneKeyOf(e: KeyComboInfo): "left" | "right" | "up" | "down" | null {
+  if (!e.metaKey || !e.ctrlKey || e.altKey || e.shiftKey) return null;
+  switch (e.code) {
+    case "ArrowLeft":
+      return "left";
+    case "ArrowRight":
+      return "right";
+    case "ArrowUp":
+      return "up";
+    case "ArrowDown":
+      return "down";
+    default:
+      return null;
+  }
+}
+
+/** ⌘⌥= — even out every split of the tab. On e.code: ⌥ rewrites e.key
+ *  ("=" → "≠"). */
+export function isEqualizeKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && e.altKey && !e.shiftKey && (e.code === "Equal" || e.code === "NumpadEqual");
 }
 
 /** ⌘⇧↩ — zoom the focused tile (or pane), or put it back. Matched in the

@@ -27,6 +27,9 @@ import {
   isSidebarToggleKey,
   isSnapBackKey,
   isZoomPaneKey,
+  isSplitAnywhereKey,
+  isEqualizeKey,
+  focusPaneKeyOf,
   shellKeymap,
   splitKeyOf,
   shownKeymap,
@@ -332,7 +335,7 @@ describe("the workbench's keys (W1)", () => {
   });
 
   it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
-    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail", "quick-open", "split", "split-down", "zoom-pane"]);
+    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail", "quick-open", "split", "split-down", "split-anywhere", "focus-pane", "equalize", "zoom-pane"]);
     expect(WORKBENCH_KEYMAP.every((b) => b.keys[0] === "⌘")).toBe(true);
     const ids = CLASSIC_KEYMAP.map((b) => b.id);
     // The workbench globals follow the palette; its layout rows lead Layout.
@@ -394,6 +397,51 @@ describe("splits and the zoom (W3 walk fixes)", () => {
     expect(isZoomPaneKey(combo({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
     expect(isFrontDoorKey(cmd({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
     expect(bindingKeys("zoom-pane")).toEqual(["⌘", "⇧", "↩"]);
+  });
+});
+
+describe("any split tree (W5)", () => {
+  const cmd = (over: Parameters<typeof combo>[0]) => combo({ metaKey: true, ...over });
+  it("⌘\\ splits right everywhere, on the physical key; nothing else does", () => {
+    expect(isSplitAnywhereKey(cmd({ key: "\\", code: "Backslash" }))).toBe(true);
+    // A layout that types another character there still splits.
+    expect(isSplitAnywhereKey(cmd({ key: "#", code: "Backslash" }))).toBe(true);
+    expect(isSplitAnywhereKey(cmd({ key: "|", code: "Backslash", shiftKey: true }))).toBe(false);
+    expect(isSplitAnywhereKey(cmd({ key: "«", code: "Backslash", altKey: true }))).toBe(false);
+    expect(isSplitAnywhereKey(combo({ key: "\\", code: "Backslash", ctrlKey: true }))).toBe(false);
+    expect(isSplitAnywhereKey(combo({ key: "\\", code: "Backslash" }))).toBe(false);
+    expect(bindingKeys("split-anywhere")).toEqual(["⌘", "\\"]);
+  });
+  it.each([
+    ["ArrowLeft", "left"],
+    ["ArrowRight", "right"],
+    ["ArrowUp", "up"],
+    ["ArrowDown", "down"],
+  ] as const)("⌃⌘%s focuses the pane %s", (code, dir) => {
+    expect(focusPaneKeyOf(combo({ key: code, code, metaKey: true, ctrlKey: true }))).toBe(dir);
+  });
+  it("only ⌃⌘ moves the pane focus: ⌘⌥↑/↓ (CodeMirror), ⌘⌥←/→ (tabs), ⌃ + an arrow and ⌘ + an arrow are left alone", () => {
+    expect(focusPaneKeyOf(cmd({ key: "ArrowUp", code: "ArrowUp", altKey: true }))).toBeNull();
+    expect(focusPaneKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft", altKey: true }))).toBeNull();
+    expect(tabCycleKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft", altKey: true }))).toBe(-1);
+    expect(tabCycleKeyOf(combo({ key: "ArrowLeft", code: "ArrowLeft", metaKey: true, ctrlKey: true }))).toBeNull();
+    expect(focusPaneKeyOf(combo({ key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true }))).toBeNull();
+    expect(focusPaneKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft" }))).toBeNull();
+    expect(focusPaneKeyOf(combo({ key: "ArrowLeft", code: "ArrowLeft", metaKey: true, ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(focusPaneKeyOf(combo({ key: "h", code: "KeyH", metaKey: true, ctrlKey: true }))).toBeNull();
+  });
+  it("⌘⌥= evens the splits, on e.code (⌥ rewrites the key); ⌘= (the zoom-in) does not", () => {
+    expect(isEqualizeKey(cmd({ key: "≠", code: "Equal", altKey: true }))).toBe(true);
+    expect(isEqualizeKey(cmd({ key: "=", code: "Equal" }))).toBe(false);
+    expect(isEqualizeKey(cmd({ key: "±", code: "Equal", altKey: true, shiftKey: true }))).toBe(false);
+    expect(isEqualizeKey(combo({ key: "=", code: "Equal", altKey: true, ctrlKey: true }))).toBe(false);
+    expect(bindingKeys("equalize")).toEqual(["⌘", "⌥", "="]);
+  });
+  it("a focused web page keeps the pane chords (no menu item or signal carries them)", () => {
+    for (const id of ["split-anywhere", "focus-pane", "equalize"]) {
+      expect(PAGE_KEEPS).toContain(id);
+      expect(PAGE_ROUTES[id]).toBeUndefined();
+    }
   });
 });
 

@@ -186,6 +186,10 @@ export interface Tab {
   id: string;
   root: LayoutNode;
   focusedPaneId: string;
+  /** ⌘⇧↩: the focused pane of a split fills the tab while the rest stay
+   *  mounted, hidden. Always the focused pane: focus moving elsewhere, a
+   *  split, a close or a merge puts the tab back (the reducer keeps it so). */
+  zoomed?: string;
 }
 
 /** A closed tab, kept for ⌘⇧T: the tab, its panes, and where it sat. */
@@ -270,6 +274,34 @@ export function paneIdsOf(node: LayoutNode): string[] {
   return node.children.flatMap(paneIdsOf);
 }
 
+/** The panes a tab shows: its zoomed pane alone, else all of them. */
+export function shownPaneIds(tab: Tab): string[] {
+  const ids = paneIdsOf(tab.root);
+  return tab.zoomed && ids.includes(tab.zoomed) ? [tab.zoomed] : ids;
+}
+
+/** The narrowest share a child of a split keeps (10 %): a pane goes by its
+ *  own ✕, never by a divider dragged to the edge. */
+export const MIN_SPLIT_SHARE = 0.1;
+
+/** `weights` (summing to 1) with every share at least `min`, the shortfall
+ *  taken from the others in proportion to what they have above `min`. */
+export function clampWeights(weights: readonly number[], min: number = MIN_SPLIT_SHARE): number[] {
+  const n = weights.length;
+  if (n === 0) return [];
+  const floor = Math.min(min, 1 / n);
+  const out = weights.slice();
+  for (let pass = 0; pass < n; pass++) {
+    const short = out.reduce((acc, w) => acc + Math.max(0, floor - w), 0);
+    if (short <= 1e-12) break;
+    const spare = out.reduce((acc, w) => acc + Math.max(0, w - floor), 0);
+    for (let i = 0; i < n; i++) {
+      out[i] = out[i] < floor ? floor : out[i] - (spare > 0 ? ((out[i] - floor) / spare) * short : 0);
+    }
+  }
+  return out;
+}
+
 /** Positive weights that sum to 1. Anything unusable becomes an even split. */
 export function normalizeWeights(weights: readonly number[], count: number): number[] {
   if (count <= 0) return [];
@@ -285,10 +317,11 @@ export function activeTabOf(set: TabSet): Tab | null {
   return set.activeTabId ? (set.tabs[set.activeTabId] ?? null) : null;
 }
 
-/** The pane ids a set is showing: its active tab's, in reading order. */
+/** The pane ids a set is showing: its active tab's, in reading order (the
+ *  zoomed one alone while a pane is zoomed). */
 export function visiblePaneIds(set: TabSet): string[] {
   const tab = activeTabOf(set);
-  return tab ? paneIdsOf(tab.root) : [];
+  return tab ? shownPaneIds(tab) : [];
 }
 
 /** Which visible pane of `kind` holds a singleton body (the plan, the
@@ -298,7 +331,7 @@ export function visiblePaneIds(set: TabSet): string[] {
 export function singletonHolder(state: WorkbenchState, kind: PaneKind, asked: string | null): string | undefined {
   const set = state.sets[state.activeKey];
   const tab = set && activeTabOf(set);
-  const ids: unknown[] = tab ? paneIdsOf(tab.root).filter((id) => set.panes[id]?.kind === kind) : [];
+  const ids: unknown[] = tab ? shownPaneIds(tab).filter((id) => set.panes[id]?.kind === kind) : [];
   return [asked, tab?.focusedPaneId, ids[0]].find((id) => ids.includes(id)) as string | undefined;
 }
 
