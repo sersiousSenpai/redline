@@ -9,9 +9,6 @@
 export interface ChatBrief {
   plans: { sessionId: string; title: string; project: string; status: string; day: string }[];
   repos: { name: string; path: string; branch: string | null; dirty: number | null }[];
-  /** `null` = the count could not be read: unknown, not zero. */
-  readyCount: number | null;
-  ready: string[];
   pages: { title: string; url: string }[];
   decisions: string[];
   mission: { title: string; goal: string } | null;
@@ -30,13 +27,12 @@ export interface ChatContext {
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** The chip's one-line summary, e.g. `["6 plans", "3 repos", "4 ready"]`. */
+/** The chip's one-line summary, e.g. `["6 plans", "3 repos", "1 page"]`. */
 export function contextSummary(ctx: ChatContext): string[] {
   const b = ctx.brief;
   const parts: string[] = [];
   if (b.plans.length) parts.push(count(b.plans.length, "plan"));
   if (b.repos.length) parts.push(count(b.repos.length, "repo"));
-  if (b.readyCount != null && b.readyCount > 0) parts.push(`${b.readyCount} ready`);
   if (b.pages.length) parts.push(count(b.pages.length, "page"));
   if (b.decisions.length) parts.push(count(b.decisions.length, "decision"));
   if (b.mission) parts.push("mission");

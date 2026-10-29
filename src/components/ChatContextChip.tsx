@@ -149,13 +149,6 @@ export function ChatContextChip({
               ))}
             </Section>
           )}
-          {b.readyCount != null && b.readyCount > 0 && (
-            <Section title={`Ready work (${b.readyCount})`}>
-              {b.ready.map((t) => (
-                <li key={t}>{t}</li>
-              ))}
-            </Section>
-          )}
           {b.mission && (
             <Section title="Mission">
               <li>

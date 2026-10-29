@@ -8,7 +8,7 @@ const ctx = (over: Partial<ChatContext["brief"]> = {}, memory: string | null = n
   briefBytes: 100,
   memory,
   at: 1,
-  brief: { plans: [], repos: [], readyCount: null, ready: [], pages: [], decisions: [], mission: null, ...over },
+  brief: { plans: [], repos: [], pages: [], decisions: [], mission: null, ...over },
 });
 
 describe("chat room context", () => {
@@ -17,14 +17,11 @@ describe("chat room context", () => {
     const full = ctx({
       plans: [{ sessionId: "s", title: "A", project: "p", status: "building", day: "2026-10-02" }],
       repos: [{ name: "r", path: "/r", branch: "main", dirty: 2 }, { name: "q", path: "/q", branch: null, dirty: null }],
-      readyCount: 4,
       pages: [{ title: "T", url: "https://t" }],
       decisions: ["approval"],
       mission: { title: "M", goal: "G" },
     }, "Found 3 notes");
-    expect(contextSummary(full)).toEqual(["1 plan", "2 repos", "4 ready", "1 page", "1 decision", "mission", "memory"]);
-    // Zero ready work is not news; an unknown count is not zero.
-    expect(contextSummary(ctx({ readyCount: 0 }))).toEqual([]);
+    expect(contextSummary(full)).toEqual(["1 plan", "2 repos", "1 page", "1 decision", "mission", "memory"]);
   });
 
   it("says how the brief was delivered", () => {

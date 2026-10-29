@@ -52,21 +52,4 @@ describe("pillLabel", () => {
     const s = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000, queuedProposals: 2 };
     expect(pillLabel(s, NOW)).toBe("Memory · organized 1m ago");
   });
-
-  it("hides the ready-depth segment at zero", () => {
-    expect(pillLabel(base, NOW, 0)).toBe("Memory");
-    expect(pillLabel(null, NOW, 0)).toBe("Memory");
-    const s = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000 };
-    expect(pillLabel(s, NOW, 0)).toBe("Memory · organized 1m ago");
-  });
-
-  it("appends the ready-depth segment after whichever memory segment won", () => {
-    expect(pillLabel(base, NOW, 3)).toBe("Memory · 3 ready");
-    expect(pillLabel(null, NOW, 1)).toBe("Memory · 1 ready");
-    const organized = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000 };
-    expect(pillLabel(organized, NOW, 3)).toBe("Memory · organized 1m ago · 3 ready");
-    // Held proposals still outrank the memory line; ready depth still appends.
-    const queued = { ...organized, queuedProposals: 2 };
-    expect(pillLabel(queued, NOW, 3)).toBe("Memory · organized 1m ago · 3 ready");
-  });
 });

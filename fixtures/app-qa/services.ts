@@ -807,7 +807,6 @@ const handlers: Record<string, Handler> = {
     lastCompactionTs: null,
     queuedProposals: 0,
   }),
-  work_ready_count: () => 0,
 
   // Hook health: nothing else claims the plan hook.
   scan_hook_conflicts: () => ({ conflicts: [], errors: [], inactivePlugins: [] }),

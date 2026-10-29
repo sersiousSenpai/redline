@@ -74,28 +74,18 @@ export function relativeTime(ts: number | null, now: number): string {
   return `${d}d ago`;
 }
 
-/** The pill's one-line label. Pure. Held proposals outrank the ambient line —
- *  a queued destructive op must never be invisible. The ready-depth segment
- *  (`· N ready`, the work graph's unfiltered ready frontier) appends after
- *  whichever memory segment won, and hides entirely at zero. */
-export function pillLabel(
-  status: MemoryStatus | null,
-  now: number,
-  readyWork = 0,
-): string {
-  const base = (() => {
-    if (!status) return "Memory";
-    if (status.lastOrganizedTs) return `Memory · organized ${relativeTime(status.lastOrganizedTs, now)}`;
-    if (status.itemCount > 0) return `Memory · ${status.itemCount} captured`;
-    return "Memory";
-  })();
-  return readyWork > 0 ? `${base} · ${readyWork} ready` : base;
+/** The pill's one-line label. Pure. */
+export function pillLabel(status: MemoryStatus | null, now: number): string {
+  if (!status) return "Memory";
+  if (status.lastOrganizedTs) return `Memory · organized ${relativeTime(status.lastOrganizedTs, now)}`;
+  if (status.itemCount > 0) return `Memory · ${status.itemCount} captured`;
+  return "Memory";
 }
 
-/** The chip's tooltip: the line the pill wore ("Memory · organized 8m ago ·
- *  1236 ready"), then the counts behind it. Pure. */
-export function chipTitle(status: MemoryStatus | null, now: number, readyWork = 0): string {
-  const line = pillLabel(status, now, readyWork);
+/** The chip's tooltip: the line the pill wore ("Memory · organized 8m
+ *  ago"), then the counts behind it. Pure. */
+export function chipTitle(status: MemoryStatus | null, now: number): string {
+  const line = pillLabel(status, now);
   if (!status) return line === "Memory" ? "Open memory" : line;
   return `${line}\n${status.itemCount} events · ${status.backlog} awaiting organize · ${status.compactedCount} compacted · chain ${status.chainOk ? "OK" : "BROKEN"}`;
 }
@@ -110,9 +100,6 @@ export function MemoryStatusPill({
   onOpenInspector: () => void;
 }) {
   const [status, setStatus] = useState<MemoryStatus | null>(null);
-  // The work graph's unfiltered ready frontier depth — the ambient "· N
-  // ready" segment. Display-only, like the pill's other segments.
-  const [readyWork, setReadyWork] = useState(0);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ bottom: 0, left: 0 });
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -139,13 +126,6 @@ export function MemoryStatusPill({
       }
     } catch {
       /* best-effort: the pill is ambient, never an error surface */
-    }
-    try {
-      // One COUNT(*), not the whole work graph — this runs every 60s and on
-      // every memory event.
-      setReadyWork(await invoke<number>("work_ready_count"));
-    } catch {
-      /* same best-effort rule: no ready count is a hidden segment, not an error */
     }
   }, []);
 
@@ -221,7 +201,7 @@ export function MemoryStatusPill({
         type="button"
         onClick={toggle}
         className="rl-statusbar-quiet rl-mem-chip"
-        title={chipTitle(status, now, readyWork)}
+        title={chipTitle(status, now)}
         aria-label="Memory status"
         aria-expanded={open}
         onPointerEnter={() => setNow(Date.now())}
@@ -281,14 +261,6 @@ export function MemoryStatusPill({
               <span style={muted}>Queued</span>
               <span>
                 {status!.queuedProposals} waiting for a run
-              </span>
-            </div>
-          )}
-          {readyWork > 0 && (
-            <div style={row}>
-              <span style={muted}>Ready work</span>
-              <span>
-                {readyWork} item{readyWork === 1 ? "" : "s"}
               </span>
             </div>
           )}

@@ -13,7 +13,6 @@ import { chipTitle } from "./MemoryStatusPill";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === "memory_status") return { live: true, itemCount: 1236, backlog: 3, lastOrganizedTs: Date.now() - 8 * 60_000, lastOrganizedSummary: null, chainOk: true, compactedCount: 0, reclaimedBytes: 0, lastCompactionTs: null, queuedProposals: 0 };
-    if (cmd === "work_ready_count") return 1236;
     return null;
   }),
 }));
@@ -71,7 +70,7 @@ describe("the chips that came down from the top bar", () => {
     const chip = button(/^Memory status$/)!;
     expect(chip.closest(".rl-footer-status")).not.toBeNull();
     expect(chip.textContent).toBe("Memory");
-    expect(chip.title).toMatch(/^Memory · organized 8m ago · 1236 ready\n1236 events/);
+    expect(chip.title).toMatch(/^Memory · organized 8m ago\n1236 events/);
     await act(async () => chip.click());
     const open = [...host.querySelectorAll("button")].find((b) => b.textContent === "Open Memory →")!;
     await act(async () => open.click());
@@ -80,7 +79,6 @@ describe("the chips that came down from the top bar", () => {
 
   it("its tooltip is the pill's old line", () => {
     expect(chipTitle(null, 0)).toBe("Open memory");
-    expect(chipTitle(null, 0, 4)).toBe("Memory · 4 ready");
   });
 
   it("the live session sits on the right, in its three states, and nothing in it is red", async () => {

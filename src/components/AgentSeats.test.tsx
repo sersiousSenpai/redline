@@ -17,7 +17,6 @@ const ROSTER = [
     charter: "Custom librarian charter straight from the DB",
     trigger: "When you press the test survey button",
     lastRunAt: Date.now() - 2.5 * 3_600_000,
-    itemsFiled: 0,
     inputTokens: 12_400,
     outputTokens: 3_100,
     cacheReadTokens: 70,
@@ -90,7 +89,6 @@ describe("roster formatting helpers", () => {
       charter: "c",
       trigger: "t",
       lastRunAt: null,
-      itemsFiled: 0,
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
@@ -150,9 +148,9 @@ describe("AgentSeats roster rendering", () => {
     // The charter and trigger came from the command, not a built-in string.
     expect(text).toContain("Custom librarian charter straight from the DB");
     expect(text).toContain("When you press the test survey button");
-    // Stats: last run + items filed.
+    // Stats: the last run.
     expect(text).toContain("2h ago");
-    expect(text).toContain("0 filed");
+    expect(text).not.toContain("filed");
     // Burn, rendered as tokens (never money).
     expect(text).toContain("12.4k tok in · 3.1k tok out · 5 spawns");
     expect(text).not.toContain("$");

@@ -10,7 +10,7 @@ describe("kindLabel", () => {
     expect(kindLabel("source_trust")).toBe("Source trust");
   });
 
-  it("covers the work-graph and machine-record kinds", () => {
+  it("covers the machine-record kinds, the retired work graph's still on the chain", () => {
     expect(kindLabel("work_file")).toBe("Work filed");
     expect(kindLabel("work_claim")).toBe("Work claimed");
     expect(kindLabel("work_close")).toBe("Work closed");

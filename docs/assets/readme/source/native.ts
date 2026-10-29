@@ -36,7 +36,6 @@ export async function invoke(command:string,args:any={}){
  case 'preflight_status':return {claude:{found:true,path:'/sample/bin/claude',source:'fixture'},curl:{ok:true,version:'sample'},mode:'active',hook:{installed:true,conflictingUrl:null,settingsPath:'/sample/.claude/settings.json'},skill:{installed:true,outdated:false,skillPath:'/sample/skills/redline-plan-review'}};
  case 'get_relay_config':return {displayName:'Reviewer',signaling:[]};
  case 'memory_status':return {live:true,itemCount:24,backlog:0,lastOrganizedTs:null,lastOrganizedSummary:null,chainOk:true,compactedCount:0,reclaimedBytes:0,lastCompactionTs:null,queuedProposals:0};
- case 'get_work_graph':return {items:[],edges:[],readyIds:[]};
  case 'home_dir':return '/sample';
  case 'get_collab_share':return null;
  case 'get_hook_status':return {installed:true};

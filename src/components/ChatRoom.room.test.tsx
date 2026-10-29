@@ -124,13 +124,13 @@ describe("the chat as a brainstorm room", () => {
       brief: {
         plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved · not built", day: "2026-10-02" }],
         repos: [{ name: "redline", path: "/r", branch: "feature/run-it-batch", dirty: 3 }],
-        readyCount: 4, ready: ["Ship it"], pages: [], decisions: [], mission: null,
+        pages: [], decisions: [], mission: null,
       },
     };
     const onOpenPlan = vi.fn();
     await render({ onOpenPlan });
     const chip = host.querySelector<HTMLButtonElement>("[data-chat-context] button")!;
-    expect(chip.textContent).toContain("Context· 1 plan · 1 repo · 4 ready · memory");
+    expect(chip.textContent).toContain("Context· 1 plan · 1 repo · memory");
     expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
     await act(async () => chip.click());
     const panel = host.querySelector("[data-chat-context-panel]")!;

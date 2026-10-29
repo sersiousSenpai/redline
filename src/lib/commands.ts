@@ -259,8 +259,8 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
     });
     // …and straight to a tab inside it. Two steps ("go to Memory", then find
     // the chip) is the exact friction the palette exists to remove, and these
-    // inner tabs are real destinations — the Catalog and the work graph are
-    // where half the app's held work lives.
+    // inner tabs are real destinations — the Catalog is where half the
+    // app's held work lives.
     for (const t of innerTabs(s.id)) {
       commands.push({
         id: `surface:${s.id}:${t.id}`,

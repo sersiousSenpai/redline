@@ -175,7 +175,7 @@ describe("chat context, out of band", () => {
 describe("the Context chip", () => {
   const CONTEXT = {
     companionId: "chat-1", delivery: "full", briefBytes: 900, memory: null, at: 1,
-    brief: { plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved", day: "2026-10-02" }], repos: [], readyCount: 0, ready: [], pages: [], decisions: [], mission: null },
+    brief: { plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved", day: "2026-10-02" }], repos: [], pages: [], decisions: [], mission: null },
   };
 
   it("arrives in the header mid-turn, and lists over the thread rather than moving it", async () => {

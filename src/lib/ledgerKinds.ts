@@ -48,6 +48,8 @@ export const KIND_LABEL: Record<string, string> = {
   supersede: "Supersede",
   observation: "Observation",
   note: "Note",
+  // The retired work graph's events: nothing appends them now, but the
+  // rows it wrote stay on the hash chain and still render here.
   work_file: "Work filed",
   work_claim: "Work claimed",
   work_close: "Work closed",

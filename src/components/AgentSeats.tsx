@@ -61,7 +61,6 @@ export interface SeatRosterEntry {
   charter: string;
   trigger: string;
   lastRunAt: number | null;
-  itemsFiled: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -1155,7 +1154,7 @@ export function AgentSeats() {
                 textOverflow: "ellipsis",
               }}
             >
-              {formatLastRun(entry.lastRunAt)} · {entry.itemsFiled} filed ·{" "}
+              {formatLastRun(entry.lastRunAt)} ·{" "}
               {burnSummary(entry)}
             </div>
           </div>
