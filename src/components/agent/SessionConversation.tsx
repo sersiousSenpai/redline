@@ -639,23 +639,39 @@ function SessionConversation(props: SessionConversationProps) {
   // with Retry for a session building its approved plan.
   const stopped = agentExited && view.openAsks.length === 0;
   const building = props.planState?.kind === "build";
-  const tail =
-    view.openAsks.length > 0 || terminalAsk || showWorking || stopped ? (
-      <>
+  // What is only a sentence and its answers — a stopped agent, the build
+  // question, a dialog waiting in the terminal — is a notice strip at the
+  // top of the conversation, under the pane header (D42), never a box
+  // floating in the transcript. A question with options to read (a tool's
+  // permission, AskUserQuestion) stays a card at the turn's tail.
+  const planAsks = view.openAsks.filter((ask) => ask.kind === "permission" && ask.toolName === "ExitPlanMode");
+  const cardAsks = view.openAsks.filter((ask) => !planAsks.includes(ask));
+  const harnessName = props.harness === "codex" ? "Codex" : "Claude";
+  const strips =
+    stopped || planAsks.length > 0 || (terminalAsk && !stopped && (proceed || !permission)) ? (
+      <div className="rl-plan-notices rl-convo-notices" role="region" aria-label="Waiting on you">
         {stopped && (
           <StoppedCard
-            harness={props.harness === "codex" ? "Codex" : "Claude"}
+            harness={harnessName}
             building={building}
             onRetry={building ? props.onRetryBuild ?? null : null}
             onShowTerminal={onShowTerminal}
           />
         )}
-        {view.openAsks.map((ask) => (
+        {planAsks.map((ask) => (
           <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
         ))}
         {terminalAsk && !stopped && proceed && <ProceedCard prompt={proceed} onChoose={chooseProceed} onShowTerminal={onShowTerminal} />}
-        {terminalAsk && !stopped && !proceed && permission && <PermissionPromptCard prompt={permission} harness={props.harness === "codex" ? "Codex" : "Claude"} onChoose={choosePermission} onShowTerminal={onShowTerminal} />}
-        {terminalAsk && !stopped && !proceed && !permission && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && !proceed && !permission && <TerminalAskCard harness={harnessName} onShowTerminal={onShowTerminal} />}
+      </div>
+    ) : null;
+  const tail =
+    cardAsks.length > 0 || (terminalAsk && !stopped && !proceed && permission) || showWorking ? (
+      <>
+        {cardAsks.map((ask) => (
+          <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
+        ))}
+        {terminalAsk && !stopped && !proceed && permission && <PermissionPromptCard prompt={permission} harness={harnessName} onChoose={choosePermission} onShowTerminal={onShowTerminal} />}
         {showWorking && <WorkingRow status={status!} onStop={terminalId ? stop : null} />}
       </>
     ) : null;
@@ -690,6 +706,7 @@ function SessionConversation(props: SessionConversationProps) {
         { model: view.model ?? props.fallbackModel ?? null, mode: view.mode ?? props.fallbackMode ?? null, working, needsYou, hasOlder: view.hasOlder, boundSessionId: view.bound?.sessionId ?? null, held: reviewHeld && status?.kind === "plan-ready" ? status.label : null },
         { earlier, stop },
       )}
+      {strips}
       <div ref={scroller} className="rl-convo-scroll rl-thin-scroll-y" onScroll={onScroll}>
         <div className="rl-convo-list" role="log" aria-live="polite" aria-relevant="additions">
           {view.hasOlder && (

@@ -224,9 +224,8 @@ describe("PlanNotices: every notice is one 28 px strip (D41)", () => {
     expect(strip).toContain("overflow: hidden");
     expect(strip).toContain("font-size: var(--rl-text-row)"); // 13 px
     expect(rule(".rl-plan-notice-text")).toContain("text-overflow: ellipsis");
-    const src = readFileSync("src/components/plan/PlanNotices.tsx", "utf8");
-    expect(src).toContain("<X size={16} aria-hidden />");
-    expect(src).not.toContain("rl-plan-notice-line");
+    expect(readFileSync("src/components/plan/NoticeStrip.tsx", "utf8")).toContain("<X size={16} aria-hidden />");
+    expect(readFileSync("src/components/plan/PlanNotices.tsx", "utf8")).not.toContain("rl-plan-notice-line");
   });
 
   it("under 480 px of strip, Copy command folds into a ▾ menu beside Restore", async () => {

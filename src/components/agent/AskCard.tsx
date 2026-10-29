@@ -9,9 +9,15 @@
 //! TUI asks natively, and flips the stage to the terminal. The card is the
 //! glass sheet tier — it floats over the conversation's solid ground — with
 //! the focus rim, because it is the one thing waiting on you.
+//!
+//! What is only a sentence and its answers — the build question, a dialog
+//! waiting in the terminal, a stopped agent — is instead the one notice
+//! strip (plan/NoticeStrip, D42), at the top of the conversation: a card is
+//! for a question with options to read.
 
 import { useState } from "react";
-import { CircleHelp, CirclePause, ShieldQuestion } from "lucide-react";
+import { CircleHelp, ShieldQuestion } from "lucide-react";
+import { NoticeStrip } from "../plan/NoticeStrip";
 import { answerAsk } from "./convo/api";
 import type { AskAnswer, AskQuestion, ConvoAsk } from "./convo/types";
 import type { PermissionPrompt, ProceedPrompt } from "./convo/proceedPrompt";
@@ -41,6 +47,35 @@ export function AskCard({ ask, onShowTerminal }: AskCardProps) {
     );
   };
   const busy = sending !== null;
+  // ExitPlanMode asking leave to build is the CLI's "Ready to code?": a
+  // sentence and its three answers, so a strip.
+  if (ask.kind === "permission" && ask.toolName === "ExitPlanMode") {
+    const always = (ask.suggestions?.length ?? 0) > 0;
+    return (
+      <NoticeStrip
+        title="Ready to build this plan?"
+        detail={failed ? "That answer didn't go through — try again, or answer in the terminal." : null}
+        tip={always && ask.rule ? `Yes, accept edits: ${ask.rule}` : undefined}
+        attrs={{ "data-ask": "permission" }}
+        label="Ready to build this plan?"
+      >
+        <button type="button" className="rl-plan-notice-btn" data-primary="" disabled={busy} onClick={() => send({ kind: "allow" })}>
+          {sending === "allow" ? "Starting…" : "Yes, build"}
+        </button>
+        {always && (
+          <button type="button" className="rl-plan-notice-btn" disabled={busy} title={ask.rule ?? undefined} onClick={() => send({ kind: "always" })}>
+            {sending === "always" ? "Starting…" : "Yes, accept edits"}
+          </button>
+        )}
+        <button type="button" className="rl-plan-notice-btn" disabled={busy} onClick={() => send({ kind: "deny" })}>
+          {sending === "deny" ? "Keeping…" : "Keep planning"}
+        </button>
+        <button type="button" className="rl-plan-notice-btn" disabled={busy} onClick={() => send({ kind: "terminal" })}>
+          Answer in terminal
+        </button>
+      </NoticeStrip>
+    );
+  }
   const toTerminal = (
     <button type="button" className="rl-ask-terminal" disabled={busy} onClick={() => send({ kind: "terminal" })}>
       Answer in terminal
@@ -82,29 +117,27 @@ function Permission({
   terminal: React.ReactNode;
 }) {
   // Always passes the payload's own suggestions back; with none there is no
-  // rule to add, so there is no Always.
+  // rule to add, so there is no Always. (ExitPlanMode's leave to build is
+  // the strip above, never this card.)
   const always = (ask.suggestions?.length ?? 0) > 0;
-  // The CLI's own "Ready to code? Would you like to proceed?" — ExitPlanMode
-  // asking for leave to build — reads as that question, not as a tool name.
-  const plan = ask.toolName === "ExitPlanMode";
   return (
     <>
       <div className="rl-ask-head">
         <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
-        <span>{plan ? "Ready to build this plan?" : `Allow ${ask.toolName}?`}</span>
+        <span>{`Allow ${ask.toolName}?`}</span>
       </div>
-      {ask.summary && !plan && <code className="rl-ask-summary">{ask.summary}</code>}
+      {ask.summary && <code className="rl-ask-summary">{ask.summary}</code>}
       <div className="rl-ask-actions">
         <button type="button" className="rl-ask-btn" data-primary disabled={busy} onClick={() => onAnswer({ kind: "allow" })}>
-          {sending === "allow" ? (plan ? "Starting…" : "Allowing…") : plan ? "Yes, build" : "Allow once"}
+          {sending === "allow" ? "Allowing…" : "Allow once"}
         </button>
         {always && (
           <button type="button" className="rl-ask-btn" disabled={busy} title={ask.rule ?? undefined} onClick={() => onAnswer({ kind: "always" })}>
-            {sending === "always" ? (plan ? "Starting…" : "Allowing…") : plan ? "Yes, accept edits" : "Always"}
+            {sending === "always" ? "Allowing…" : "Always"}
           </button>
         )}
         <button type="button" className="rl-ask-btn" data-danger disabled={busy} onClick={() => onAnswer({ kind: "deny" })}>
-          {sending === "deny" ? (plan ? "Keeping…" : "Denying…") : plan ? "Keep planning" : "Deny"}
+          {sending === "deny" ? "Denying…" : "Deny"}
         </button>
         <span className="rl-ask-spacer" />
         {terminal}
@@ -120,18 +153,11 @@ function Permission({
  *  "Needs you" with nothing to answer. */
 export function TerminalAskCard({ harness, onShowTerminal }: { harness: string; onShowTerminal: () => void }) {
   return (
-    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label="Question in the terminal" data-ask="terminal">
-      <div className="rl-ask-head">
-        <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
-        <span>{harness} is asking in the terminal</span>
-      </div>
-      <div className="rl-ask-actions">
-        <span className="rl-ask-spacer" />
-        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
-          Answer in terminal
-        </button>
-      </div>
-    </section>
+    <NoticeStrip title={`${harness} is asking in the terminal`} label="Question in the terminal" attrs={{ "data-ask": "terminal" }}>
+      <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={onShowTerminal}>
+        Answer in terminal
+      </button>
+    </NoticeStrip>
   );
 }
 
@@ -253,33 +279,32 @@ export function StoppedCard({ harness, building, onRetry, onShowTerminal }: {
   onShowTerminal: () => void;
 }) {
   const [retrying, setRetrying] = useState(false);
+  const title = building ? `${harness} stopped before the build finished` : `${harness} stopped`;
   return (
-    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label={`${harness} stopped`} data-ask="stopped">
-      <div className="rl-ask-head">
-        <CirclePause size={14} aria-hidden className="rl-ask-icon" />
-        <span>{building ? `${harness} stopped before the build finished` : `${harness} stopped`}</span>
-      </div>
-      <div className="rl-ask-actions">
-        {onRetry && (
-          <button
-            type="button"
-            className="rl-ask-btn"
-            data-primary
-            disabled={retrying}
-            onClick={() => {
-              setRetrying(true);
-              onRetry();
-            }}
-          >
-            {retrying ? "Resuming…" : "Retry"}
-          </button>
-        )}
-        <span className="rl-ask-spacer" />
-        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
-          Open Terminal
+    <NoticeStrip
+      title={title}
+      tip={building ? "Retry resumes the same conversation to carry on the build." : `${harness}'s process left its terminal.`}
+      label={`${harness} stopped`}
+      attrs={{ "data-ask": "stopped" }}
+    >
+      {onRetry && (
+        <button
+          type="button"
+          className="rl-plan-notice-btn"
+          data-primary=""
+          disabled={retrying}
+          onClick={() => {
+            setRetrying(true);
+            onRetry();
+          }}
+        >
+          {retrying ? "Resuming…" : "Retry"}
         </button>
-      </div>
-    </section>
+      )}
+      <button type="button" className="rl-plan-notice-btn" onClick={onShowTerminal}>
+        Open terminal
+      </button>
+    </NoticeStrip>
   );
 }
 
@@ -310,33 +335,26 @@ export function ProceedCard({ prompt, onChoose, onShowTerminal }: {
   const approving = prompt.options.filter((o) => o.approves);
   const other = prompt.options.find((o) => !o.approves) ?? null;
   return (
-    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label="Ready to build this plan?" data-ask="proceed">
-      <div className="rl-ask-head">
-        <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
-        <span>Ready to build this plan?</span>
-      </div>
-      <div className="rl-ask-actions">
-        {approving.map((o, i) => (
-          <button key={o.n} type="button" className="rl-ask-btn" data-primary={i === 0 || undefined} disabled={sending !== null} onClick={() => choose(o.n, false)}>
-            {sending === o.n ? "Starting…" : i === 0 ? `Yes, build · ${o.label.replace(/^Yes,\s*(and\s*)?/i, "")}` : o.label}
-          </button>
-        ))}
-        {other && (
-          <button type="button" className="rl-ask-btn" data-danger disabled={sending !== null} onClick={() => choose(other.n, true)}>
-            {other.label}
-          </button>
-        )}
-        <span className="rl-ask-spacer" />
-        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
-          Answer in terminal
+    <NoticeStrip
+      title="Ready to build this plan?"
+      detail={failed ? "That answer didn't reach the terminal — try again, or answer there." : null}
+      label="Ready to build this plan?"
+      attrs={{ "data-ask": "proceed" }}
+    >
+      {approving.map((o, i) => (
+        <button key={o.n} type="button" className="rl-plan-notice-btn" data-primary={i === 0 ? "" : undefined} disabled={sending !== null} title={o.label} onClick={() => choose(o.n, false)}>
+          {sending === o.n ? "Starting…" : i === 0 ? `Yes, build · ${o.label.replace(/^Yes,\s*(and\s*)?/i, "")}` : o.label}
         </button>
-      </div>
-      {failed && (
-        <p className="rl-ask-note" role="alert">
-          That answer didn't reach the terminal. Try again, or answer there.
-        </p>
+      ))}
+      {other && (
+        <button type="button" className="rl-plan-notice-btn" disabled={sending !== null} title={other.label} onClick={() => choose(other.n, true)}>
+          {other.label}
+        </button>
       )}
-    </section>
+      <button type="button" className="rl-plan-notice-btn" onClick={onShowTerminal}>
+        Answer in terminal
+      </button>
+    </NoticeStrip>
   );
 }
 

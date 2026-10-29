@@ -26,6 +26,7 @@ describe("plan.css", () => {
 
   it.each([
     ["src/components/plan/PlanNotices.tsx", /rl-plan-notice[\w-]*/g],
+    ["src/components/plan/NoticeStrip.tsx", /rl-plan-notice[\w-]*/g],
     ["src/components/plan/PlanPanelHeader.tsx", /rl-plan-menu[\w-]*/g],
   ] as const)("every %s class in its family has a rule", (file, family) => {
     const used = classes(file, family);

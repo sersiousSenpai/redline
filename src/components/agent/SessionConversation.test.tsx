@@ -171,7 +171,10 @@ describe("SessionConversation", () => {
     const onShowTerminal = vi.fn();
     await render(props({ onShowTerminal }));
     expect(q('[data-ask="terminal"]')?.textContent).toContain("Claude is asking in the terminal");
-    await act(async () => (q('[data-ask="terminal"] .rl-ask-terminal') as HTMLButtonElement).click());
+    // A strip at the top of the conversation, under the header (D42).
+    expect(q('.rl-convo > .rl-convo-notices [data-ask="terminal"].rl-plan-notice')).not.toBeNull();
+    expect(q('.rl-convo-scroll [data-ask="terminal"]')).toBeNull();
+    await act(async () => (q('[data-ask="terminal"] .rl-plan-notice-btn') as HTMLButtonElement).click());
     expect(onShowTerminal).toHaveBeenCalled();
     await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: true, blocker: null })] }));
     expect(q('[data-ask="terminal"]')).toBeNull();
@@ -185,14 +188,16 @@ describe("SessionConversation", () => {
     await flush();
     expect(q('[data-ask="proceed"]')?.textContent).toContain("Ready to build this plan?");
     expect(q('[data-ask="terminal"]')).toBeNull();
-    const yes = [...host.querySelectorAll<HTMLButtonElement>('[data-ask="proceed"] .rl-ask-btn')][0];
+    expect(q('.rl-convo > .rl-convo-notices [data-ask="proceed"].rl-plan-notice')).not.toBeNull();
+    const yes = [...host.querySelectorAll<HTMLButtonElement>('[data-ask="proceed"] .rl-plan-notice-btn')][0];
     expect(yes.textContent).toContain("Yes, build");
     await act(async () => yes.click());
     await flush();
     expect(log.filter((l) => l.startsWith("keys"))).toEqual(['keys term-1 "\\r"']);
     // Its other choice is the prompt's own words, and goes to the terminal.
-    expect([...host.querySelectorAll('[data-ask="proceed"] .rl-ask-btn')].map((b) => b.textContent)).toContain("Tell Claude what to change");
-    await act(async () => (q('[data-ask="proceed"] .rl-ask-terminal') as HTMLButtonElement).click());
+    const choices = [...host.querySelectorAll<HTMLButtonElement>('[data-ask="proceed"] .rl-plan-notice-btn')];
+    expect(choices.map((b) => b.textContent)).toContain("Tell Claude what to change");
+    await act(async () => choices.find((b) => b.textContent === "Answer in terminal")!.click());
     expect(onShowTerminal).toHaveBeenCalled();
     api.screen = "";
   });
@@ -570,6 +575,8 @@ describe("the work drawer and the pane's keys (W2)", () => {
       expect(q(".rl-convo-working")).toBeNull();
       const card = q("[data-ask='stopped']");
       expect(card?.textContent).toMatch(/Claude stopped before the build finished/);
+      // The strip under the pane header, not a box in the transcript (D42).
+      expect(card?.matches(".rl-convo > .rl-convo-notices > .rl-plan-notice")).toBe(true);
       const retry = [...card!.querySelectorAll("button")].find((b) => b.textContent === "Retry") as HTMLButtonElement;
       expect(retry).toBeTruthy();
       await act(async () => retry.click());

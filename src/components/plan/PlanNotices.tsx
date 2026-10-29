@@ -25,13 +25,13 @@
 //! rides the strip's tooltip, never a paragraph under it. Dismissable where
 //! classic's was.
 
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useRef } from "react";
 import "./plan.css";
 
 import { Panel, useClickPopover } from "../popover";
 import { FixControl } from "../ReadinessStrip";
-import { TermStateBadge } from "../TermStateBadge";
+import { NoticeStrip as Notice } from "./NoticeStrip";
 import type { ReadinessItem } from "../../lib/readiness";
 import type { RestoreHarness } from "../../lib/restoreHarness";
 import type { AutoNotice } from "../../lib/autoResume";
@@ -121,49 +121,6 @@ export function PlanNotices(p: PlanNoticesProps) {
             Review them
           </button>
         </Notice>
-      )}
-    </div>
-  );
-}
-
-/** One strip: the mark, ONE text element (the sentence and its faint
- *  detail, ellipsized), the actions, the ×. Never a second line. */
-function Notice({
-  title,
-  detail,
-  tip,
-  mark = "needs",
-  quiet = false,
-  onDismiss,
-  children,
-}: {
-  /** The one short sentence. */
-  title: string;
-  /** A faint tail on the same line: the live progress, the failure. */
-  detail?: string | null;
-  /** The explanation, on hover. */
-  tip?: string;
-  mark?: "needs" | "working";
-  quiet?: boolean;
-  onDismiss?: () => void;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className="rl-plan-notice" data-tone={quiet ? "quiet" : "redline"} role={quiet ? undefined : "status"} title={tip}>
-      {!quiet && (
-        <span className="rl-plan-notice-mark">
-          <TermStateBadge state={mark === "working" ? "working" : "needs-you"} size={8} />
-        </span>
-      )}
-      <span className="rl-plan-notice-text">
-        {title}
-        {detail && <span className="rl-plan-notice-faint"> {detail}</span>}
-      </span>
-      {children && <span className="rl-plan-notice-actions">{children}</span>}
-      {onDismiss && (
-        <button type="button" className="rl-plan-notice-x" onClick={onDismiss} aria-label={`Dismiss: ${title}`} title="Dismiss">
-          <X size={16} aria-hidden />
-        </button>
       )}
     </div>
   );

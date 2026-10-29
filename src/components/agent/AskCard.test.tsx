@@ -56,10 +56,12 @@ describe("AskCard", () => {
 
   it("ExitPlanMode's leave to build reads as the CLI's proceed question, with its three answers", async () => {
     await act(async () => root.render(<AskCard ask={permission({ toolName: "ExitPlanMode", summary: "<!-- REDLINE_RESTORE:x -->", suggestions: [{}] })} onShowTerminal={() => {}} />));
-    expect(host.querySelector(".rl-ask-head")?.textContent).toBe("Ready to build this plan?");
-    expect(host.querySelector(".rl-ask-summary")).toBeNull();
-    expect([...host.querySelectorAll(".rl-ask-btn")].map((b) => b.textContent)).toEqual(["Yes, build", "Yes, accept edits", "Keep planning"]);
-    await act(async () => (host.querySelectorAll(".rl-ask-btn")[0] as HTMLButtonElement).click());
+    // A sentence and its answers: the one notice strip, not a card (D42).
+    expect(host.querySelector(".rl-ask-card")).toBeNull();
+    expect(host.querySelector(".rl-plan-notice-text")?.textContent).toBe("Ready to build this plan?");
+    expect(host.textContent).not.toContain("REDLINE_RESTORE");
+    expect([...host.querySelectorAll(".rl-plan-notice-btn")].map((b) => b.textContent)).toEqual(["Yes, build", "Yes, accept edits", "Keep planning", "Answer in terminal"]);
+    await act(async () => (host.querySelectorAll(".rl-plan-notice-btn")[0] as HTMLButtonElement).click());
     expect(answers).toEqual([{ askId: "a1", answer: { kind: "allow" } }]);
   });
 
@@ -90,11 +92,16 @@ describe("StoppedCard: an agent that died is never a bare needs-you", () => {
     const onRetry = vi.fn(), onShowTerminal = vi.fn();
     await act(async () => root.render(<StoppedCard harness="Claude" building onRetry={onRetry} onShowTerminal={onShowTerminal} />));
     expect(host.textContent).toContain("Claude stopped before the build finished");
+    // The notice strip: amber pulse, one sentence, text actions — no box, no
+    // filled button (D42).
+    expect(host.querySelector(".rl-ask-card, .rl-ask-btn")).toBeNull();
+    expect(host.querySelector(".rl-plan-notice .rl-plan-notice-mark .rl-term-badge--needs")).not.toBeNull();
+    expect([...host.querySelectorAll(".rl-plan-notice-btn")].map((b) => b.textContent)).toEqual(["Retry", "Open terminal"]);
     const retry = [...host.querySelectorAll("button")].find((b) => b.textContent === "Retry")!;
     await act(async () => retry.click());
     expect(onRetry).toHaveBeenCalledOnce();
     expect(retry.textContent).toBe("Resuming…");
-    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Open Terminal")!.click());
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Open terminal")!.click());
     expect(onShowTerminal).toHaveBeenCalledOnce();
   });
 
