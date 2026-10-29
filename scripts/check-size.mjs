@@ -91,6 +91,9 @@ const binaryPath = join(root, "src-tauri", "target", "release", "redline");
 // the application it installs, and a dependency creeping in would show up here
 // as megabytes rather than as nothing at all.
 const helperPath = join(root, "src-tauri", "target", "release", "redline-activate");
+// The terminal helper ships beside the main executable (Contents/MacOS) and
+// links only its codec and libc; same reasoning as the activation helper.
+const ptydPath = join(root, "src-tauri", "target", "release", "redline-ptyd");
 const boot = bootPathJs();
 const checks = [
   {
@@ -107,6 +110,12 @@ const checks = [
     actual: existsSync(helperPath) ? statSync(helperPath).size : null,
     limit: budget.helperBinBytes,
     hint: "built by `cargo build --release -p redline-activate`; `tauri build` alone does not produce it",
+  },
+  {
+    name: "terminal helper (src-tauri/target/release/redline-ptyd)",
+    actual: existsSync(ptydPath) ? statSync(ptydPath).size : null,
+    limit: budget.ptydBinBytes,
+    hint: "built by `cargo build --release -p redline-ptyd`; a jump of megabytes means a dependency crept in",
   },
   {
     name: `boot-path JS (${boot ? boot.parts.join(" + ") : "dist/index.html entry + modulepreloads"})`,

@@ -15,6 +15,7 @@
 //! from this list to stop them.
 
 static PTY: &str = include_str!("../src/pty.rs");
+static PTY_LOCAL: &str = include_str!("../src/pty_local.rs");
 static STATE: &str = include_str!("../src/state.rs");
 static LIB: &str = include_str!("../src/lib.rs");
 static FORK: &str = include_str!("../src/fork.rs");
@@ -30,6 +31,24 @@ const CONTRACT: &[(&str, &str, &str, &str)] = &[
         PTY,
         "\"pty_exit\"",
         "a shell dying under the user is the busiest surface's loudest failure",
+    ),
+    (
+        "pty_local.rs",
+        PTY_LOCAL,
+        "\"pty_exit\"",
+        "the in-process backend's shells die under the user too",
+    ),
+    (
+        "pty.rs",
+        PTY,
+        "\"ptyd_unavailable\"",
+        "a helper that can't start means this boot's terminals die with the app, which the user was promised they would not",
+    ),
+    (
+        "pty.rs",
+        PTY,
+        "\"ptyd_crash\"",
+        "the terminal helper dying ends every kept terminal at once",
     ),
     (
         "state.rs",

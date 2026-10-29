@@ -73,6 +73,10 @@ uuid = { version = "1", features = ["v4"] }
 # `poll` for the end-of-turn model's pipe, `statvfs` for the studio voice's
 # disk check.
 libc = "0.2"
+# The terminal helper's frame codec and its socket/peer rules (the helper
+# binary itself is a sibling executable, never linked).
+redline-pty-proto = { path = "crates/redline-pty-proto" }
+redline-ptyd = { path = "crates/redline-ptyd" }
 # SHA-256 for the append-only prompt/decision ledger's hash chain
 # (entry_hash = sha256(prev_hash ‖ canonical-json(event))). Not previously a dep.
 sha2 = "0.10"

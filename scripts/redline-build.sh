@@ -39,6 +39,12 @@ npm install
 log "Building the activation helper…"
 cargo build --release --manifest-path src-tauri/Cargo.toml -p redline-activate
 
+# The terminal helper: the process that owns the terminals so they outlive
+# Redline. A sibling of the main executable (Contents/MacOS), so the signing
+# loop below signs it with everything else there, before the bundle.
+log "Building the terminal helper…"
+cargo build --release --manifest-path src-tauri/Cargo.toml -p redline-ptyd
+
 # Sign with a stable identity when one is available. macOS keys TCC folder
 # permissions (Downloads, Desktop, …) to the code signature; the default
 # ad-hoc signature changes on every build, so each reinstall would reset the
@@ -71,6 +77,9 @@ RESOURCES="$APP_SRC/Contents/Resources"
 mkdir -p "$RESOURCES"
 cp src-tauri/target/release/redline-activate "$RESOURCES/redline-activate"
 chmod 755 "$RESOURCES/redline-activate"
+# The app finds it as `current_exe().parent()/redline-ptyd`.
+cp src-tauri/target/release/redline-ptyd "$APP_SRC/Contents/MacOS/redline-ptyd"
+chmod 755 "$APP_SRC/Contents/MacOS/redline-ptyd"
 
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 DIRTY=""

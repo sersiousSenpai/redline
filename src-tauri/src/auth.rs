@@ -664,8 +664,72 @@ pub fn route_spec(path: &str, method: &str) -> Option<&'static RouteSpec> {
 /// only, and overwritten by every boot, so a stale file authenticates
 /// against nothing.
 pub fn daemon_token() -> &'static str {
-    static TOKEN: OnceLock<String> = OnceLock::new();
-    TOKEN.get_or_init(mint_token)
+    TOKEN.get_or_mint()
+}
+
+/// The master token's one cell. Minted on first use, or **seeded** first: a
+/// booting app that finds a terminal helper still running (its shells
+/// outlived the last launch) takes the token those shells carry, so their
+/// curl bridges keep authenticating. That is the token lease (PTY helper
+/// plan P6): the token lives as long as the oldest terminal holding it.
+static TOKEN: TokenCell = TokenCell::new();
+
+pub struct TokenCell(OnceLock<String>);
+
+impl TokenCell {
+    pub const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    pub fn get_or_mint(&self) -> &str {
+        self.0.get_or_init(mint_token)
+    }
+
+    /// Seed the cell before anything reads it. False once it holds a token
+    /// (seeding never replaces one already handed out).
+    pub fn seed(&self, token: &str) -> bool {
+        !token.is_empty() && self.0.set(token.to_string()).is_ok()
+    }
+}
+
+impl Default for TokenCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Seed this boot's master token with a helper's lease. Called at setup,
+/// before the server binds and before anything mints.
+pub fn seed_daemon_token(token: &str) -> bool {
+    TOKEN.seed(token)
+}
+
+/// A fresh token, not yet this boot's: offered to a running helper, which
+/// keeps its own lease if it has one.
+pub fn mint_candidate() -> String {
+    mint_token()
+}
+
+/// Other masters this boot honors: the leases of helpers whose shells carry
+/// an older boot's token (an upgraded helper beside a retiring one).
+fn leased() -> &'static RwLock<Vec<String>> {
+    static LEASED: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
+    LEASED.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+pub fn accept_leased_token(token: &str) {
+    if token.is_empty() || ct_eq(token, daemon_token()) {
+        return;
+    }
+    let mut leased = leased().write().unwrap_or_else(|e| e.into_inner());
+    if !leased.iter().any(|t| ct_eq(t, token)) {
+        leased.push(token.to_string());
+    }
+}
+
+/// This boot's master token, or a lease a live helper's shells hold.
+pub fn is_master_token(token: &str) -> bool {
+    ct_eq(token, daemon_token()) || leased().read().unwrap_or_else(|e| e.into_inner()).iter().any(|t| ct_eq(t, token))
 }
 
 /// File under the app data dir carrying [`daemon_token`] for this boot.
@@ -824,14 +888,14 @@ pub fn authorize(path: &str, method: &str, bearer: Option<&str>) -> Result<(), D
         // never distinguishes "unknown token" from "known but insufficient".
         RouteClass::MasterOnly => {
             return match bearer {
-                Some(token) if ct_eq(token, daemon_token()) => Ok(()),
+                Some(token) if is_master_token(token) => Ok(()),
                 _ => Err(Denial::MasterTokenRequired),
             };
         }
         RouteClass::Protected(scope) => scope,
     };
     let token = bearer.ok_or(Denial::MissingToken { scope })?;
-    if ct_eq(token, daemon_token()) {
+    if is_master_token(token) {
         return Ok(());
     }
     let grants = grants().read().expect("grants lock");
@@ -1017,6 +1081,35 @@ pub fn render_api_doc() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seeded_token_is_the_one_handed_out_and_seeding_never_replaces_one() {
+        // A boot that adopted a helper: its lease, not a fresh mint.
+        let cell = TokenCell::new();
+        assert!(cell.seed("lease-from-the-helper"));
+        assert_eq!(cell.get_or_mint(), "lease-from-the-helper");
+        assert!(!cell.seed("another"), "a token already handed out is never replaced");
+        assert_eq!(cell.get_or_mint(), "lease-from-the-helper");
+        // A boot with no helper mints, and a later seed changes nothing.
+        let fresh = TokenCell::new();
+        let minted = fresh.get_or_mint().to_string();
+        assert_eq!(minted.len(), 64);
+        assert!(!fresh.seed("lease"));
+        assert_eq!(fresh.get_or_mint(), minted);
+        assert!(!TokenCell::new().seed(""), "an empty lease is no lease");
+    }
+
+    #[test]
+    fn a_leased_token_authorizes_as_the_master_and_an_unknown_one_does_not() {
+        let master = daemon_token().to_string();
+        assert!(is_master_token(&master));
+        assert!(!is_master_token("an-older-boots-token"));
+        accept_leased_token("an-older-boots-token");
+        assert!(is_master_token("an-older-boots-token"), "a retiring helper's shells keep their bridges");
+        let protected = all_routes().iter().find(|r| matches!(r.class, RouteClass::Protected(_))).expect("a protected route");
+        assert!(authorize(protected.path, protected.method, Some("an-older-boots-token")).is_ok());
+        assert!(authorize(protected.path, protected.method, Some("never-leased")).is_err());
+    }
 
     /// The router source, compile-time embedded so the drift test needs no
     /// runtime paths. Extraction below is deliberately dumb: every string

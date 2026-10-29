@@ -3917,6 +3917,8 @@ dependencies = [
  "portable-pty",
  "pulldown-cmark",
  "redline-extension-abi",
+ "redline-pty-proto",
+ "redline-ptyd",
  "regex-lite",
  "reqwest",
  "rubato",

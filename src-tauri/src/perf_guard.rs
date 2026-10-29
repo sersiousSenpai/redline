@@ -129,8 +129,17 @@ mod tests {
     /// reads that table instead of forking per hop; `pty_cwds` forks nothing.
     #[test]
     fn pty_procs_forks_once_for_the_whole_fleet() {
-        let src = include_str!("pty.rs");
-        let start = src.find("pub fn pty_procs(").unwrap();
+        // The command (pty.rs, the facade over both backends) hands one
+        // snapshot of every terminal to the one assembler (pty_local.rs).
+        let facade = include_str!("pty.rs");
+        let start = facade.find("pub fn pty_procs(").unwrap();
+        let body = &facade[start..start + facade[start..].find("\n}\n").unwrap()];
+        assert!(!body.contains("Command::new("), "{body}");
+        assert!(body.contains("procs_for("), "{body}");
+        let facade_cwds = &facade[facade.find("pub fn pty_cwds(").unwrap()..];
+        assert!(!facade_cwds[..facade_cwds.find("\n}\n").unwrap()].contains("Command::new("));
+        let src = include_str!("pty_local.rs");
+        let start = src.find("pub(crate) fn procs_for(").unwrap();
         let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
         assert_eq!(body.matches("Command::new(").count(), 1, "{body}");
         assert!(body.contains("libproc::table()"), "the process table is a kernel read");
@@ -656,15 +665,27 @@ mod tests {
             src.contains("on_output: Channel<Response>"),
             "pty.rs: PTY output must stream over a per-terminal raw-byte Channel"
         );
+        // Both backends coalesce: in-process, and in the helper (its frames
+        // go straight to the same Channel).
         assert!(
-            src.contains("struct Coalescer"),
-            "pty.rs: PTY reads must coalesce (batch) before reaching the frontend"
+            include_str!("pty_local.rs").contains("struct Coalescer"),
+            "pty_local.rs: PTY reads must coalesce (batch) before reaching the frontend"
         );
         assert!(
-            !src.contains("pty-output"),
-            "pty.rs: the per-read `pty-output` event reintroduces the firehose \
-             freeze — stream over the Channel instead"
+            include_str!("../crates/redline-ptyd/src/outlet.rs").contains("COALESCE_WINDOW"),
+            "redline-ptyd: the helper's output must coalesce too"
         );
+        assert!(
+            include_str!("ptyd.rs").contains("channel.send(Response::new(bytes))"),
+            "ptyd.rs: the helper's output must reach the per-terminal Channel"
+        );
+        for (file, text) in [("pty.rs", src), ("pty_local.rs", include_str!("pty_local.rs")), ("ptyd.rs", include_str!("ptyd.rs"))] {
+            assert!(
+                !text.contains("pty-output"),
+                "{file}: the per-read `pty-output` event reintroduces the firehose \
+                 freeze — stream over the Channel instead"
+            );
+        }
     }
 
     /// The studio voice's audio streams over one raw-byte Channel per request,

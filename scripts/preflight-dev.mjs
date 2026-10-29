@@ -27,7 +27,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const VITE_PORT = 1420;
 const DAEMON_PORT = 7676;
@@ -187,6 +187,29 @@ function clearForeignViteHolder() {
     }
   }
 }
+
+// The terminal helper (`redline-ptyd`) is a sibling executable the app finds
+// beside itself (target/debug/redline-ptyd), and `tauri dev`'s `cargo run`
+// builds only the app package. Build it here, in the background so vite
+// starts at once: a small crate, done long before the first terminal opens.
+// A helper already running keeps serving from its old binary; the app's
+// handshake decides whether to adopt it.
+function buildTerminalHelper() {
+  if (process.env.REDLINE_SKIP_PTYD_BUILD) return;
+  const manifest = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "src-tauri", "Cargo.toml");
+  if (!fs.existsSync(manifest)) return;
+  try {
+    const child = spawn("cargo", ["build", "--quiet", "--manifest-path", manifest, "-p", "redline-ptyd"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // No cargo: the app falls back to in-process terminals and says so.
+  }
+}
+buildTerminalHelper();
 
 const daemonBusy = await portInUse(DAEMON_PORT);
 const viteBusy = await portInUse(VITE_PORT);

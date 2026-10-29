@@ -115,6 +115,8 @@ mod project;
 #[cfg(target_os = "macos")]
 mod promised_drop;
 mod pty;
+mod pty_local;
+mod ptyd;
 mod push;
 mod guided;
 mod git_gui;
@@ -2709,7 +2711,7 @@ async fn handle_extension_panel(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim);
     let allowed = match bearer {
-        Some(t) if t == auth::daemon_token() => true,
+        Some(t) if auth::is_master_token(t) => true,
         Some(t) => auth::grant_for(t).map(|g| g.name == name).unwrap_or(false),
         None => false,
     };
@@ -11661,6 +11663,8 @@ pub fn run() {
             asks::convo_answer_ask,
             pty::pty_submit,
             pty::pty_interrupt,
+            pty::pty_set_meta,
+            pty::pty_reap,
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
@@ -12024,15 +12028,6 @@ pub fn run() {
                     .app_data_dir()
                     .expect("could not resolve app data dir"),
             };
-            // This boot's master token, on disk (0600) for the dev preflight:
-            // a later `npm run tauri dev` finds a headless leftover of this
-            // instance holding :1420/:7676 and needs a credential we spawned
-            // nothing to hand it. Boot survives a failed write — only the
-            // retire-a-headless-instance path degrades (to a manual kill).
-            match auth::persist_daemon_token(&data_dir) {
-                Ok(path) => tracing::info!(path = %path.display(), "persisted daemon token"),
-                Err(e) => tracing::warn!(error = %e, "could not persist daemon token"),
-            }
             let db_path = data_dir.join("redline.db");
             tracing::info!(path = %db_path.display(), "opening sqlite database");
             // A failed open is fatal, but it must not be fatal like THIS was:
@@ -12093,7 +12088,44 @@ pub fn run() {
             let claims = ClaimFlags::new();
             app.manage(claims.clone());
 
-            app.manage(pty::PtyState::new());
+            // The terminals. With the helper on (`redline.terminals.helper`,
+            // read once here, before any spawn), they live in `redline-ptyd`
+            // and outlive the app. A helper still running from the last launch
+            // is adopted now (a connect with a 200 ms budget, never a spawn:
+            // nothing starts a process at boot), and its token lease seeds
+            // this boot's master token before the server binds, so the curl
+            // bridges of the agents it kept keep authenticating.
+            let pty_state = {
+                let on = settings
+                    .db
+                    .get_setting(pty::HELPER_SETTING)
+                    .map(|v| v == "on")
+                    .unwrap_or(pty::HELPER_DEFAULT);
+                let cfg = (on && !runtime_profile::current().is_probe())
+                    .then(|| ptyd::HelperConfig::for_app(&data_dir))
+                    .flatten();
+                match cfg {
+                    Some(cfg) => pty::PtyState::with_helper(cfg),
+                    None => pty::PtyState::new(),
+                }
+            };
+            pty_state.start_events(app.handle().clone());
+            if let Some(lease) = pty_state.adopt_running(&auth::mint_candidate()) {
+                if auth::seed_daemon_token(&lease) {
+                    tracing::info!("adopted the running terminal helper and its token lease");
+                }
+            }
+            // This boot's master token, on disk (0600) for the dev preflight:
+            // a later `npm run tauri dev` finds a headless leftover of this
+            // instance holding :1420/:7676 and needs a credential we spawned
+            // nothing to hand it. Boot survives a failed write — only the
+            // retire-a-headless-instance path degrades (to a manual kill).
+            // Written after the helper's lease is known: it is the lease.
+            match auth::persist_daemon_token(&data_dir) {
+                Ok(path) => tracing::info!(path = %path.display(), "persisted daemon token"),
+                Err(e) => tracing::warn!(error = %e, "could not persist daemon token"),
+            }
+            app.manage(pty_state);
             app.manage(term_attention::TermAttentionState::default());
             {
                 // A `working` whose agent went back to the shell is retired
@@ -12663,6 +12695,11 @@ pub fn run() {
             // Kill any headless `claude` discussion forks on teardown so no
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {
+                // Terminals in the helper: P1 proves the plumbing, so a quit
+                // still ends every one of them, as it always did.
+                if let Some(ptys) = app_handle.try_state::<pty::PtyState>() {
+                    ptys.on_quit(true);
+                }
                 // Polis: a final crown-jewels snapshot of the ledger DB on quit.
                 if let Some(store) = app_handle.try_state::<SessionStore>() {
                     if let Ok(dir) = app_handle.path().app_data_dir() {
