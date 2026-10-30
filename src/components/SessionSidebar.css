@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Yusuf Al-Bazian */
-/* The sessions sidebar (SessionSidebar.tsx): the Places, Needs you, the
-   Projects (a folder header over each project's plan rows, styled on the
-   row, classic's), the Chats list of one-line rows, the terminals nested
-   under a plan, and the New tab footer. 13px UI
-   text, 28px single-line rows, 16px icons on the Places. Colours are tokens
-   only; the row menu itself is styled with RowMenu in styles.css, Combine's
-   picker with rl-cmb- there too. */
+/* The sessions sidebar (SessionSidebar.tsx): the Places, the Chats list of
+   one-line rows right under them, Needs you, the Projects (a folder header
+   over each project's plan rows, styled on the row, classic's), the
+   terminals nested under a plan, and the New tab footer. 13px UI text,
+   28px single-line rows, 16px icons on the Places. Colours are tokens only;
+   the row menu itself is styled with RowMenu in styles.css, Combine's picker
+   with rl-cmb- there too. */
 .rl-sb {
   --rl-sb-row: 28px;
   display: flex;
@@ -69,8 +69,10 @@
 }
 .rl-sb-section[data-kind="needs"] > .rl-sb-label { color: var(--color-warning); }
 
-/* ── Projects and Chats: the two parts after Needs you ─────────────────── */
+/* ── Chats (first, under the Places) and Projects (after Needs you) ────── */
 .rl-sb-part { display: flex; flex-direction: column; margin-top: 10px; }
+/* Chats sits right under the Places' rule: a tight first row. */
+.rl-sb-part[data-part="chats"] { margin-top: 4px; }
 .rl-sb-part-head {
   display: flex;
   align-items: center;

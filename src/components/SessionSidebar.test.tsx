@@ -247,13 +247,13 @@ describe("the grouped sidebar", () => {
     [...host.querySelectorAll<HTMLButtonElement>(".rl-sb-proj")].find((b) => b.querySelector(".rl-sb-proj-name")?.textContent === name)!;
   const chatTitles = () => [...host.querySelectorAll(".rl-sb-part[data-part=chats] .rl-sb-item .rl-sb-title")].map((t) => t.textContent);
 
-  it("Projects then Chats: a project holds only its plans, under a folder header with no Plans/Chats split", async () => {
+  it("Chats then Projects: a project holds only its plans, under a folder header with no Plans/Chats split", async () => {
     await renderWith({
       sessions: [summary("a", 2), summary("b", 1)],
       chats: [{ companionId: "c", title: "Status check", updatedAt: 3, projectPath: "/repo/redline" }],
       launches: [{ terminalId: "t", title: "Plan the roadmap", startedAt: 0, projectPath: "/repo/redline", working: true }],
     });
-    expect([...host.querySelectorAll(".rl-sb-part-label")].map((l) => l.textContent)).toEqual(["Projects", "Chats"]);
+    expect([...host.querySelectorAll(".rl-sb-part-label")].map((l) => l.textContent)).toEqual(["Chats", "Projects"]);
     const project = host.querySelector(".rl-sb-section[data-kind=project]")!;
     expect(project.closest(".rl-sb-part")!.getAttribute("data-part")).toBe("projects");
     expect(projectHead("redline").querySelector("svg")!.getAttribute("width")).toBe("16");
@@ -261,6 +261,26 @@ describe("the grouped sidebar", () => {
     expect(project.querySelectorAll(".rl-sb-item[data-kind=launch]")).toHaveLength(1);
     expect(project.querySelector(".rl-sb-item[data-kind=chat]")).toBeNull();
     expect(host.querySelector(".rl-sb-group, .rl-sb-group-head")).toBeNull();
+  });
+
+  it("Chats sits first under the Places, above Needs you, Projects and Archived; Tab walks them in that order", async () => {
+    await renderWith({
+      sessions: [summary("a", 2), summary("b", 1), summary("old", 1, 0, { archivedAt: 5 })],
+      needs: { "plan:b": "Question" },
+      chats: [{ companionId: "c", title: "Status check", updatedAt: 3, projectPath: "/repo/redline" }],
+    });
+    const scroll = host.querySelector(".rl-sb-scroll")!;
+    expect(scroll.firstElementChild!.getAttribute("data-part")).toBe("chats");
+    const order = [...scroll.children].map((el) =>
+      el.getAttribute("data-part") ?? el.getAttribute("data-kind") ?? (el.querySelector(".rl-sb-fold") ? "archived" : "?"));
+    expect(order).toEqual(["chats", "needs", "projects", "archived"]);
+    // Collapsed by default: the header is one row and nothing under it.
+    expect(chatHead().getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector(".rl-sb-part[data-part=chats] .rl-sb-rows")).toBeNull();
+    // Keyboard order follows: the Chats toggle is the first focusable in the list.
+    const focusables = [...scroll.querySelectorAll<HTMLElement>("button, [tabindex]")].filter((el) => el.tabIndex >= 0);
+    expect(focusables[0]).toBe(chatHead());
+    expect(focusables.indexOf(chatHead())).toBeLessThan(focusables.findIndex((el) => el.closest(".rl-sb-section[data-kind=needs]")));
   });
 
   it("Chats is collapsed by default, its count and spinner on the header; opening it is kept", async () => {

@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
-//! Browser, Localhost — D30) as one row of icons (D39), the joined-session
-//! shadow, then the sections from lib/sessionGroups: Needs you while
+//! Browser, Localhost — D30) as one row of icons (D39), Chats, the
+//! joined-session shadow, then the sections from lib/sessionGroups: Needs you while
 //! something does; **Projects** (its label carries Combine), each project a
 //! folder header that folds away (kept per project) over only its plans —
 //! the rich plan rows: status colour, v{n}, pending count, unseen pulse,
 //! build-state chips, detached/codex chips, the revision tree and the row
 //! menu — and the launches whose plan has not arrived, five then "Show N
-//! more", "No plans" when it has none; then **Chats**, one flat list of
-//! one-line rows (the chat's project a pill on it, how long ago at its end),
-//! closed until opened (kept), eight then "Show N more". A chat that became
+//! more", "No plans" when it has none. **Chats** comes first, right under
+//! the Places — one compact header row in view without scrolling — over one
+//! flat list of one-line rows (the chat's project a pill on it, how long ago
+//! at its end), closed until opened (kept), eight then "Show N more"; opened,
+//! it pushes Needs you and Projects down. A chat that became
 //! a plan leaves Chats; its plan's menu has "Open chat". A row click opens
 //! its session as a tab of the set on screen (D29). A project's dev servers
 //! are one chip on its header, and on a plan row only when the server runs
@@ -138,7 +140,7 @@ export interface SessionSidebarProps {
   /** The start screen is on the stage, so Home reads as selected and no row
    *  does. Only read when `place` is not given. */
   startActive?: boolean;
-  /** Chats (companion conversations): the Chats list after the projects. */
+  /** Chats (companion conversations): the Chats list at the top, under the Places. */
   chats?: readonly FlowChat[];
   /** Which plan each chat became (companion id → plan session id), as this
    *  run of the app saw it happen. The sidebar keeps every link it is given,
@@ -522,6 +524,14 @@ function SessionSidebarBase(props: SessionSidebarProps) {
         )}
       </div>
       <div className="rl-sb-scroll rl-thin-scroll-y">
+        {/* Chats first, right under the Places: one compact header row, in
+            view without scrolling, whose list (when opened) pushes the rest
+            down. DOM order is the visual order, so Tab walks it the same. */}
+        {model.chats.count > 0 && (
+          <ChatsPart chats={model.chats} open={openSections.has(model.chats.id)} onToggle={toggleSection} onCollapse={toggleChats}>
+            {model.chats.rows.map(row)}
+          </ChatsPart>
+        )}
         {joined && (
           <section className="rl-sb-section" aria-label="Joined session">
             <div className="rl-sb-label"><span>Joined session</span></div>
@@ -566,11 +576,6 @@ function SessionSidebarBase(props: SessionSidebarProps) {
               </Section>
             ))}
           </section>
-        )}
-        {model.chats.count > 0 && (
-          <ChatsPart chats={model.chats} open={openSections.has(model.chats.id)} onToggle={toggleSection} onCollapse={toggleChats}>
-            {model.chats.rows.map(row)}
-          </ChatsPart>
         )}
         {empty && (
           <p className="rl-sb-empty">
@@ -713,7 +718,7 @@ function Section({ section, open, onToggle, onCollapse, onAdd, port, onOpenPort,
   );
 }
 
-/** Chats: one flat list after the projects, closed until opened. Its header
+/** Chats: one flat list at the top, under the Places, closed until opened. Its header
  *  folds it, with its count and, while any of its agents is mid-turn, the
  *  shared Spinner. */
 function ChatsPart({ chats, open, onToggle, onCollapse, children }: {

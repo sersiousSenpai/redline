@@ -76,11 +76,11 @@ try {
     check(`${tag}, sidebar ${sidebar}px: titles end in an ellipsis inside the row, the version chip in view`, await cdp.evaluate(`${rows}.every(b=>{const r=b.getBoundingClientRect();const v=b.querySelector('.font-mono,.rl-cmb-node').getBoundingClientRect();return v.right<=r.right-28})`));
     check(`${tag}, sidebar ${sidebar}px: no horizontal overflow in the sidebar`, await cdp.evaluate("(()=>{const a=document.querySelector('[data-qa-sidebar]');return [...a.querySelectorAll('.rl-session-row')].every(li=>li.getBoundingClientRect().right<=a.getBoundingClientRect().right+0.5)})()"));
   };
-  // Chats: one flat list after the projects, closed until opened. Opened, its
+  // Chats: one flat list at the top, right under the Places, closed until
+  // opened; opened, it pushes the rest down. Opened, its
   // rows are single 28px lines: icon, title, a project's pill only on a chat
   // that has one, how long ago at the far right; eight, then "Show 2 more".
   const chatsHead = "document.querySelector('.rl-sb-part[data-part=chats] > .rl-sb-part-toggle')";
-  const toEnd = "(()=>{const s=document.querySelector('[data-qa-sidebar] .rl-sb-scroll');s.scrollTop=s.scrollHeight})()";
   // The sidebar's own scroller, never the page: scrollIntoView would move the page too.
   const toChats = "(()=>{const s=document.querySelector('[data-qa-sidebar] .rl-sb-scroll');const c=document.querySelector('.rl-sb-part[data-part=chats]');s.scrollTop+=c.getBoundingClientRect().top-s.getBoundingClientRect().top})()";
   const setChats = async (open) => {
@@ -109,7 +109,10 @@ try {
     // five; research, which only a chat names, empty; no chat in a project.
     check(`${width}: Chats is collapsed by default, its count on the header`, await cdp.evaluate(`${chatsHead}.getAttribute('aria-expanded')==='false'&&${chatRows}.length===0&&document.querySelector('.rl-sb-part[data-part=chats] .rl-sb-part-count').textContent==='10'`));
     check(`${width}: a project holds only plans, five then Show 3 more`, await cdp.evaluate("(()=>{const p=[...document.querySelectorAll('.rl-sb-section[data-kind=project]')];const q=p.find(s=>s.querySelector('.rl-sb-proj-name').textContent==='qwallah');return !document.querySelector('.rl-sb-part[data-part=projects] .rl-sb-item[data-kind=chat]')&&q.querySelectorAll('li.rl-session-row').length===5&&q.querySelector('.rl-sb-fold').textContent==='Show 3 more'})()"));
-    check(`${width}: Projects then Chats, research reads No plans`, await cdp.evaluate("(()=>{const parts=[...document.querySelectorAll('.rl-sb-part')].map(p=>p.dataset.part).join();const r=[...document.querySelectorAll('.rl-sb-section[data-kind=project]')].find(s=>s.querySelector('.rl-sb-proj-name').textContent==='research');return parts==='projects,chats'&&r?.querySelector('.rl-sb-none')?.textContent==='No plans'})()"));
+    check(`${width}: Chats then Projects, research reads No plans`, await cdp.evaluate("(()=>{const parts=[...document.querySelectorAll('.rl-sb-part')].map(p=>p.dataset.part).join();const r=[...document.querySelectorAll('.rl-sb-section[data-kind=project]')].find(s=>s.querySelector('.rl-sb-proj-name').textContent==='research');return parts==='chats,projects'&&r?.querySelector('.rl-sb-none')?.textContent==='No plans'})()"));
+    // Chats is the scroller's first child: its one-row header sits right under
+    // the Places, in view at scrollTop 0, with nothing between.
+    check(`${width}: the Chats header is one row right under the Places, in view without scrolling`, await cdp.evaluate(`(()=>{const s=document.querySelector('[data-qa-sidebar] .rl-sb-scroll');const p=document.querySelector('[data-qa-sidebar] .rl-sb-places').getBoundingClientRect();const h=${chatsHead}.getBoundingClientRect();return s.scrollTop===0&&s.firstElementChild.dataset.part==='chats'&&Math.round(h.height)===28&&h.top>=p.bottom&&h.top-p.bottom<=8&&h.bottom<=s.getBoundingClientRect().bottom})()`));
     // Every plan on screen: open each project's "Show N more".
     await cdp.evaluate("[...document.querySelectorAll('.rl-sb-part[data-part=projects] .rl-sb-fold[aria-expanded=false]')].filter(b=>/^Show \\d+ more$/.test(b.textContent)).forEach(b=>b.click())"); await settle();
     for (const theme of ["basic", "studio"]) {
@@ -125,11 +128,14 @@ try {
       check(`${tag}: the caret toggles the open tree`, await cdp.evaluate("(()=>{const c=document.querySelector('[aria-label=\"Collapse revisions\"]');return !!c&&document.querySelectorAll('li.rl-revision-row').length===3})()"));
       check(`${tag}: no horizontal page overflow`, await cdp.evaluate("document.documentElement.scrollWidth<=innerWidth"));
       await screenshot(`sidebar-${tone}-${width}x${height}`);
-      // The list's end: the last project and Chats, closed, then open.
-      await cdp.evaluate(toEnd); await settle();
+      // The list's top: Chats closed under the Places, then open, pushing
+      // Needs you and Projects down.
+      await cdp.evaluate(toChats); await settle();
       await screenshot(`sidebar-${tone}-${width}x${height}-chats-collapsed`);
+      const projTop = await cdp.evaluate("document.querySelector('.rl-sb-part[data-part=projects]').getBoundingClientRect().top");
       await setChats(true); await cdp.evaluate(toChats); await settle();
       await chatChecks(tag, width >= 1440);
+      check(`${tag}: Chats open pushes Projects down`, (await cdp.evaluate("document.querySelector('.rl-sb-part[data-part=projects]').getBoundingClientRect().top")) > projTop + 8 * 28);
       check(`${tag}: Chats open: no horizontal page overflow`, await cdp.evaluate("document.documentElement.scrollWidth<=innerWidth"));
       await screenshot(`sidebar-${tone}-${width}x${height}-chats-expanded`);
       await setChats(false);
@@ -150,7 +156,7 @@ try {
         // The longest status lines, scrolled into view.
         await cdp.evaluate("[...document.querySelectorAll('li.rl-session-row')].find(li=>li.querySelector('.truncate').textContent.startsWith('Webhook'))?.scrollIntoView({block:'end'})"); await settle();
         await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}-longest`, "[data-qa-sidebar]");
-        await cdp.evaluate(toEnd); await settle();
+        await cdp.evaluate(toChats); await settle();
         await screenshot(`sidebar-${tone}-${width}x${height}-sidebar${sidebar}-chats-collapsed`, "[data-qa-sidebar]");
         await setChats(true); await cdp.evaluate(toChats); await settle();
         await chatChecks(`${tag}, sidebar ${sidebar}px`, sidebar >= 260);

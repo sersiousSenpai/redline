@@ -107,7 +107,7 @@ export interface SidebarSection {
   collapsed: boolean;
 }
 
-/** The one Chats list, after the projects. */
+/** The one Chats list, at the top of the sidebar, under the Places. */
 export interface SidebarChats {
   /** `chats`: keys its "Show N more". */
   id: "chats";

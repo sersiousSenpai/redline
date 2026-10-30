@@ -425,7 +425,7 @@ const DRIVES = {
     { do: "hover", css: [".rl-sb-part-label"], why: "the pointer off the rows" },
     { do: "eval", expr: "document.activeElement?.blur()", why: "focus off the rows" },
     { do: "waitFor", expr: "!document.querySelector('.rl-sb .rl-sb-dots, .rl-row-menu')", timeout: 3000, why: "at rest again: no ⋯ on any row" },
-    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-part')].map(p => p.dataset.part).join() === 'projects,chats' && !document.querySelector('.rl-sb .rl-sb-part[data-part=projects] .rl-sb-item[data-kind=chat]')", timeout: 8000, why: "Projects hold plans; Chats is its own list after them" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-part')].map(p => p.dataset.part).join() === 'chats,projects' && !document.querySelector('.rl-sb .rl-sb-part[data-part=projects] .rl-sb-item[data-kind=chat]')", timeout: 8000, why: "Projects hold plans; Chats is its own list above them, under the Places" },
   ],
   chat: [
     ...AT_HOME,
