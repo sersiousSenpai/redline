@@ -16,6 +16,7 @@ mod browse_organize;
 mod browser_home;
 mod browser_actions;
 mod browser_events;
+mod browser_frame;
 #[cfg(target_os = "macos")]
 mod browser_popup;
 mod browser_overlay;
@@ -8861,6 +8862,7 @@ fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> 
 /// ratio during the live drag. (Chat closed → right margin ≈ 0 → it absorbs ~0 of
 /// the delta and the webview still takes it all, so one mask serves both cases.)
 /// `syncBounds` still sets the exact rect at settle and on split/divider changes.
+/// Disabled is not "no mask": it pins the top edge (`browser_frame::PIN_TOP`).
 /// macOS-only; a no-op elsewhere.
 fn browser_enable_autoresize(
     app: AppHandle,
@@ -8873,11 +8875,10 @@ fn browser_enable_autoresize(
     #[cfg(target_os = "macos")]
     {
         wv.with_webview(move |pw| {
-            let mask = if enabled.unwrap_or(true) {
-                22usize
-            } else {
-                0usize
-            };
+            // Never 0: with no mask AppKit keeps the view's distance from the
+            // window's BOTTOM, so a taller or shorter window (full screen,
+            // a display change) slides the page off its pane.
+            let mask = browser_frame::autoresize_mask(enabled.unwrap_or(true));
             let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
             // SAFETY: runs on the UI thread; `inner()` is the live WKWebView (an
             // NSView). `setAutoresizingMask:` takes a single NSUInteger.
@@ -11963,6 +11964,7 @@ pub fn run() {
         .setup(|app| {
             boot_trace::mark(boot_trace::SETUP_ENTER);
             transparency::observe(app.handle().clone());
+            browser_frame::observe(app.handle().clone());
             // Register the `redline://` scheme with the OS at runtime. In a
             // bundled release the Info.plist declaration is authoritative; this
             // best-effort call makes the deep link work in dev too. Harmless if
