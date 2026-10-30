@@ -206,3 +206,41 @@ it("lets an absolute box escape the overflow between it and its containing block
   expect(measureNativeBrowserRect(slot, stage)).toEqual({ x: 0, y: 40, w: 800, h: 600 });
   tab.remove();
 });
+
+it("a size change re-sends the position too: the native side keeps whatever position it holds", async () => {
+  const f = fixture();
+  f.controller.sync([{ ...f, rect }]); await settle();
+  f.controller.sync([{ ...f, rect: { ...rect, h: 520 } }]); await settle();
+  expect(f.log.slice(3)).toEqual(["position:40,80", "size:600,520"]);
+});
+
+it("invalidate re-applies an unchanged rect to every shown view and leaves hidden ones alone", async () => {
+  const f = fixture();
+  const g = { ...fixture(), controller: f.controller, log: f.log };
+  f.controller.sync([{ ...f, rect }, { id: g.id, view: g.view, rect: null }]); await settle();
+  expect([...f.log].sort()).toEqual(["hide", "position:40,80", "show", "size:600,400"]);
+  f.controller.invalidate(); await settle();
+  expect(f.log.slice(4)).toEqual(["position:40,80", "size:600,400"]);
+  f.controller.sync([{ ...f, rect }, { id: g.id, view: g.view, rect: null }]); await settle();
+  expect(f.log.slice(6).filter((entry) => entry !== "hide")).toEqual([]);
+});
+
+it("invalidate during an in-flight apply re-applies after it settles", async () => {
+  const sized = deferred();
+  let calls = 0;
+  const f = fixture({ setSize: async (_view, next) => { f.log.push(`size:${next.w},${next.h}`); if (++calls === 1) await sized.promise; } });
+  f.controller.sync([{ ...f, rect }]); await settle();
+  f.controller.invalidate();
+  sized.resolve(); await settle();
+  expect(f.log).toEqual(["position:40,80", "size:600,400", "show", "position:40,80", "size:600,400"]);
+  expect(f.controller.appliedRects().get(f.id)).toEqual(rect);
+});
+
+it("invalidate does nothing once stopped", async () => {
+  const f = fixture();
+  f.controller.sync([{ ...f, rect }]); await settle();
+  f.controller.stop(); await settle();
+  const before = f.log.length;
+  f.controller.invalidate(); await settle();
+  expect(f.log).toHaveLength(before);
+});

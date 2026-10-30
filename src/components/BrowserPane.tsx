@@ -14,6 +14,7 @@ import { useChatWorld } from "../hooks/useChatWorld";
 import { useStableHandlers, useStableValue } from "../hooks/useStable";
 import { ensureCart } from "../lib/browseCart";
 import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
+import { resyncForcesReapply, subscribeGeometryResync } from "../lib/nativeGeometryResync";
 import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
 import { usePoll } from "../hooks/usePoll";
 import { BrowserFullscreenEdge } from "./BrowserFullscreenEdge";
@@ -1847,25 +1848,29 @@ function BrowserPaneBase({
     // resized fine. Tauri's window-level resize event DOES fire on those
     // transitions. Re-sync on it, plus a couple of trailing syncs — fullscreen
     // ANIMATES, so the final window size only lands a few hundred ms later.
+    //
+    // The native frame can also go stale with the host's rect unchanged: a
+    // full-screen session, a wake from sleep, a display change. The cache
+    // remembers what we sent, not where the view now is, so those moments
+    // (and the trailing syncs) re-apply the fresh rect even when it is equal.
     const trailing: number[] = [];
-    const onNativeResize = () => {
+    const reapply = () => { syncBounds(); geometry.invalidate(); trackRef.current(); };
+    const window_ = Window.getCurrent();
+    const unsubscribeResync = subscribeGeometryResync({
+      onResized: (handler) => window_.onResized(handler),
+      onMoved: (handler) => window_.onMoved(handler),
+      onScaleChanged: (handler) => window_.onScaleChanged(handler),
+      onFocusChanged: (handler) => window_.onFocusChanged(({ payload }) => handler(payload)),
+      onNativeStale: (handler) => listen("browser-geometry-stale", handler),
+    }, (reasons) => {
+      if (resyncForcesReapply(reasons)) reapply(); else syncBounds();
+      // A window-size change animates (full screen does): follow it home.
+      if (!reasons.has("resized") && !reasons.has("scale") && !reasons.has("native")) return;
       void videoFsRef.current.observeWindow();
-      scheduleSync();
       trailing.forEach(clearTimeout);
       trailing.length = 0;
-      trailing.push(
-        window.setTimeout(scheduleSync, 250),
-        window.setTimeout(scheduleSync, 600),
-      );
-    };
-    let unResized: (() => void) | undefined;
-    let resizeSubscriptionCancelled = false;
-    void Window.getCurrent()
-      .onResized(onNativeResize)
-      .then((un) => {
-        if (resizeSubscriptionCancelled) dropListener(un); else unResized = un;
-      })
-      .catch(() => {});
+      trailing.push(window.setTimeout(reapply, 250), window.setTimeout(reapply, 600));
+    });
 
     return () => {
       // Clear the guard too: a cancelled frame left in it makes scheduleSync a
@@ -1874,8 +1879,7 @@ function BrowserPaneBase({
       rafRef.current = 0;
       window.removeEventListener("resize", onWin);
       trailing.forEach(clearTimeout);
-      resizeSubscriptionCancelled = true;
-      if (unResized) dropListener(unResized);
+      unsubscribeResync();
       const map = wvMapRef.current;
       pendingTeardown = window.setTimeout(() => {
         pendingTeardown = 0;
@@ -1883,7 +1887,7 @@ function BrowserPaneBase({
         map.clear();
       }, TEARDOWN_GRACE_MS);
     };
-  }, [scheduleSync]);
+  }, [scheduleSync, syncBounds, geometry]);
 
   // Foreground a tab, and tell the chat which gesture did it: the event, not
   // this function, decides whether the conversation follows the page.

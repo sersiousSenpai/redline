@@ -28,6 +28,9 @@ interface State {
   applied: NativeRect | null;
   shown: boolean;
   failed: boolean;
+  /** The native frame may have moved behind our back (a window, screen or
+   * full-screen change, a wake): the next pass re-applies even an equal rect. */
+  stale: boolean;
 }
 const nativeViews = new Map<string, State>();
 const sameRect = (a: NativeRect | null, b: NativeRect | null) => a === b || !!a && !!b
@@ -42,6 +45,8 @@ function drain(id: string, state: State) {
     let target: Target;
     do {
       target = state.target;
+      const forced = state.stale;
+      state.stale = false;
       try {
         const { view, adapter, rect } = target;
         if (!rect) {
@@ -49,12 +54,12 @@ function drain(id: string, state: State) {
           state.shown = false;
           state.applied = null;
         } else {
-          const previous = state.applied;
-          if (!previous || previous.x !== rect.x || previous.y !== rect.y) {
+          // Position and size always travel together. The native side applies
+          // a size by reading the view's CURRENT position back and keeping it,
+          // so a size-only update would make any drifted position permanent.
+          if (forced || !sameRect(state.applied, rect)) {
             await adapter.setPosition(view, rect);
             if (state.target !== target) { state.applied = null; continue; }
-          }
-          if (!previous || previous.w !== rect.w || previous.h !== rect.h) {
             await adapter.setSize(view, rect);
             if (state.target !== target) { state.applied = null; continue; }
           }
@@ -72,7 +77,7 @@ function drain(id: string, state: State) {
         try { target.adapter.onError?.(id, error); }
         catch (reportError) { console.error("Native browser geometry error reporting failed", reportError); }
       }
-    } while (state.target !== target);
+    } while (state.target !== target || state.stale);
     state.running = false;
     // Hidden released labels need no JS handle or geometry cache. A future
     // adoption starts unknown and must establish bounds before showing again.
@@ -99,7 +104,7 @@ export function createNativeBrowserGeometry<View>(adapter: NativeGeometryAdapter
       current.target = target;
       drain(id, current);
     } else {
-      const state: State = { target, running: false, applied: null, shown: false, failed: false };
+      const state: State = { target, running: false, applied: null, shown: false, failed: false, stale: false };
       nativeViews.set(id, state);
       drain(id, state);
     }
@@ -121,6 +126,16 @@ export function createNativeBrowserGeometry<View>(adapter: NativeGeometryAdapter
       }
     },
     hide(id: string, view: View) { request(id, view, null, false); },
+    /** Re-apply every shown view's current rect, equal or not: the rect the
+     * cache remembers is what we sent, not where the view now is. */
+    invalidate() {
+      if (!active) return;
+      for (const [id, state] of nativeViews) {
+        if (state.target.owner !== owner || !state.target.rect) continue;
+        state.stale = true;
+        drain(id, state);
+      }
+    },
     hideAll,
     appliedRects(): Map<string, NativeRect> {
       return new Map([...nativeViews].filter(([, state]) => state.target.owner === owner && state.applied)
