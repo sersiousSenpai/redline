@@ -493,6 +493,84 @@ fn queue_implementation_at(socket: &str, thread_id: &str, plan: &str, approval_i
     })
 }
 
+/// What became of a restore offered to a Codex thread's running server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveRestore {
+    /// No launcher server has this thread, so nothing holds it: `codex resume`
+    /// can have it.
+    None,
+    /// Its restore turn is in. The turn's Stop brings the plan back to review.
+    Started,
+    /// A turn is running. Nothing was sent: that turn may yet end on a real
+    /// plan, which an armed restore would throw away for the saved copy.
+    Busy,
+}
+
+/// Restore a plan whose Codex never went away.
+///
+/// A plan's hold can end while its CLI lives on: the Stop hook's 12-hour limit
+/// passes, or Redline quits and the PTY helper keeps the terminal. The TUI sits
+/// idle at its prompt, and its server still holds the thread's one writer, so
+/// `codex resume` can only fail ("thread-store conflict … already has an active
+/// writer"), in a background terminal nobody is looking at. So the restore goes
+/// to the server that has the thread, as a second client: experiment (p).
+///
+/// `arm` runs at the one point a restore is sure to be sent to an idle thread.
+pub fn restore_on_live_thread(thread_id: &str, prompt: &str, arm: impl FnOnce()) -> Result<LiveRestore, String> {
+    let Some((_, mut client)) = crate::convo::codex::find(thread_id, None) else {
+        return Ok(LiveRestore::None);
+    };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    restore_on_thread_with_rpc(thread_id, prompt, arm, |method, params| {
+        client.call(method, params, deadline).map_err(|e| e.to_string())
+    })
+}
+
+fn restore_on_thread_with_rpc(
+    thread_id: &str, prompt: &str, arm: impl FnOnce(),
+    mut request: impl FnMut(&str, Value) -> Result<Value, String>,
+) -> Result<LiveRestore, String> {
+    let thread = request("thread/read", json!({"threadId":thread_id,"includeTurns":false}))?;
+    if thread.pointer("/thread/status/type").and_then(Value::as_str) == Some("active") {
+        return Ok(LiveRestore::Busy);
+    }
+    request("thread/settings/update", review_settings(thread_id, &thread)?)?;
+    arm();
+    // The queue, not `turn/start`: on an idle thread it starts by itself, and
+    // if a turn began since the read, `turn/start` would steer this into it.
+    let queued = request("thread/queue/add", json!({
+        "threadId":thread_id,"clientUserMessageId":format!("redline-restore-{}", uuid::Uuid::new_v4()),
+        "input":[{"type":"text","text":prompt}]
+    }))?;
+    if queued.pointer("/queuedSubmission/id").and_then(Value::as_str).is_none() {
+        return Err("Codex did not acknowledge the restore.".into());
+    }
+    Ok(LiveRestore::Started)
+}
+
+/// The approval hand-off in reverse: a restore starts a new read-only review
+/// (the plan contract says so), whatever the thread was last allowed to do. A
+/// resume gets this from the launcher's server config; a live thread is told.
+fn review_settings(thread_id: &str, response: &Value) -> Result<Value, String> {
+    let thread = response.get("thread").ok_or("Codex returned no thread")?;
+    if thread.get("id").and_then(Value::as_str) != Some(thread_id) {
+        return Err("Codex answered for a different thread.".into());
+    }
+    let model = thread.get("model").and_then(Value::as_str)
+        .filter(|m| !m.is_empty()).ok_or("Codex did not report the thread's model.")?;
+    Ok(json!({
+        "threadId":thread_id,
+        "approvalPolicy":"never",
+        "sandboxPolicy":{"type":"readOnly"},
+        "collaborationMode":{"mode":"default","settings":{
+            "model":model,
+            "reasoning_effort":thread.get("reasoningEffort").cloned().unwrap_or(Value::Null),
+            "developer_instructions":crate::codex_profile::CONTRACT
+        }}
+    }))
+}
+
 /// Why a [`SocketClient::call`] got no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallError {
@@ -807,6 +885,60 @@ mod tests {
             }
             if queued { assert!(!calls.iter().any(|v| v["method"] == "thread/settings/update")); }
         }
+    }
+
+    /// The three ways a live restore can go, and what each may have sent. The
+    /// server's real answers are measured by scripts/verify-codex-live-restore.py.
+    #[test]
+    fn live_restore_arms_and_queues_only_on_a_thread_that_is_not_working() {
+        fn run(status: &str, deny_queue: bool) -> (Result<LiveRestore, String>, Vec<Value>, bool) {
+            let mut calls = vec![];
+            let mut armed = false;
+            let outcome = restore_on_thread_with_rpc("thread-1", "Redline restore · now", || armed = true, |method, params| {
+                calls.push(json!({"method":method,"params":params}));
+                match method {
+                    "thread/read" => Ok(json!({"thread":{"id":"thread-1","status":{"type":status},"model":"gpt-6-astra","reasoningEffort":"xhigh"}})),
+                    "thread/settings/update" => Ok(json!({})),
+                    "thread/queue/add" if deny_queue => Err("refused".into()),
+                    "thread/queue/add" => Ok(json!({"queuedSubmission":{"id":"queued-1"}})),
+                    _ => panic!("unexpected RPC: {method}"),
+                }
+            });
+            (outcome, calls, armed)
+        }
+        let methods = |calls: &[Value]| calls.iter().map(|c| c["method"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+        // Idle: back to read-only review, then the turn. Never `turn/start`,
+        // which steers a turn that began since the read.
+        let (outcome, calls, armed) = run("idle", false);
+        assert_eq!(outcome, Ok(LiveRestore::Started));
+        assert!(armed);
+        assert_eq!(methods(&calls), ["thread/read", "thread/settings/update", "thread/queue/add"]);
+        assert_eq!(calls[1]["params"]["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(calls[1]["params"]["approvalPolicy"], "never");
+        assert_eq!(calls[1]["params"]["collaborationMode"]["settings"]["model"], "gpt-6-astra");
+        assert_eq!(calls[1]["params"]["collaborationMode"]["settings"]["reasoning_effort"], "xhigh");
+        assert_eq!(calls[1]["params"]["collaborationMode"]["settings"]["developer_instructions"], crate::codex_profile::CONTRACT);
+        assert_eq!(calls[2]["params"]["input"][0]["text"], "Redline restore · now");
+
+        // Working: nothing sent and nothing armed. An armed restore would throw
+        // away the real plan this turn may end on.
+        let (outcome, calls, armed) = run("active", false);
+        assert_eq!(outcome, Ok(LiveRestore::Busy));
+        assert!(!armed);
+        assert_eq!(methods(&calls), ["thread/read"]);
+
+        // Refused: an error, for the command to take the arming back.
+        let (outcome, _, _) = run("idle", true);
+        assert_eq!(outcome, Err("refused".to_string()));
+    }
+
+    #[test]
+    fn live_restore_refuses_an_answer_about_another_thread() {
+        let response = json!({"thread":{"id":"other","status":{"type":"idle"},"model":"gpt-6-astra"}});
+        assert!(review_settings("thread-1", &response).is_err());
+        let no_model = json!({"thread":{"id":"thread-1","status":{"type":"idle"}}});
+        assert!(review_settings("thread-1", &no_model).is_err());
     }
 
     // Driven by scripts/probe-codex-approval.py against an isolated real CLI.

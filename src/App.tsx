@@ -301,7 +301,7 @@ import { FlashOverlay } from "./components/FlashOverlay";
 // loaded on the first ⌘K.
 const CommandPalette = lazy(() => import("./components/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
-import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
+import { buildResumeBuildCommand, buildResumeCommand, codexRestorePrompt, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, isZoomPaneKey, splitKeyOf, tabCycleKeyOf, tabIndexKeyOf, isSplitAnywhereKey } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
@@ -6489,11 +6489,38 @@ function App() {
       projectPath,
       decision.harness,
     );
+    const rescinded = rescindedIds.has(sessionId) || !!opts.rescinded;
+
+    // A Codex whose CLI never went away: its server holds the thread's one
+    // writer, so a `codex resume` could only stop at "This conversation is open
+    // in another app", in a background terminal nobody is looking at. The
+    // restore goes to that server, and the Stop it ends on comes from the
+    // terminal the plan was written in.
+    if (decision.harness === "codex") {
+      try {
+        const live = await invoke<"none" | "started" | "busy">("codex_restore_live", {
+          sessionId,
+          prompt: codexRestorePrompt(sessionId, new Date(), rescinded),
+        });
+        if (live === "started") {
+          onRestore({ type: "dispatched", sessionId, terminalId: null, history: target.history });
+          return "started";
+        }
+        if (live === "busy") {
+          fail("Codex is still working in its terminal. When its turn ends, its plan comes back or you can try again.");
+          return "started";
+        }
+      } catch (e) {
+        fail(`Couldn't reach the running Codex session: ${String(e)}`);
+        return "started";
+      }
+    }
+
     const cmd = `${buildResumeCommand(
       sessionId,
       new Date(),
       target.cwd,
-      rescindedIds.has(sessionId) || !!opts.rescinded,
+      rescinded,
       target.primed,
       // A Codex thread id handed to `claude --resume` does not error — it
       // silently starts a FRESH session, which then writes the sentinel under

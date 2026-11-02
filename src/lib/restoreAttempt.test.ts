@@ -93,6 +93,19 @@ describe("the terminal it runs in", () => {
     expect(a.history).toBe("available");
   });
 
+  it("waits with no terminal when the restore went to a Codex still running", () => {
+    // `codex_restore_live`: there is no second terminal to promote, and the
+    // notice falls back to the session's own.
+    const a = run(started(), {
+      type: "dispatched",
+      sessionId: "s1",
+      terminalId: null,
+      history: "unchecked",
+    })!;
+    expect(a.terminalId).toBeNull();
+    expect(a.phase).toBe("waiting");
+  });
+
   it("ignores a dispatch belonging to another attempt", () => {
     const a = run(started("s1"), dispatched("s2", "term-9"))!;
     expect(a.terminalId).toBeNull();

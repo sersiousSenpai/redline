@@ -29,7 +29,9 @@ export type RestorePhase =
 
 export interface RestoreAttempt {
   sessionId: string;
-  /** The background terminal running it — `null` until it exists. What
+  /** The background terminal running it — `null` until it exists, and for good
+   *  when the restore went to a Codex still running where it was
+   *  (`codex_restore_live`), which needs no terminal of its own. What
    *  "Show raw terminal" promotes into a tile, which is why it is carried
    *  rather than re-derived: opening a *second* terminal would resume the
    *  same conversation twice. */
@@ -57,11 +59,12 @@ export const RESTORE_TIMEOUT_MS = 120_000;
 export type RestoreEvent =
   /** The reviewer clicked. */
   | { type: "start"; sessionId: string; at: number }
-  /** The background terminal exists and the command has been handed to it. */
+  /** The restore has been handed over: to a new background terminal, or (no
+   *  terminal) to a Codex still running where it was. */
   | {
       type: "dispatched";
       sessionId: string;
-      terminalId: string;
+      terminalId: string | null;
       history: RestorePrep["history"];
     }
   | { type: "fail"; sessionId: string; error: string }

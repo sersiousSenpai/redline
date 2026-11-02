@@ -108,6 +108,31 @@ describe("the arming precedes the command", () => {
   });
 });
 
+describe("a Codex that never went away", () => {
+  const body = app.slice(app.indexOf("const restoreOnce = async"), app.indexOf("const autoNoticeHere = useAutoNotice"));
+  const live = body.indexOf('invoke<"none" | "started" | "busy">("codex_restore_live"');
+
+  it("gets the restore on its own thread, before a resume can be spent on it", () => {
+    // Its server holds the thread's one writer, so a resume stops at "This
+    // conversation is open in another app", in a background terminal.
+    expect(live).toBeGreaterThan(-1);
+    expect(body.lastIndexOf('if (decision.harness === "codex")', live)).toBeGreaterThan(-1);
+    expect(live).toBeLessThan(body.indexOf("buildResumeCommand("));
+    expect(live).toBeLessThan(body.indexOf('invoke("arm_restore"'));
+    expect(live).toBeLessThan(body.indexOf("openTerminal(projectPath, true)"));
+  });
+
+  it("opens no terminal when it landed, and doesn't fall through when it couldn't", () => {
+    const branch = body.slice(live, body.indexOf("const cmd = `${buildResumeCommand("));
+    const started = branch.slice(branch.indexOf('live === "started"'));
+    expect(started).toContain('type: "dispatched", sessionId, terminalId: null');
+    // Every outcome but "none" returns, so only a thread nobody holds is resumed.
+    expect(branch.match(/return "started";/g)?.length).toBe(3);
+    expect(branch).toContain('live === "busy"');
+    expect(branch).toContain("catch (e)");
+  });
+});
+
 describe("a failed restore stays actionable", () => {
   it("offers Retry rather than reverting to the plain detached notice", () => {
     // Reverting silently is indistinguishable from never having clicked.

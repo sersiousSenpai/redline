@@ -356,7 +356,47 @@ fn discovery_opens_only_private_sockets_of_this_user() {
     assert!(!codex::launcher_owned_for_test(&root.join("rlcx.file0001").join(codex::SOCKET_NAME)));
     // A socket that isn't an app-server answers nothing: not this thread's.
     assert!(codex::find("t", None).is_none());
+
+    // What codex-cli 0.164 leaves at `--listen unix://<path>`: a link to the
+    // real socket, somewhere else. Rejecting these cost every Codex terminal
+    // its mirror, and every restore of a live Codex thread its way in.
+    let real = make("daemon.0001", 0o700, true);
+    let plain = root.join("plain");
+    std::fs::write(&plain, "").unwrap();
+    let link = |name: &str, mode: u32, target: &Path| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        let path = dir.join(codex::SOCKET_NAME);
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        path
+    };
+    assert!(codex::launcher_owned_for_test(&link("rlcx.slnk0001", 0o700, &real)));
+    // The directory still decides: anyone could have put this one there.
+    assert!(!codex::launcher_owned_for_test(&link("rlcx.slop0001", 0o755, &real)));
+    // A link has to end at a socket.
+    assert!(!codex::launcher_owned_for_test(&link("rlcx.slfl0001", 0o700, &plain)));
+    assert!(!codex::launcher_owned_for_test(&link("rlcx.sldg0001", 0o700, &root.join("gone"))));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Redline's own restore, through its own discovery, on a real server's socket
+/// (the link codex-cli 0.164 leaves there). Driven by
+/// `scripts/verify-codex-live-restore.py --rust`, which checks the Stop it ends on.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the isolated Codex live-restore rig"]
+fn codex_live_restore_probe() {
+    use crate::codex_app_server::{restore_on_live_thread, LiveRestore};
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set by the rig"));
+    codex::SCAN_ROOT.with(|r| *r.borrow_mut() = PathBuf::from(codex::SOCKET_ROOT));
+    let mut armed = false;
+    let outcome = restore_on_live_thread(&var("REDLINE_PROBE_THREAD"), &var("REDLINE_PROBE_PROMPT"), || armed = true);
+    assert_eq!(outcome, Ok(LiveRestore::Started));
+    assert!(armed);
+    // A thread no server has is the resume's: the path every other restore takes.
+    let nobody = restore_on_live_thread("00000000-0000-0000-0000-000000000000", "unused", || panic!("armed for nobody"));
+    assert_eq!(nobody, Ok(LiveRestore::None));
 }
 
 // --- a Codex terminal ---------------------------------------------------------------

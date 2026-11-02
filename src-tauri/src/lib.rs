@@ -8393,6 +8393,25 @@ fn arm_restore(store: tauri::State<'_, SessionStore>, session_id: String) {
     restore_context::arm(&session_id);
 }
 
+/// Restore a Codex plan through the server still holding its thread, if one is.
+/// Only the plan side is armed: a Codex prompt carries no restore environment,
+/// so nothing would claim the prompt side. A failure takes the arming back, or
+/// it would swallow the next real plan this session submits.
+#[tauri::command]
+fn codex_restore_live(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    prompt: String,
+) -> Result<codex_app_server::LiveRestore, String> {
+    let outcome = codex_app_server::restore_on_live_thread(&session_id, &prompt, || {
+        store.arm_restore(&session_id)
+    });
+    if outcome.is_err() {
+        store.take_restore(&session_id);
+    }
+    outcome
+}
+
 /// Where `claude --resume <id>` can actually find a session.
 ///
 /// Claude Code scopes resumable sessions per project directory, and it derives
@@ -11226,6 +11245,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     // Re-read on every turn while the activity panel is open.
     "monochat_traces",
     "prepare_restore",
+    // Scans the launcher's sockets and waits on a Codex server's answers.
+    "codex_restore_live",
     "term_attention_snapshot",
     "thread_meters",
     // The memory surfaces (pill, inspector, Health, Catalog, Cosmos, Ask) and the
@@ -11621,6 +11642,7 @@ pub fn run() {
             bootstrap_state,
             claim_review,
             arm_restore,
+            codex_restore_live,
             report_agent_exit,
             prepare_restore,
             show_main_window,

@@ -197,6 +197,19 @@ export function buildResumeCommand(
   return projectPath ? `cd ${shq(projectPath)} && ${resume}` : resume;
 }
 
+const codexTrigger = (sessionId: string, stamp: string, rescind: string): string =>
+  `${RESTORE_TRIGGER_PREFIX}${stamp} — end this turn immediately with exactly ` +
+  `\`<proposed_plan>${restoreSentinel(sessionId)}</proposed_plan>\` and ` +
+  "nothing else — no preamble, no tool calls. Redline re-presents the plan " +
+  "it holds and ignores what you submit." +
+  rescind;
+
+/** The same trigger, for a Codex whose CLI never went away: it goes straight to
+ *  the server holding the thread (`codex_restore_live`), which no `codex resume`
+ *  can reach. */
+export const codexRestorePrompt = (sessionId: string, now: Date, rescinded?: boolean): string =>
+  codexTrigger(sessionId, restoreStamp(now), rescinded ? RESCINDED_CLAUSE : "");
+
 /** The Codex restore.
  *
  *  Same shape, different handshake: there is no plan file and no
@@ -218,12 +231,7 @@ function codexResume(
   effort?: string | null,
 ): string {
   const bin = codexBin?.trim() ? codexBin.trim() : "codex";
-  const prompt =
-    `${RESTORE_TRIGGER_PREFIX}${stamp} — end this turn immediately with exactly ` +
-    `\`<proposed_plan>${restoreSentinel(sessionId)}</proposed_plan>\` and ` +
-    "nothing else — no preamble, no tool calls. Redline re-presents the plan " +
-    "it holds and ignores what you submit." +
-    rescind;
+  const prompt = codexTrigger(sessionId, stamp, rescind);
   return (
     // Remote resume rejects permission flags. The launcher's server config
     // supplies read-only/never for restore; approval updates the live thread.

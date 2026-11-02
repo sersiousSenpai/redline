@@ -668,10 +668,17 @@ fn initialize_params() -> Value {
 /// A directory, or a socket in it, that this user made and nobody else can
 /// write: the launcher's `mktemp -d` gives exactly that. The daemon's routes
 /// take a socket path from any local process, so nothing else is opened.
+///
+/// A socket is read through a link: since codex-cli 0.164 (or earlier; 0.162.1
+/// made a real socket) `--listen unix://<path>` leaves a symlink at `<path>`,
+/// to `/private/tmp/codex-daemon-<uid>/<hash>` (experiment (p)). The private
+/// directory is what keeps other users out, and a directory is never followed:
+/// only its owner can have put a link in it.
 #[cfg(unix)]
 fn ours(path: &Path, dir: bool) -> bool {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
+    let meta = if dir { std::fs::symlink_metadata(path) } else { std::fs::metadata(path) };
+    let Ok(meta) = meta else { return false };
     // SAFETY: getuid has no preconditions and cannot fail.
     let me = unsafe { libc::getuid() };
     let kind = if dir { meta.is_dir() } else { meta.file_type().is_socket() };
